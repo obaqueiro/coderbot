@@ -145,9 +145,20 @@ def _collect_attachments(result, e2e_specs: list[str],
     evidence from scratch, which runs in a fresh subprocess and can fail for reasons
     Claude's own sandboxed tool calls didn't hit. Deduped by resolved path in case both
     sources happen to reference the same file."""
+    agent_files = [Path(p) for p in result.attachments]
     evidence_files = evidence.record_evidence(e2e_specs, e2e_kind)
+    agent_videos = [file for file in agent_files if file.suffix.lower() == ".webm"]
+    if agent_videos:
+        if evidence_files:
+            # The dedicated recorder is canonical when it succeeds; avoid attaching
+            # duplicate raw clips from an agent's earlier manual run.
+            agent_files = [file for file in agent_files if file not in agent_videos]
+        else:
+            stitched = evidence.stitch_playwright_clips(agent_videos)
+            if stitched:
+                agent_files = [file for file in agent_files if file not in agent_videos] + [stitched]
     combined, seen = [], set()
-    for f in [Path(p) for p in result.attachments] + evidence_files:
+    for f in agent_files + evidence_files:
         resolved = f.resolve()
         if resolved not in seen:
             seen.add(resolved)

@@ -27,6 +27,11 @@ def reported_specs(output: str) -> list[str]:
     ]
 
 
+def normalize_spec_files(spec_files: list[str]) -> list[str]:
+    """Remove presentation-only Markdown delimiters from persisted spec names."""
+    return [spec for value in spec_files if (spec := value.strip().strip("`"))]
+
+
 def detect_branch_specs(kind: str | None) -> list[str]:
     """Spec/collection files added/changed on this branch vs the base branch (fallback
     for evidence).
@@ -66,6 +71,7 @@ def record_evidence(spec_files: list[str], kind: str | None) -> list[Path]:
     """Re-run the given spec/collection files with evidence recording forced on;
     return the recorded evidence file(s) — a stitched Playwright video, or the
     generated Newman run report."""
+    spec_files = normalize_spec_files(spec_files)
     if not spec_files:
         log.info("record_evidence: no spec files given — falling back to branch spec detection")
         spec_files = detect_branch_specs(kind)
@@ -153,6 +159,13 @@ def _stitch_to_mp4(clips: list[Path]) -> Path | None:
                     proc.returncode, proc.stderr[-1500:])
         return None
     return out
+
+
+def stitch_playwright_clips(files: list[Path]) -> Path | None:
+    """Stitch non-empty Playwright clips supplied by an agent into one MP4."""
+    clips = [file for file in files if file.suffix.lower() == ".webm" and file.exists()
+             and file.stat().st_size > 0]
+    return _stitch_to_mp4(clips) if clips else None
 
 
 def _record_newman_report(spec_files: list[str]) -> list[Path]:

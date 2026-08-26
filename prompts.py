@@ -150,8 +150,9 @@ APPLY_PR_FEEDBACK = """The user reviewed the PR and requested changes:
     $feedback
 
 Apply the requested changes on branch $branch, keep e2e tests passing and updated,
-commit and push. If the feedback asks you to "attach" or "provide" evidence (a
-screenshot, recording, report, etc.), that means emailing it, NOT committing it to the
-repo — save it under the outbox dir and list it via an `ATTACH:` line as instructed
-above; do not add it to the branch/PR. End with a summary of what changed.
+commit and push. If the feedback asks you to "attach" or "provide" Playwright or
+Newman evidence, run the requested verification but do NOT create or list `ATTACH:`
+evidence files: codebot's dedicated evidence collector will re-run the feature tests
+and attach its single canonical artifact. Do not add evidence to the branch/PR. End
+with a summary of what changed.
 """
