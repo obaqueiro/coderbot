@@ -219,7 +219,7 @@ If the target repo has an e2e harness, the implementation phase adds coverage fo
 it and, once the suite passes, codebot re-runs the feature's own tests to capture
 evidence for the PR email:
 
-- **Playwright**: re-runs the feature's specs with `PW_VIDEO=on` (forces
+- **Playwright**: re-runs the feature's specs with `PICA_E2E_VIDEO=on` (forces
   `video: "on"` in `e2e/playwright.config.ts`), then stitches the resulting
   `.webm` clips from `e2e/test-results/` into a single H.264 `evidence.mp4` with
   ffmpeg (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate

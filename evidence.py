@@ -18,6 +18,15 @@ _SPEC_GLOBS = {
 }
 
 
+def reported_specs(output: str) -> list[str]:
+    """Extract E2E_SPEC paths without carrying Markdown code delimiters into run.sh."""
+    return [
+        spec
+        for line in output.splitlines() if line.startswith("E2E_SPEC:")
+        if (spec := line[len("E2E_SPEC:"):].strip().strip("`"))
+    ]
+
+
 def detect_branch_specs(kind: str | None) -> list[str]:
     """Spec/collection files added/changed on this branch vs the base branch (fallback
     for evidence).
@@ -73,11 +82,13 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     results_dir = E2E_DIR / "test-results"
     before = set(results_dir.rglob("*.webm")) if results_dir.exists() else set()
     specs = [Path(s).name for s in spec_files]
-    log.info("recording evidence: re-running specs %s with PW_VIDEO=on", specs)
+    log.info("recording evidence: re-running specs %s with PICA_E2E_VIDEO=on", specs)
     proc = subprocess.run(
         ["./run.sh", *specs], cwd=E2E_DIR, capture_output=True, text=True,
         timeout=config.E2E_TIMEOUT_SECONDS,
-        env={**os.environ, "PW_VIDEO": "on"},
+        # The target harness exposes this documented opt-in to Playwright's
+        # `video: "on"` setting. PW_VIDEO is not consumed by Playwright configs.
+        env={**os.environ, "PICA_E2E_VIDEO": "on"},
     )
     if proc.returncode != 0:
         log.warning("evidence run exit=%d; stderr tail:\n%s", proc.returncode, proc.stderr[-1500:])
@@ -85,7 +96,7 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     new = sorted(after - before)
     if not new:
         log.warning("no NEW .webm files after evidence run (before=%d, after=%d); "
-                    "check PW_VIDEO wiring and test-results mount, and whether the spec "
+                    "check PICA_E2E_VIDEO wiring and test-results mount, and whether the spec "
                     "skipped itself (bare `./run.sh <spec>` invocation, no extra flags/env). "
                     "Run output tail:\n%s", len(before), len(after), (proc.stdout + proc.stderr)[-1500:])
     videos = new or sorted(after)

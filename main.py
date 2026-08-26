@@ -381,10 +381,7 @@ def do_implement(state: dict) -> None:
         return
     if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
         return
-    state["e2e_specs"] = [
-        line[len("E2E_SPEC:"):].strip()
-        for line in result.output.splitlines() if line.startswith("E2E_SPEC:")
-    ]
+    state["e2e_specs"] = evidence.reported_specs(result.output)
     log.info("implementation reported %d e2e spec(s): %s",
              len(state["e2e_specs"]), state["e2e_specs"])
     if not state["e2e_specs"] and state.get("has_e2e_harness"):
