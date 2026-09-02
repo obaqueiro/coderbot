@@ -25,23 +25,25 @@ Respond with ONLY a JSON object, no other text:
 """
 
 EXPLORE = """You are working autonomously on the $project repo, on branch $branch,
-implementing this improvement from the backlog:
+exploring this improvement from the backlog:
 
     $item
 
-Use the OpenSpec explore workflow: investigate the codebase, clarify the requirements,
-identify integration points, risks, and the simplest solid design. Use the installed
-`openspec` CLI and its local instructions when creating or reading change artifacts. Work everything
-out yourself; only use the NEED_USER_INPUT mechanism for decisions that genuinely
-require the user. End with a concise summary of your conclusions.
+This phase is exploration only. Do not implement the change or modify project code.
+Invoke `coderbot-openspec-workflow`, `openspec-explore`, and `brainstorming`.
+Investigate the codebase, clarify the requirements, identify integration points and
+risks, and find the simplest solid design. For any material decision affecting scope,
+observable behavior, compatibility, or acceptance criteria, return `NEED_USER_INPUT`;
+make minor decisions autonomously. End with a concise summary of your conclusions.
 """
 
-PROPOSE = """Now formalize the plan: use the OpenSpec proposal workflow (openspec CLI) to
-create a change named $slug with proposal.md, design.md, specs, and tasks.md,
-based on your exploration. Requirements:
+PROPOSE = """Invoke `coderbot-openspec-workflow` and `openspec-propose` to formalize
+the exploration as change $slug. Create only OpenSpec artifacts: proposal.md,
+design.md, specs, and tasks.md. Requirements:
 $e2e_note
 When done, output the full text of proposal.md and a summary of the tasks so it can
-be emailed to the user for review.
+be emailed for review. Do not implement, commit, push, create a PR, merge, or archive;
+stop for coderbot's proposal approval.
 """
 
 CLASSIFY_APPROVAL_REPLY = """The user replied to the proposal-review email with:
@@ -68,25 +70,56 @@ proposal for another review round. Do not treat this as approval — the user mu
 explicitly approve before implementation begins.
 """
 
-IMPLEMENT = """The user approved the proposal. Implement the openspec change $slug
-fully using the OpenSpec apply workflow: work through every task in tasks.md, marking them
-complete. Mandatory:
+IMPLEMENT = """The user approved the proposal. Invoke `coderbot-openspec-workflow`,
+`openspec-apply-change`, and `test-driven-development` to implement change $slug.
+Work through every task in tasks.md, marking each complete only after its test passes.
+If a test or technical check fails, invoke `systematic-debugging` before fixing it.
+Mandatory:
 $e2e_note
-- Commit your work on branch $branch with clear messages. Do NOT push yet. Do not
-  commit any evidence file (screenshot, recording, report) — those are emailed, never
+- Commit your work on branch $branch with clear messages.
+- Coderbot retains integration authority: do not push, create a PR, merge, or archive.
+- Do not commit any evidence file (screenshot, recording, report) - those are emailed, never
   committed to the repo (see the evidence contract above).
 $e2e_report_note
 """
 
-FIX_E2E = """The e2e suite failed. Fix the issues and re-commit. Failure output:
+VERIFY = """Invoke `coderbot-openspec-workflow` for the verification phase of change
+$slug. Run fresh, complete relevant verification commands in this phase; do not reuse
+prior evidence. Report each command and result. Strictly validate the active OpenSpec
+change and confirm all OpenSpec apply tasks are complete. Emit exactly one completion contract as the final standalone line, with no
+text after it:
+QUALITY_GATE: {"status":"pass","commands":["<command: result>"],"openspec":"pass","tasks":"N/N"}
+"""
+
+INTERNAL_REVIEW = """Invoke `coderbot-openspec-workflow` for internal review of change
+$slug. Internal review is mandatory. Invoke `requesting-code-review` with a fresh
+reviewer subagent. Prior test evidence and future external review are not substitutes.
+Fix every Critical or Important finding, rerun tests covering the fixes, and obtain a clean re-review.
+Commit all review fixes before emitting the pass contract. Emit
+exactly one completion contract as the final standalone line, with no text after it:
+INTERNAL_REVIEW: {"status":"pass","critical":0,"important":0,"tests":["<command: result>"]}
+"""
+
+FIX_E2E = """The e2e suite failed. Invoke `coderbot-openspec-workflow` and
+`systematic-debugging`. Establish the root cause before any edit and, when applicable, write
+and witness a regression test fail, then make the minimal fix and run focused tests to
+GREEN. Re-commit tracked repairs, but do not push. Do not create a PR. Do not archive the
+OpenSpec change, and do not claim the task or branch is complete. Failure output:
 
 $output
 """
 
-PR_BODY = """Create a pull request for the current branch $branch against $base_branch using
-`gh pr create` (push the branch first). Title it after the improvement; write a clear
-body describing the change, the e2e coverage added, and link the openspec change.
-End your response with the PR URL on its own line prefixed with `PR_URL: `.
+FIX_ARCHIVE = """OpenSpec archival failed with this error:
+
+$error
+
+The user provided this recovery guidance:
+
+$guidance
+
+Diagnose and fix the failure. Modify OpenSpec planning and spec files only, and commit
+those fixes. Do not modify project code, do not run `openspec archive`, do not push,
+and do not create a PR. Coderbot will retry archival after this turn.
 """
 
 ADDRESS_REVIEW = """An automated code reviewer (OpenCodeReview) reviewed your pull
@@ -98,8 +131,8 @@ $comments
 For each comment: if it points to a genuine problem, fix it properly. If it is a
 false positive or not worth acting on, do NOT change code just to silence it — briefly
 note why you're leaving it. Keep the Playwright e2e tests passing and updated. Commit
-your changes on branch $branch with clear messages and push (the reviewer re-runs on
-the new commit). Do not commit any evidence file (screenshot, recording, report) —
+your changes on branch $branch with clear messages; coderbot will push afterward.
+Do not commit any evidence file (screenshot, recording, report) —
 those are emailed, never committed to the repo (see the evidence contract above). End
 with a short summary of what you changed and what you left as-is and why.
 """
@@ -126,7 +159,7 @@ $threads
 For each: if it points to a genuine problem, fix it properly. If it is not worth acting
 on, leave a brief reply explaining why (e.g. via `gh pr comment` or a reply on the
 thread) rather than silently ignoring it. Keep e2e tests passing and updated. Commit
-your changes on branch $branch with clear messages and push. Do not commit any
+your changes on branch $branch with clear messages; coderbot will push afterward. Do not commit any
 evidence file (screenshot, recording, report) — those are emailed, never committed to
 the repo (see the evidence contract above). End with a short summary of what you
 changed and how each thread was addressed.
@@ -139,7 +172,7 @@ history:
 $paths
 
 For each one: remove it from git (`git rm` it, or `git rm --cached` if you want to keep
-the local file), commit the removal, and push. Then save the file(s) under
+the local file) and commit the removal without pushing. Then save the file(s) under
 $outbox_dir/ instead and list each one's ABSOLUTE path on its own line starting with
 `ATTACH: ` in your response, so it can be attached to the email. End with a short
 confirmation of what was removed and re-attached.
@@ -150,7 +183,7 @@ APPLY_PR_FEEDBACK = """The user reviewed the PR and requested changes:
     $feedback
 
 Apply the requested changes on branch $branch, keep e2e tests passing and updated,
-commit and push. If the feedback asks you to "attach" or "provide" Playwright or
+and commit without pushing; coderbot will push afterward. If the feedback asks you to "attach" or "provide" Playwright or
 Newman evidence, run the requested verification but do NOT create or list `ATTACH:`
 evidence files: codebot's dedicated evidence collector will re-run the feature tests
 and attach its single canonical artifact. Do not add evidence to the branch/PR. End

@@ -123,6 +123,8 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
 
 def _invoke(args: list[str], prompt: str) -> ClaudeResult:
     cmd = ["claude", *args, "-p", prompt, "--model", config.CLAUDE_MODEL,
+           "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
+           "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
            "--dangerously-skip-permissions", "--output-format", "json"]
     log.info("claude %s model=%s (prompt %d chars); config %s",
              " ".join(args) or "run", config.CLAUDE_MODEL, len(prompt), _config_report())

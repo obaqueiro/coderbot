@@ -29,6 +29,12 @@ AGENT = os.environ.get("CODEBOT_AGENT") or "claude"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or "claude-opus-4-8"
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL") or ""
 
+SUPERPOWERS_VERSION = "v6.3.0"
+SUPERPOWERS_PLUGIN_DIR = Path(os.environ.get(
+    "CODEBOT_SUPERPOWERS_PLUGIN_DIR") or "/opt/coderbot/plugins/node_modules/superpowers")
+BRIDGE_PLUGIN_DIR = Path(os.environ.get(
+    "CODEBOT_BRIDGE_PLUGIN_DIR") or "/opt/coderbot/agent-plugin")
+
 # DEBUG surfaces per-email/video/git detail in `docker compose logs`.
 LOG_LEVEL = (os.environ.get("CODEBOT_LOG_LEVEL") or "DEBUG").upper()
 
@@ -40,6 +46,8 @@ E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "3600"))
 # Cap the e2e-fails -> resume-to-fix -> re-run loop so a failure Claude can't resolve
 # (e.g. an external resource stuck from a prior run) doesn't spin forever.
 E2E_MAX_ROUNDS = int(os.environ.get("CODEBOT_E2E_MAX_ROUNDS", "5"))
+QUALITY_GATE_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUALITY_GATE_MAX_ROUNDS", "3"))
+ARCHIVE_MAX_ROUNDS = int(os.environ.get("CODEBOT_ARCHIVE_MAX_ROUNDS", "3"))
 
 # After opening a PR, codebot waits for the "Code Review" GitHub Action
 # (OpenCodeReview) to finish and addresses its comments before notifying the user.

@@ -5,6 +5,7 @@ import logging
 import re
 import subprocess
 import time
+from datetime import date
 from pathlib import Path
 
 import agent_runner
@@ -95,6 +96,63 @@ def handle_result(state: dict, result, phase: str) -> bool:
         state["state"] = "WAIT_REPLY"
         return True
     return False
+
+
+def _parse_completion_contract(output: str, marker: str) -> tuple[dict | None, str | None]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    prefix = marker + ":"
+    marked = [line for line in lines if line.startswith(prefix)]
+    if output.count(prefix) != 1 or len(marked) != 1:
+        return None, f"expected exactly one {marker} contract"
+    if not lines or lines[-1] != marked[0]:
+        return None, f"{marker} contract must be the final nonblank line"
+    try:
+        value = json.loads(marked[0][len(prefix):].strip())
+    except ValueError:
+        return None, f"{marker} contract contains malformed JSON"
+    if not isinstance(value, dict):
+        return None, f"{marker} contract must contain a JSON object"
+    return value, None
+
+
+def _nonempty_strings(value) -> bool:
+    return (isinstance(value, list) and bool(value) and
+            all(isinstance(item, str) and item.strip() for item in value))
+
+
+def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
+    value, reason = _parse_completion_contract(output, "QUALITY_GATE")
+    if reason:
+        return None, reason
+    if set(value) != {"status", "commands", "openspec", "tasks"}:
+        return None, "quality gate has unexpected or missing fields"
+    if value.get("status") != "pass":
+        return None, "quality gate status is not pass"
+    if not _nonempty_strings(value.get("commands")):
+        return None, "quality gate commands must contain nonempty strings"
+    if value.get("openspec") != "pass":
+        return None, "OpenSpec validation did not pass"
+    match = re.fullmatch(r"(\d+)/(\d+)", value.get("tasks", ""))
+    if not match or int(match.group(1)) != int(match.group(2)):
+        return None, "OpenSpec tasks are incomplete"
+    return value, None
+
+
+def parse_internal_review(output: str) -> tuple[dict | None, str | None]:
+    value, reason = _parse_completion_contract(output, "INTERNAL_REVIEW")
+    if reason:
+        return None, reason
+    if set(value) != {"status", "critical", "important", "tests"}:
+        return None, "internal review has unexpected or missing fields"
+    if value.get("status") != "pass":
+        return None, "internal review status is not pass"
+    for severity in ("critical", "important"):
+        count = value.get(severity)
+        if type(count) is not int or count != 0:
+            return None, f"internal review has unresolved {severity} findings"
+    if not _nonempty_strings(value.get("tests")):
+        return None, "internal review tests must contain nonempty strings"
+    return value, None
 
 
 # Video extensions are the strongest signal on their own (repos essentially never
@@ -398,13 +456,99 @@ def do_implement(state: dict) -> None:
     if not state["e2e_specs"] and state.get("has_e2e_harness"):
         log.warning("no E2E_SPEC lines in implementation output — feature may lack tests")
     state["e2e_round"] = 0
-    state["state"] = "E2E"
+    state["verify_round"] = 0
+    state["state"] = "VERIFYING"
+
+
+def _gate_failed(state: dict, phase: str, counter: str, reason: str) -> None:
+    state[counter] = state.get(counter, 0) + 1
+    log.warning("%s result rejected (round %d/%d): %s", phase, state[counter],
+                config.QUALITY_GATE_MAX_ROUNDS, reason)
+    if state[counter] < config.QUALITY_GATE_MAX_ROUNDS:
+        state["state"] = phase
+        return
+    email(state, f"{phase.lower().replace('_', ' ')} stuck - needs your help",
+          f"Task: {state['item']}\n\nThe {phase.lower().replace('_', ' ')} gate has failed "
+          f"{state[counter]} times. Latest reason: {reason}\n\nReply with guidance to continue.")
+    state["return_state"] = phase
+    state["state"] = "WAIT_REPLY"
+
+
+def _complete_verify(state: dict, result) -> None:
+    if handle_result(state, result, "VERIFYING"):
+        return
+    parsed, reason = parse_quality_gate(result.output)
+    if parsed is None:
+        _gate_failed(state, "VERIFYING", "verify_round", reason)
+        return
+    try:
+        slug = _validated_slug(state.get("slug"))
+        _run_checked(["openspec", "validate", slug, "--strict", "--no-interactive"])
+        instructions = json.loads(_run_checked([
+            "openspec", "instructions", "apply", "--change", slug, "--json",
+        ]))
+        progress = instructions.get("progress") if isinstance(instructions, dict) else None
+        if not isinstance(progress, dict) or instructions.get("state") != "all_done":
+            raise ValueError("OpenSpec apply state is not all_done")
+        total = progress.get("total")
+        complete = progress.get("complete")
+        remaining = progress.get("remaining")
+        if any(type(value) is not int for value in (total, complete, remaining)) or \
+                remaining != 0 or complete != total:
+            raise ValueError("OpenSpec apply progress is incomplete")
+    except Exception as error:
+        _gate_failed(state, "VERIFYING", "verify_round", str(error))
+        return
+    state.pop("verify_round", None)
+    state["review_gate_round"] = 0
+    state["state"] = "INTERNAL_REVIEW"
+
+
+def do_verify(state: dict) -> None:
+    result = agent_runner.resume(
+        state["session_id"], prompts.render(prompts.VERIFY, slug=state["slug"]))
+    _complete_verify(state, result)
+
+
+def _complete_internal_review(state: dict, result) -> None:
+    if handle_result(state, result, "INTERNAL_REVIEW"):
+        return
+    parsed, reason = parse_internal_review(result.output)
+    if parsed is None:
+        _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason)
+        return
+    state.pop("review_gate_round", None)
+    state["state"] = "E2E" if state.get("has_e2e_harness") else "ARCHIVING"
+
+
+def do_internal_review(state: dict) -> None:
+    result = agent_runner.resume(
+        state["session_id"], prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
+    _complete_internal_review(state, result)
+
+
+def _tracked_snapshot() -> tuple[str, str]:
+    return (git("rev-parse", "HEAD"),
+            git("status", "--porcelain", "--untracked-files=no"))
+
+
+def _finish_e2e_repair(state: dict) -> None:
+    before = (state.pop("e2e_repair_head"), state.pop("e2e_repair_status"))
+    if _tracked_snapshot() != before:
+        state["verify_round"] = 0
+        state["state"] = "VERIFYING"
+    else:
+        state["state"] = "E2E"
 
 
 def do_e2e(state: dict) -> None:
+    if "e2e_repair_head" in state and "e2e_repair_status" in state:
+        _finish_e2e_repair(state)
+        if state["state"] != "E2E":
+            return
     if not state.get("has_e2e_harness"):
         log.info("no e2e harness detected for this task; skipping the e2e gate")
-        state["state"] = "OPEN_PR"
+        state["state"] = "ARCHIVING"
         return
     log.info("running e2e suite (e2e/run.sh)")
     passed, output = evidence.run_suite()
@@ -425,25 +569,218 @@ def do_e2e(state: dict) -> None:
             state["return_state"] = "E2E"
             state["state"] = "WAIT_REPLY"
             return
+        state["e2e_repair_head"], state["e2e_repair_status"] = _tracked_snapshot()
+        save_state(state)
         result = agent_runner.resume(state["session_id"], prompts.render(prompts.FIX_E2E, output=output))
-        if handle_result(state, result, "IMPLEMENTING"):
+        if handle_result(state, result, "E2E"):
             return
+        _finish_e2e_repair(state)
         return  # loop re-enters E2E and re-runs the suite
     log.info("e2e suite PASSED")
     state["e2e_round"] = 0
-    state["state"] = "OPEN_PR"
+    state["state"] = "ARCHIVING"
+
+
+def _run_checked(command: list[str]) -> str:
+    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True)
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(f"{' '.join(command)} exited {proc.returncode}: {detail}")
+    return proc.stdout.strip()
+
+
+def _validated_slug(value) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value):
+        raise ValueError("change slug must be safe kebab-case")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError("dated change slug must include a kebab-case name")
+    dated = re.match(r"^(\d{4}-\d{2}-\d{2})-", value)
+    if dated:
+        try:
+            date.fromisoformat(dated.group(1))
+        except ValueError as error:
+            raise ValueError("change slug has an invalid date prefix") from error
+    return value
+
+
+def _validated_archive_path(value, slug: str) -> Path:
+    if not isinstance(value, str):
+        raise ValueError("archive path must be a relative string")
+    relative = Path(value)
+    if relative.is_absolute() or relative.parts[:3] != ("openspec", "changes", "archive") or \
+            len(relative.parts) != 4:
+        raise ValueError("archive path must be a direct child of openspec/changes/archive")
+    name = relative.name
+    if re.match(r"^\d{4}-\d{2}-\d{2}-", slug):
+        if name != slug:
+            raise ValueError("archive path does not match the dated change slug")
+    else:
+        match = re.fullmatch(rf"(\d{{4}}-\d{{2}}-\d{{2}})-{re.escape(slug)}", name)
+        if not match:
+            raise ValueError("archive path does not match the change slug")
+        try:
+            date.fromisoformat(match.group(1))
+        except ValueError as error:
+            raise ValueError("archive path has an invalid date prefix") from error
+
+    repo = config.REPO_PATH.resolve()
+    archive_root = repo / "openspec" / "changes" / "archive"
+    target = (config.REPO_PATH / relative).resolve()
+    if target.parent != archive_root:
+        raise ValueError("archive path resolves outside openspec/changes/archive")
+    return target
+
+
+def _archive_target(state: dict) -> Path:
+    slug = _validated_slug(state.get("slug"))
+    if state.get("archive_path"):
+        return _validated_archive_path(state["archive_path"], slug)
+    active = config.REPO_PATH / "openspec" / "changes" / slug
+    archive_root = config.REPO_PATH / "openspec" / "changes" / "archive"
+    if archive_root.resolve() != config.REPO_PATH.resolve() / "openspec" / "changes" / "archive":
+        raise ValueError("archive root resolves outside the repository")
+    matches = list(archive_root.glob(f"????-??-??-{slug}")) if archive_root.is_dir() else []
+    if not active.exists() and len(matches) == 1:
+        target = matches[0]
+    elif not active.exists() and len(matches) > 1:
+        raise RuntimeError(f"multiple archives match change {slug}")
+    else:
+        name = slug if re.match(r"^\d{4}-\d{2}-\d{2}-", slug) else f"{date.today():%Y-%m-%d}-{slug}"
+        target = archive_root / name
+    relative = str(target.relative_to(config.REPO_PATH))
+    target = _validated_archive_path(relative, slug)
+    state["archive_path"] = relative
+    save_state(state)
+    return target
+
+
+def _archive_failed(state: dict, error: Exception) -> None:
+    state["archive_error"] = str(error)
+    state["archive_round"] = state.get("archive_round", 0) + 1
+    log.warning("archive failed (round %d/%d): %s", state["archive_round"],
+                config.ARCHIVE_MAX_ROUNDS, error)
+    if state["archive_round"] < config.ARCHIVE_MAX_ROUNDS:
+        state["state"] = "ARCHIVING"
+        return
+    email(state, "OpenSpec archival stuck - needs your help",
+          f"Task: {state['item']}\n\nArchival failed {state['archive_round']} times. "
+          f"Latest error: {error}\n\nReply with guidance to retry.")
+    state["return_state"] = "ARCHIVING"
+    state["state"] = "WAIT_REPLY"
+
+
+def _changes_are_archive_outputs(state: dict, status: str) -> bool:
+    allowed = (
+        "openspec/specs",
+        f"openspec/changes/{state['slug']}",
+        state["archive_path"],
+    )
+    for line in status.splitlines():
+        paths = line[3:].split(" -> ")
+        if any(not any(path.strip('"') == root or path.strip('"').startswith(root + "/")
+                       for root in allowed) for path in paths):
+            return False
+    return True
+
+
+def do_archive(state: dict) -> None:
+    try:
+        target = _archive_target(state)
+        active = config.REPO_PATH / "openspec" / "changes" / state["slug"]
+        if active.exists() and target.exists():
+            raise RuntimeError("active change and expected archive both exist")
+        if active.exists():
+            if git("status", "--porcelain", "--untracked-files=no"):
+                raise RuntimeError("tracked working tree must be clean before archival")
+            if git("status", "--porcelain", "--untracked-files=all", "--", "openspec/"):
+                raise RuntimeError("OpenSpec tree must be clean before archival")
+            _run_checked(["openspec", "archive", state["slug"], "-y", "--json"])
+        elif not target.is_dir():
+            raise RuntimeError("active change and expected archive are both absent")
+        if not target.is_dir():
+            raise RuntimeError("archive command did not create the expected archive")
+
+        _run_checked(["openspec", "validate", "--specs", "--strict", "--no-interactive"])
+        _run_checked(["openspec", "validate", "--archived", "--strict", "--no-interactive"])
+        status = git("status", "--porcelain", "--untracked-files=all")
+        if status and not _changes_are_archive_outputs(state, status):
+            raise RuntimeError("archival produced unrelated tracked changes")
+        if status:
+            paths = ("openspec/specs", f"openspec/changes/{state['slug']}",
+                     state["archive_path"])
+            git("add", "-A", "--", *paths)
+            git("commit", "-m", "chore: archive OpenSpec change", "--", *paths)
+        state.pop("archive_round", None)
+        state.pop("archive_error", None)
+        state["state"] = "OPEN_PR"
+    except Exception as error:
+        _archive_failed(state, error)
+
+
+def _https_url(value) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"https://\S+", value.strip()):
+        raise RuntimeError(f"expected one HTTPS URL, got: {value!r}")
+    return value.strip()
+
+
+def _resume_archiving(state: dict, reason: str) -> None:
+    log.warning("OPEN_PR archival precondition failed: %s", reason)
+    state.pop("pr_url", None)
+    state.pop("pr_summary", None)
+    state["archive_error"] = reason
+    state["archive_round"] = 0
+    state["state"] = "ARCHIVING"
 
 
 def do_open_pr(state: dict) -> None:
-    result = agent_runner.resume(state["session_id"], prompts.render(
-        prompts.PR_BODY, branch=state["branch"], base_branch=config.BASE_BRANCH))
-    if handle_result(state, result, "IMPLEMENTING"):
+    if not state.get("archive_path"):
+        state["verify_round"] = 0
+        state.pop("review_gate_round", None)
+        state["state"] = "VERIFYING"
         return
-    match = re.search(r"PR_URL:\s*(\S+)", result.output)
-    if not match:
-        raise RuntimeError(f"no PR_URL in output: {result.output[-500:]}")
-    state["pr_url"] = match.group(1)
-    state["pr_summary"] = result.output  # reused by the "PR ready" email after review passes
+    slug = _validated_slug(state.get("slug"))
+    target = _validated_archive_path(state["archive_path"], slug)
+    reference = str(target.relative_to(config.REPO_PATH.resolve()))
+    active = config.REPO_PATH / "openspec" / "changes" / slug
+    if not target.is_dir():
+        _resume_archiving(state, "validated archive directory is missing")
+        return
+    if active.exists():
+        _resume_archiving(state, "active OpenSpec change still exists")
+        return
+    if git("status", "--porcelain", "--untracked-files=all", "--", "openspec/"):
+        _resume_archiving(state, "OpenSpec tree is dirty before PR creation")
+        return
+    if not git("ls-tree", "-r", "--name-only", "HEAD", "--", reference).strip():
+        _resume_archiving(state, "archive is not committed in HEAD")
+        return
+    body = f"Implements: {state['item']}\n\nOpenSpec archive: `{reference}`"
+    if state.get("pr_url"):
+        state["pr_url"] = _https_url(state["pr_url"])
+    else:
+        git("push", "-u", "origin", state["branch"])
+        listed = _run_checked([
+            "gh", "pr", "list", "--state", "open", "--head", state["branch"],
+            "--json", "url,state", "--limit", "1",
+        ])
+        try:
+            existing = json.loads(listed)
+        except ValueError as error:
+            raise RuntimeError("gh pr list returned malformed JSON") from error
+        if not isinstance(existing, list) or len(existing) > 1 or \
+                any(not isinstance(item, dict) for item in existing):
+            raise RuntimeError("gh pr list returned an invalid or ambiguous result")
+        if existing and existing[0].get("state") not in ("OPEN", "CLOSED", "MERGED"):
+            raise RuntimeError("gh pr list returned an invalid pull-request state")
+        if existing and existing[0]["state"] == "OPEN":
+            state["pr_url"] = _https_url(existing[0].get("url"))
+        else:
+            output = _run_checked([
+                "gh", "pr", "create", "--base", config.BASE_BRANCH, "--head", state["branch"],
+                "--title", state["item"], "--body", body,
+            ])
+            state["pr_url"] = _https_url(output)
+    state["pr_summary"] = body
     log.info("PR opened: %s", state["pr_url"])
     if not state.get("has_code_review"):
         log.info("no Code Review workflow detected for this task; finalizing without a review wait")
@@ -632,8 +969,7 @@ def do_address_review(state: dict) -> None:
         return
     if _scrub_evidence_from_repo(state, "ADDRESS_REVIEW") is None:
         return
-    state.pop("review_comments", None)
-    _enter_review_wait(state)  # the push re-triggers Code Review on the new commit
+    _queue_push(state, "review")
 
 
 # ---------------------------------------------------------------- pre-merge thread resolution
@@ -734,16 +1070,15 @@ def do_merge_reply(state: dict, reply: str) -> None:
         r = agent_runner.resume(
             state["session_id"],
             prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
-        if handle_result(state, r, "IMPLEMENTING"):
+        if handle_result(state, r, "APPLY_PR_FEEDBACK"):
             return
-        extra_attachments = _scrub_evidence_from_repo(state, "IMPLEMENTING")
+        extra_attachments = _scrub_evidence_from_repo(state, "APPLY_PR_FEEDBACK")
         if extra_attachments is None:
             return
         attachments = _collect_attachments(r, state.get("e2e_specs", []), state.get("e2e_kind"))
         attachments += [a for a in extra_attachments if a.resolve() not in {p.resolve() for p in attachments}]
-        email(state, "PR updated",
-              f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", attachments)
-        return  # stay in WAIT_MERGE
+        _queue_push(state, "feedback", r.output, attachments)
+        return
     # merge
     info = json.loads(subprocess.run(
         ["gh", "pr", "view", state["pr_url"], "--json", "state,mergeable"],
@@ -786,7 +1121,9 @@ def do_merge_reply(state: dict, reply: str) -> None:
               f"PR merged, but I could not find this item in the doc to strike it "
               f"through:\n\n{state['item']}\n\nPlease mark it manually.")
     for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
-                "pr_thread_round", "pr_thread_notified"):
+                "pr_thread_round", "pr_thread_notified", "verify_round", "review_gate_round",
+                "archive_round", "archive_path", "e2e_repair_head", "e2e_repair_status",
+                "push_context", "archive_error"):
         state.pop(key, None)
     state["state"] = "IDLE"
 
@@ -812,7 +1149,41 @@ def do_address_pr_threads(state: dict) -> None:
         return
     if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
         return
-    _finish_address_pr_threads(state)
+    _queue_push(state, "threads")
+
+
+def _queue_push(state: dict, continuation: str, output: str = "",
+                attachments: list[Path] | None = None) -> None:
+    state["push_context"] = {
+        "continuation": continuation,
+        "output": str(output),
+        "attachments": [str(path) for path in attachments or []],
+    }
+    state["state"] = "PUSHING"
+    save_state(state)
+
+
+def do_push(state: dict) -> None:
+    context = state.get("push_context")
+    if not isinstance(context, dict):
+        raise RuntimeError("PUSHING state is missing push_context")
+    continuation = context.get("continuation")
+    if continuation not in ("review", "feedback", "threads"):
+        raise RuntimeError(f"invalid push continuation: {continuation!r}")
+
+    git("push", "origin", state["branch"])
+    if continuation == "review":
+        state.pop("review_comments", None)
+        _enter_review_wait(state)
+    elif continuation == "feedback":
+        attachments = [Path(path) for path in context.get("attachments", [])]
+        email(state, "PR updated",
+              f"Applied your feedback.\nPR: {state['pr_url']}\n\n{context.get('output', '')}",
+              attachments)
+        state["state"] = "WAIT_MERGE"
+    else:
+        _finish_address_pr_threads(state)
+    state.pop("push_context", None)
 
 
 # ---------------------------------------------------------------- loop
@@ -822,10 +1193,14 @@ PHASES = {
     "EXPLORING": do_explore,
     "PROPOSING": do_propose,
     "IMPLEMENTING": do_implement,
+    "VERIFYING": do_verify,
+    "INTERNAL_REVIEW": do_internal_review,
     "E2E": do_e2e,
+    "ARCHIVING": do_archive,
     "OPEN_PR": do_open_pr,
     "ADDRESS_REVIEW": do_address_review,
     "ADDRESS_PR_THREADS": do_address_pr_threads,
+    "PUSHING": do_push,
 }
 
 # WAIT_REVIEW polls the Code Review action rather than the inbox, but shares the
@@ -930,9 +1305,11 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
           "Remote branches and PRs were left untouched. I'll pick up the next pending item "
           "from the backlog doc.", new_thread=new_thread)
     for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
-                "return_state", "review_since", "review_round", "review_run_link",
-                "review_comment_watermark", "review_comments", "pr_summary",
-                "pr_threads", "pr_thread_round", "pr_thread_notified"):
+                 "return_state", "review_since", "review_round", "review_run_link",
+                 "review_comment_watermark", "review_comments", "pr_summary",
+                 "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
+                 "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
+                 "e2e_repair_status", "push_context", "archive_error"):
         state.pop(key, None)
     state["state"] = "IDLE"
 
@@ -971,25 +1348,99 @@ def _handle_reply(state: dict, reply: str) -> None:
         # Read return_state without popping: if a later step here raises, the state
         # stays WAIT_REPLY with return_state intact so the retry re-runs cleanly.
         phase = state["return_state"]
+        if phase in ("VERIFYING", "INTERNAL_REVIEW"):
+            counter = "verify_round" if phase == "VERIFYING" else "review_gate_round"
+            state[counter] = 0
+            template = prompts.VERIFY if phase == "VERIFYING" else prompts.INTERNAL_REVIEW
+            prompt = (f"User recovery guidance:\n{reply}\n\n" +
+                      prompts.render(template, slug=state["slug"]))
+            result = agent_runner.resume(state["session_id"], prompt)
+            state.pop("return_state", None)
+            if phase == "VERIFYING":
+                _complete_verify(state, result)
+            else:
+                _complete_internal_review(state, result)
+            return
+        if phase == "ARCHIVING":
+            result = agent_runner.resume(state["session_id"], prompts.render(
+                prompts.FIX_ARCHIVE,
+                error=state.get("archive_error", "unknown archival failure"),
+                guidance=reply,
+            ))
+            if handle_result(state, result, "ARCHIVING"):
+                return
+            state["archive_round"] = 0
+            state["state"] = "ARCHIVING"
+            state.pop("return_state", None)
+            return
         result = agent_runner.resume(state["session_id"], reply)
         if handle_result(state, result, phase):
             return  # re-questioned; handle_result reset return_state for the new phase
         next_state = {"EXPLORING": "PROPOSING", "PROPOSING": "WAIT_APPROVAL",
-                      "IMPLEMENTING": "E2E", "E2E": "E2E", "ADDRESS_REVIEW": "WAIT_REVIEW",
-                      "ADDRESS_PR_THREADS": "WAIT_MERGE"}[phase]
+                      "IMPLEMENTING": "VERIFYING", "E2E": "E2E", "ADDRESS_REVIEW": "WAIT_REVIEW",
+                      "ADDRESS_PR_THREADS": "WAIT_MERGE",
+                      "APPLY_PR_FEEDBACK": "WAIT_MERGE"}[phase]
         if next_state == "WAIT_APPROVAL":
             email(state, "proposal for review",
                   f"{result.output}\n\nReply with your approval or requested changes.")
         if next_state == "WAIT_REVIEW":
-            state.pop("review_comments", None)
-            _enter_review_wait(state)  # the push re-triggers Code Review on the new commit
+            if _scrub_evidence_from_repo(state, phase) is None:
+                return
+            state.pop("return_state", None)
+            _queue_push(state, "review")
+            return
         elif phase == "ADDRESS_PR_THREADS":
-            _finish_address_pr_threads(state)  # resolves the threads, then re-enters WAIT_MERGE
+            if _scrub_evidence_from_repo(state, phase) is None:
+                return
+            state.pop("return_state", None)
+            _queue_push(state, "threads")
+            return
+        elif phase == "APPLY_PR_FEEDBACK":
+            extra_attachments = _scrub_evidence_from_repo(state, phase)
+            if extra_attachments is None:
+                return
+            attachments = _collect_attachments(
+                result, state.get("e2e_specs", []), state.get("e2e_kind"))
+            existing = {path.resolve() for path in attachments}
+            attachments += [path for path in extra_attachments if path.resolve() not in existing]
+            state.pop("return_state", None)
+            _queue_push(state, "feedback", result.output, attachments)
+            return
         else:
             if phase == "E2E":
                 state["e2e_round"] = 0  # the user's guidance earns a fresh set of attempts
-            state["state"] = next_state
+                if "e2e_repair_head" in state and "e2e_repair_status" in state:
+                    _finish_e2e_repair(state)
+                else:
+                    state["state"] = "E2E"
+            else:
+                state["state"] = next_state
         state.pop("return_state", None)
+
+
+def validate_managed_runtime() -> None:
+    required = [
+        ("Superpowers skill tree",
+         config.SUPERPOWERS_PLUGIN_DIR / "skills/using-superpowers/SKILL.md"),
+        ("bridge manifest", config.BRIDGE_PLUGIN_DIR / ".claude-plugin/plugin.json"),
+        ("bridge skill",
+         config.BRIDGE_PLUGIN_DIR / "skills/coderbot-openspec-workflow/SKILL.md"),
+    ]
+    if config.AGENT == "claude":
+        required.append(("Superpowers Claude manifest",
+                         config.SUPERPOWERS_PLUGIN_DIR / ".claude-plugin/plugin.json"))
+    elif config.AGENT == "opencode":
+        required.extend([
+            ("Superpowers OpenCode entrypoint",
+             config.SUPERPOWERS_PLUGIN_DIR / ".opencode/plugins/superpowers.js"),
+            ("bridge OpenCode package", config.BRIDGE_PLUGIN_DIR / "package.json"),
+            ("bridge OpenCode entrypoint",
+             config.BRIDGE_PLUGIN_DIR / ".opencode/plugins/coderbot-openspec.js"),
+        ])
+
+    for label, path in required:
+        if not path.is_file():
+            raise SystemExit(f"managed runtime unavailable: missing {label} at {path}")
 
 
 def main() -> None:
@@ -998,6 +1449,7 @@ def main() -> None:
     if config.AGENT == "opencode" and (
             "/" not in config.OPENCODE_MODEL or config.OPENCODE_MODEL.endswith("/")):
         raise SystemExit("OPENCODE_MODEL must be set to provider/model when CODEBOT_AGENT=opencode")
+    validate_managed_runtime()
     if not config.USER_EMAIL:
         raise SystemExit("CODEBOT_USER_EMAIL must be set in .env")
     if not config.DOC_ID:

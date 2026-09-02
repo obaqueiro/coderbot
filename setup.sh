@@ -40,7 +40,8 @@ print_current_settings() {
   echo "Current non-secret settings:"
   for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GIT_AUTHOR_NAME \
     GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_MODEL OPENCODE_PROVIDER OPENCODE_MODEL \
-    CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_BASE_BRANCH; do
+    CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_QUALITY_GATE_MAX_ROUNDS \
+    CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH; do
     value="$(existing_value "$var")"
     if [ -n "$value" ]; then
       echo "  - $var=$value"
@@ -342,6 +343,22 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
     "Optional: log verbosity — DEBUG traces every email, video, and git call; INFO is quieter." \
     "DEBUG")
 
+  while true; do
+    CODEBOT_QUALITY_GATE_MAX_ROUNDS=$(prompt_var "CODEBOT_QUALITY_GATE_MAX_ROUNDS" \
+      "Optional: maximum verification/internal-review repair rounds." \
+      "3")
+    [[ "$CODEBOT_QUALITY_GATE_MAX_ROUNDS" =~ ^[1-9][0-9]*$ ]] && break
+    echo "  -> must be a positive integer." >&2
+  done
+
+  while true; do
+    CODEBOT_ARCHIVE_MAX_ROUNDS=$(prompt_var "CODEBOT_ARCHIVE_MAX_ROUNDS" \
+      "Optional: maximum OpenSpec archive repair rounds." \
+      "3")
+    [[ "$CODEBOT_ARCHIVE_MAX_ROUNDS" =~ ^[1-9][0-9]*$ ]] && break
+    echo "  -> must be a positive integer." >&2
+  done
+
   CLAUDE_API_KEY=""
   if [ "$CODEBOT_AGENT" = "claude" ]; then
     CLAUDE_API_KEY=$(prompt_var "CLAUDE_API_KEY" \
@@ -434,6 +451,8 @@ OPENCODE_PROVIDER=$OPENCODE_PROVIDER
 OPENCODE_MODEL=$OPENCODE_MODEL
 CODEBOT_USER_EMAIL=$CODEBOT_USER_EMAIL
 CODEBOT_LOG_LEVEL=$CODEBOT_LOG_LEVEL
+CODEBOT_QUALITY_GATE_MAX_ROUNDS=$CODEBOT_QUALITY_GATE_MAX_ROUNDS
+CODEBOT_ARCHIVE_MAX_ROUNDS=$CODEBOT_ARCHIVE_MAX_ROUNDS
 CODEBOT_BASE_BRANCH=$CODEBOT_BASE_BRANCH
 CLAUDE_API_KEY=$CLAUDE_API_KEY
 EOF
@@ -443,7 +462,8 @@ EOF
   echo "Wrote $ENV_FILE with:"
   for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
     GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL OPENCODE_PROVIDER \
-    OPENCODE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_BASE_BRANCH CLAUDE_API_KEY; do
+    OPENCODE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_QUALITY_GATE_MAX_ROUNDS \
+    CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH CLAUDE_API_KEY; do
     echo "  - $var"
   done
 fi

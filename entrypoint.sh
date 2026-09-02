@@ -45,10 +45,6 @@ chown bot:bot "$local_cfg"
 if [ "${CODEBOT_AGENT:-claude}" = "opencode" ]; then
   : "${OPENCODE_MODEL:?OPENCODE_MODEL must be provider/model when CODEBOT_AGENT=opencode}"
   command -v opencode >/dev/null || { echo "OpenCode is not installed in this image" >&2; exit 1; }
-  # Inline configuration is applied after any target-repo config, preventing a
-  # project from changing Codebot's selected model or enabling transcript sharing.
-  export OPENCODE_CONFIG_CONTENT
-  OPENCODE_CONFIG_CONTENT="$(python3 -c 'import json, os; print(json.dumps({"model": os.environ["OPENCODE_MODEL"], "share": "disabled", "autoupdate": False}))')"
 fi
 
 exec setpriv --reuid=bot --regid=bot --init-groups env HOME=/home/bot bash -c '

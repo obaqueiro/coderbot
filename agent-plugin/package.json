@@ -1,0 +1,7 @@
+{
+  "name": "coderbot-openspec",
+  "version": "0.1.0",
+  "description": "Shared workflow boundaries for headless coderbot agents using OpenSpec",
+  "type": "module",
+  "main": ".opencode/plugins/coderbot-openspec.js"
+}

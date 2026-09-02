@@ -1,6 +1,7 @@
 """Run the configured headless coding agent and normalize its result."""
 import json
 import logging
+import os
 import subprocess
 
 import claude_runner
@@ -18,6 +19,34 @@ the repository's current branch and working tree. Reconstruct any needed context
 from the OpenSpec change artifacts and git history before acting; do not ask the
 user to repeat information that is available there.
 """
+
+
+def _opencode_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    try:
+        inline = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
+    except json.JSONDecodeError as err:
+        raise RuntimeError("OPENCODE_CONFIG_CONTENT must contain valid JSON") from err
+    if not isinstance(inline, dict):
+        raise RuntimeError("OPENCODE_CONFIG_CONTENT must contain a JSON object")
+
+    plugins = inline.get("plugin", [])
+    skills = inline.get("skills", {})
+    if not isinstance(plugins, list) or not isinstance(skills, dict):
+        raise RuntimeError("OPENCODE_CONFIG_CONTENT plugin/skills values have invalid types")
+    paths = skills.get("paths", [])
+    if not isinstance(paths, list):
+        raise RuntimeError("OPENCODE_CONFIG_CONTENT skills.paths must be an array")
+    if not all(isinstance(plugin, str) for plugin in plugins):
+        raise RuntimeError("OPENCODE_CONFIG_CONTENT plugin entries must be strings")
+    if not all(isinstance(path, str) for path in paths):
+        raise RuntimeError("OPENCODE_CONFIG_CONTENT skills.paths entries must be strings")
+
+    managed_plugins = [str(config.SUPERPOWERS_PLUGIN_DIR), str(config.BRIDGE_PLUGIN_DIR)]
+    inline["plugin"] = list(dict.fromkeys([*plugins, *managed_plugins]))
+    inline.update(model=config.OPENCODE_MODEL, share="disabled", autoupdate=False)
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
+    return env
 
 
 class OpenCodeResult:
@@ -44,7 +73,8 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     cmd.append(prompt)
     log.info("opencode %s model=%s (prompt %d chars)",
              "resume" if session_id else "run", config.OPENCODE_MODEL, len(prompt))
-    proc = subprocess.run(cmd, cwd=config.REPO_PATH, capture_output=True, text=True,
+    proc = subprocess.run(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
+                          capture_output=True, text=True,
                           timeout=config.AGENT_TIMEOUT_SECONDS)
 
     output, errors, observed_session = [], [], None

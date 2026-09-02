@@ -36,19 +36,33 @@ missing:
     the user immediately, and codebot adds a backlog item requesting the
     workflow.
 
-This also requires OpenSpec in the target repo. Codebot directs its selected coding
-agent through the OpenSpec explore, propose, and apply workflows using the installed
-`openspec` CLI.
+OpenSpec owns requirements, design, and tasks; Superpowers owns engineering
+discipline; coderbot owns state, archive timing, push, PR, and merge. The image
+supplies managed, pinned OpenSpec 1.9.0 and Superpowers v6.3.0 integrations for
+both Claude Code and OpenCode. Target repos and host profiles do not need their
+own Superpowers installation.
 
 ## Lifecycle
 
 ```
-IDLE → pick item (non-struck ¶ in the Doc, coding agent chooses) → branch codebot/<slug>
+IDLE → pick item (non-struck ¶ in the Doc, coding agent chooses) → branch codebot-<slug>
       → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
-     → IMPLEMENTING (adds e2e coverage if a harness is present) → E2E gate (e2e/run.sh, if present)
-     → OPEN_PR (gh) → WAIT_REVIEW ⇄ ADDRESS_REVIEW (if Code Review is present) → email PR + evidence → WAIT_MERGE
+     → IMPLEMENTING → VERIFYING → INTERNAL_REVIEW → E2E (when present)
+     → ARCHIVING → OPEN_PR → WAIT_REVIEW ⇄ ADDRESS_REVIEW → PUSHING (if review fixes exist)
+     → email PR + evidence → WAIT_MERGE
      → merge → strike item through in the Doc → IDLE
 ```
+
+If an E2E repair changes tracked files, coderbot repeats verification and internal
+review before retrying E2E. OpenSpec archive/spec sync occurs on the feature branch
+before PR creation, so it lands atomically with the implementation.
+Coderbot independently validates the active change and confirms OpenSpec apply progress
+is complete after the agent's verification report. Post-PR agent fixes enter a persisted
+`PUSHING` phase, so a failed or interrupted push retries without rerunning agent work.
+Archive retries include untracked OpenSpec files in cleanliness checks and stage only
+the validated spec, active-change, and archive paths. If archive recovery needs human
+guidance, the existing agent session may repair and commit only OpenSpec planning/spec
+files before coderbot retries archival.
 
 Any phase can detour through WAIT_REPLY: if the coding agent needs the user, it ends its
 output with `NEED_USER_INPUT: <question>`; codebot emails the question (optionally
@@ -56,10 +70,11 @@ with `ATTACH: <path>` screenshots/videos) and resumes the same session with the 
 
 Evidence (screenshots, recordings, reports) is always routed to email via that same
 `ATTACH: <path>` convention (saved under the outbox dir), in every phase — never
-committed to the target repo. Every resumed turn restates this rule, and as a
-safety net, any phase that commits+pushes checks the branch's diff for
-evidence-looking files (video extensions, or paths naming "evidence"/"recording")
-and has Claude remove and re-route them via email if it finds any.
+committed to the target repo. Every resumed turn restates this rule. As a safety
+net, designated handoffs after implementation and review or feedback repairs scan
+the branch diff for evidence-looking files (video extensions, or paths naming
+"evidence"/"recording") and have the coding agent remove and re-route them via
+email if any are found.
 
 ## Abort / reset (last resort)
 
@@ -81,8 +96,9 @@ Opening the PR triggers the `Code Review` GitHub Action (OpenCodeReview, see
 **not** email the user yet: it enters `WAIT_REVIEW` and polls that action's check on
 the PR head. When a run finishes, it fetches the `github-actions[bot]` inline comments
 posted since the last round (plus the sticky summary for context) and, if any are new,
-hands them to the same Claude session (`ADDRESS_REVIEW`) to fix genuine issues, commit,
-and push — which re-triggers the action. The loop repeats until a run leaves no new
+hands them to the same coding-agent session (`ADDRESS_REVIEW`) to fix genuine issues
+and commit. Coderbot pushes the commit, which re-triggers the action. The loop repeats
+until a run leaves no new
 comments (then it records evidence and emails the PR), or until `CODEBOT_REVIEW_MAX_ROUNDS`
 (default 3) or `CODEBOT_REVIEW_WAIT_TIMEOUT` (default 45 min per run) is hit, in which
 case it emails anyway with a note about the unresolved review.
@@ -141,6 +157,10 @@ offers to run the consent flow in step 2 for you.
    OPENCODE_MODEL=<provider/model>
    # Optional; DEBUG (default) or INFO — DEBUG traces every email, video, and git call
    CODEBOT_LOG_LEVEL=DEBUG
+   # Optional; maximum verification/internal-review repair rounds (default 3)
+   CODEBOT_QUALITY_GATE_MAX_ROUNDS=3
+   # Optional; maximum OpenSpec archive repair rounds (default 3)
+   CODEBOT_ARCHIVE_MAX_ROUNDS=3
    # Optional; defaults to "main" — the trunk branch codebot syncs from, branches off
    # of, opens PRs against, and resets to on abort
    CODEBOT_BASE_BRANCH=main
@@ -186,6 +206,18 @@ python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hell
 ```
 
 ## Troubleshooting
+
+**`managed runtime unavailable: missing ...`**: coderbot fails closed at startup if
+the image's managed Superpowers or coderbot/OpenSpec bridge files are absent. Rebuild
+the image from this repository and check that no volume mount replaces
+`/opt/coderbot/plugins` or `/opt/coderbot/agent-plugin`; do not install Superpowers in
+the target repo or host profile as a workaround.
+
+**OpenCode provider authentication fails or returns `401 Unauthorized`**: rerun
+`./setup.sh` and complete authentication for `OPENCODE_PROVIDER`, then retry the
+OpenCode smoke command above. A provider 401 is a failed smoke test; never treat the
+CLI starting or returning structured output as a pass when the provider rejected the
+request.
 
 **`claude exited 1: apiKeyHelper failed: did not return a value`**: the target repo
 has its own `.claude/settings.json` (project-level, applies to any `claude` invocation

@@ -23,7 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npx --yes playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code opencode-ai@1.18.18 @fission-ai/openspec@latest
+RUN npm install -g @anthropic-ai/claude-code opencode-ai@1.18.18 @fission-ai/openspec@1.9.0 \
+    && npm install --prefix /opt/coderbot/plugins \
+        "superpowers@git+https://github.com/obra/superpowers.git#v6.3.0"
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
@@ -31,6 +33,14 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 # claude refuses --dangerously-skip-permissions as root; uid 501 matches the
 # macOS host user so the mounted repo and ~/.claude stay writable.
 RUN useradd -u 501 -m -s /bin/bash bot
+
+COPY agent-plugin /opt/coderbot/agent-plugin
+RUN claude plugin validate \
+        /opt/coderbot/plugins/node_modules/superpowers/.claude-plugin/plugin.json \
+    && claude plugin validate /opt/coderbot/agent-plugin/.claude-plugin/plugin.json \
+    && node --check /opt/coderbot/agent-plugin/.opencode/plugins/coderbot-openspec.js \
+    && node -e 'const p = require("/opt/coderbot/agent-plugin/package.json"); \
+        if (p.main !== ".opencode/plugins/coderbot-openspec.js") process.exit(1)'
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
