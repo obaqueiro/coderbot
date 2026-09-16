@@ -1,0 +1,11 @@
+[Unit]
+Description=coderbot: stop cleanly on an Azure Scheduled Event (Spot eviction)
+After=coderbot.service
+
+[Service]
+ExecStart=/usr/local/sbin/coderbot-spot-watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

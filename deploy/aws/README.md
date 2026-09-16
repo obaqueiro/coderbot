@@ -3,7 +3,8 @@
 Runs any number of coderbot agents in your own AWS account, each on the cheapest
 Spot instance that fits, with a persistent EBS volume so a reclaimed instance's
 replacement picks the task up where it stopped. CloudFormation and the AWS CLI only:
-nothing here depends on this repository's CI or on a particular account.
+nothing here depends on this repository's CI or on a particular account. The Azure
+equivalent lives in [`../azure`](../azure/README.md).
 
 ```
 account (once)                 per agent, stack "coderbot-<name>"

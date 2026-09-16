@@ -1,0 +1,26 @@
+# Azure Spot deployment (deploy/azure): the same single service as docker-compose.ec2.yml
+# with every path on the agent's persistent data disk, mounted at /datadrive (Azure keeps
+# the VM's ephemeral resource disk at /mnt, so the persistent one cannot go there):
+#   /datadrive/coderbot    this repository (the build context, mounted at /app)
+#   /datadrive/data        data/ (state.json, instance_id, token.json, outbox, ...)
+#   /datadrive/repo/<x>    the target repository; CODEBOT_REPO_PATH points here
+#   /datadrive/claude      the bot's ~/.claude (credentials and resumable sessions)
+#   /datadrive/codebot.env the shared .env from Key Vault
+#   /datadrive/agent.env   per-agent overrides written at boot (instance, repo path)
+# Started by the coderbot systemd unit (deploy/azure/instance/coderbot.service).
+services:
+  codebot:
+    build: /datadrive/coderbot
+    restart: unless-stopped
+    stop_grace_period: 45s
+    env_file:
+      - /datadrive/codebot.env
+      - /datadrive/agent.env
+    volumes:
+      - /datadrive/coderbot:/app
+      - /datadrive/data:/app/data
+      - ${CODEBOT_REPO_PATH:?pass --env-file /datadrive/agent.env (see instance/coderbot.service)}:${CODEBOT_REPO_PATH}
+      - /datadrive/claude:/home/bot/.claude
+      - /datadrive/claude.json:/seed/.claude.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /app

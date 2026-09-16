@@ -1,0 +1,19 @@
+[Unit]
+Description=coderbot agent (docker compose)
+Requires=docker.service coderbot-boot.service
+After=docker.service coderbot-boot.service
+RequiresMountsFor=/datadrive
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/datadrive/coderbot
+ExecStart=/usr/bin/docker compose --env-file /datadrive/agent.env -f deploy/azure/docker-compose.azure.yml up -d --build --remove-orphans
+# A Spot eviction gives 30 seconds. SIGTERM makes src/main.py drop the in-flight tick and
+# exit in seconds, so the short timeout is headroom, not a deadline we expect to use.
+ExecStop=/usr/bin/docker compose --env-file /datadrive/agent.env -f deploy/azure/docker-compose.azure.yml stop -t 20
+TimeoutStartSec=2700
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

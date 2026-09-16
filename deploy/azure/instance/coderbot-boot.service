@@ -1,0 +1,15 @@
+[Unit]
+Description=coderbot: seed credentials and per-agent environment before the container starts
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/datadrive
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/datadrive/coderbot/deploy/azure/instance/boot.sh
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
