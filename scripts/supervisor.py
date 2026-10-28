@@ -70,6 +70,13 @@ def signal_owned(owned, sig):
 
 
 
+# The repair agent edits a candidate copy of src/ only: it never publishes, commits,
+# touches containers or reads the live configuration and data (enforced, not just asked).
+REPAIR_DENIED_COMMANDS = ("git push", "git commit", "git reset", "git checkout", "git worktree",
+                          "gh ", "docker", "sudo")
+REPAIR_DENIED_CLAUDE = ([f"Bash({command.strip()}{suffix})" for command in REPAIR_DENIED_COMMANDS for suffix in (":*", " *")]
+                        + ["Read(/app/.env)", "Read(/app/data/**)", "Read(/proc/*/environ)"])
+
 # The worker writes its heartbeat once per poll interval; allow three missed beats.
 def _poll_interval():
     try:
@@ -272,6 +279,9 @@ class Supervisor:
                     raise RepairError("Repair provider configuration references task credentials")
                 if name in os.environ:
                     env[name] = os.environ[name]
+            settings["permission"] = {"*": "allow", "bash": {"*": "allow", **{
+                command + "*": "deny" for command in REPAIR_DENIED_COMMANDS}}}
+            encoded = json.dumps(settings)
             env["OPENCODE_CONFIG_CONTENT"] = encoded
             code, help_text = run_process(["opencode", "--help"], candidate, env, 15, folder / "cli-help.log")
             if code:
@@ -284,7 +294,9 @@ class Supervisor:
             for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
                 if os.environ.get(name):
                     env[name] = os.environ[name]
-            argv = ["claude", "-p", "--dangerously-skip-permissions", "--setting-sources", "", prompt]
+            argv = ["claude", "-p", "--dangerously-skip-permissions", "--setting-sources", "",
+                    "--settings", json.dumps({"permissions": {"deny": REPAIR_DENIED_CLAUDE}}),
+                    "--disallowedTools", "Task", "Agent", "--", prompt]
         else:
             raise RepairError("Unsupported repair coding CLI")
         self.active_until = time.monotonic() + 660

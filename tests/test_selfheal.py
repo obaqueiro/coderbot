@@ -422,3 +422,12 @@ class SupervisorHygiene(unittest.TestCase):
         with patch.dict(os.environ, {"CODEBOT_AGENT_TIMEOUT": "7200"}):
             self.assertEqual(importlib.reload(supervisor_module).OBSERVATION_SECONDS, 8100)
         self.assertGreaterEqual(importlib.reload(supervisor_module).OBSERVATION_SECONDS, 900)
+
+
+class RepairAgentScope(unittest.TestCase):
+    def test_repair_agent_cannot_publish_commit_or_read_live_secrets(self):
+        import scripts.supervisor as supervisor_module
+        denied = supervisor_module.REPAIR_DENIED_CLAUDE
+        for rule in ("Bash(git push:*)", "Bash(git commit:*)", "Bash(gh:*)", "Bash(docker:*)",
+                     "Read(/app/.env)", "Read(/app/data/**)"):
+            self.assertIn(rule, denied)
