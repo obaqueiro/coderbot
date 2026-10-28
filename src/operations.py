@@ -180,7 +180,7 @@ def _run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cle
     process = None
     try:
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input else None,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
         turn_control.register(process)
         try:
             stdout, stderr = process.communicate(input=input, timeout=remaining(timeout))

@@ -22,7 +22,7 @@ def target():
 
 
 def command(repo, argv):
-    process = subprocess.run(argv, cwd=repo, capture_output=True, text=True,
+    process = subprocess.run(argv, cwd=repo, capture_output=True, text=True, errors="replace",
                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if process.returncode:
         import diagnostics

@@ -94,7 +94,7 @@ class Supervisor:
                "CODEBOT_DATA_DIR": str(self.data)}
         self.worker = subprocess.Popen([sys.executable, "-u", str(self.source / "src/main.py")],
             cwd=self.source, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, start_new_session=True)
+            text=True, errors="replace", start_new_session=True)
         def logs(process):
             for line in process.stdout:
                 line = redact(line)

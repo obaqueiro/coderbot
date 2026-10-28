@@ -14,7 +14,7 @@ import time
 
 
 def command(argv, cwd=None):
-    return subprocess.run(argv, cwd=cwd, check=True, text=True, capture_output=True, timeout=180)
+    return subprocess.run(argv, cwd=cwd, check=True, text=True, errors="replace", capture_output=True, timeout=180)
 
 
 def preserved_mounts(inspected, release=None):

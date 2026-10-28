@@ -148,7 +148,7 @@ def detect_branch_specs(kind: str | None) -> list[str]:
     for base in (f"origin/{config.BASE_BRANCH}", config.BASE_BRANCH):
         proc = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=d", f"{base}...HEAD", "--", glob],
-            cwd=config.REPO_PATH, capture_output=True, text=True,
+            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
         )
         if proc.returncode == 0:
             specs = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
@@ -171,7 +171,7 @@ def _teardown_stack() -> None:
     try:
         proc = subprocess.run(
             ["docker", "compose", "-f", E2E_COMPOSE_FILE, "down", "-v", "--remove-orphans"],
-            cwd=E2E_DIR, capture_output=True, text=True, timeout=120)
+            cwd=E2E_DIR, capture_output=True, text=True, errors="replace", timeout=120)
         if proc.returncode != 0:
             log.warning("e2e stack teardown rc=%d: %s", proc.returncode, proc.stderr[-500:])
         else:
@@ -513,7 +513,7 @@ def _record_newman_report(spec_files: list[str]) -> list[Path]:
     log.info("recording Newman evidence: re-running collection(s) %s", collections)
     try:
         proc = subprocess.run(
-            ["./run.sh", *collections], cwd=E2E_DIR, capture_output=True, text=True,
+            ["./run.sh", *collections], cwd=E2E_DIR, capture_output=True, text=True, errors="replace",
             timeout=config.E2E_TIMEOUT_SECONDS,
         )
         tail = (proc.stdout + proc.stderr)[-1500:]

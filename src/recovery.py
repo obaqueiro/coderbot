@@ -81,12 +81,12 @@ def isolate(state, repo, directory, owned=()):
         if operations:
             # Preserve the original operation; carry its merge intent into isolation.
             gitdir = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=repo,
-                capture_output=True, check=True, text=True, timeout=60).stdout.strip()
+                capture_output=True, check=True, text=True, errors="replace", timeout=60).stdout.strip()
             merge_head = Path(gitdir) / "MERGE_HEAD"
             if merge_head.is_file():
                 state["isolated_merge_heads"] = merge_head.read_text().splitlines()
     isolated_branch = subprocess.run(["git", "branch", "--show-current"], cwd=destination,
-        capture_output=True, check=True, text=True, timeout=60).stdout.strip()
+        capture_output=True, check=True, text=True, errors="replace", timeout=60).stdout.strip()
     state.setdefault("remote_branch", state["branch"])
     state["branch"] = isolated_branch
     state.setdefault("original_workspace", str(repo))

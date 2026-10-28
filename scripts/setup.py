@@ -69,7 +69,7 @@ def sync_to_vm(host: str, *, code_only: bool, restart: bool) -> str:
     if restart:
         try:
             subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                            host, "sh -eu"], input=_VM_RESTART_AND_CHECK, text=True,
+                            host, "sh -eu"], input=_VM_RESTART_AND_CHECK, text=True, errors="replace",
                            cwd=ROOT, check=True, timeout=330)
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError(f"Files copied, but VM restart/health check failed: {error}") from error
@@ -394,7 +394,7 @@ def _github_project_owner(values: dict[str, str]) -> str:
         raise RuntimeError("Configure Repository > CODEBOT_REPO_PATH first to find the board owner")
     try:
         remote = subprocess.run(["git", "-C", repo, "remote", "get-url", "origin"],
-                                capture_output=True, text=True, timeout=12)
+                                capture_output=True, text=True, errors="replace", timeout=12)
     except (OSError, subprocess.SubprocessError) as error:
         raise RuntimeError(f"Cannot read the target repo's origin: {error}") from error
     if remote.returncode or not (match := re.search(
@@ -604,7 +604,7 @@ def opencode_authenticated(values: dict[str, str]) -> bool:
                "XDG_CACHE_HOME=/app/data/opencode/cache", "-e",
                "XDG_STATE_HOME=/app/data/opencode/state", "codebot", "auth", "list"]
     try:
-        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=45)
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, errors="replace", timeout=45)
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0 and provider.casefold() in result.stdout.casefold()
@@ -1147,14 +1147,14 @@ def _ensure_textual():
     try:
         install = subprocess.run([str(python), "-m", "pip", "install", "--no-index",
                                   "--timeout", "10", "--retries", "1", *_SETUP_WHEELS],
-                                 timeout=100, capture_output=True, text=True)
+                                 timeout=100, capture_output=True, text=True, errors="replace")
     except subprocess.TimeoutExpired:
         install = None
     if install is None or install.returncode:
         install = subprocess.run([str(python), "-m", "pip", "install", "-r",
                                   str(ROOT / "scripts/requirements-setup.txt"),
                                   "--index-url", "https://pypi.org/simple", "--timeout", "10",
-                                  "--retries", "1"], timeout=100, capture_output=True, text=True,
+                                  "--retries", "1"], timeout=100, capture_output=True, text=True, errors="replace",
                                  env=os.environ | {"PIP_CONFIG_FILE": os.devnull})
     if install.returncode:
         raise RuntimeError("Could not install Textual; check PyPI access or use --text")

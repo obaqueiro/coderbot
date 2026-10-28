@@ -164,7 +164,7 @@ def _ensure_task_language(state: dict) -> None:
 def git(*args: str) -> str:
     log.debug("git %s", " ".join(args))
     proc = subprocess.run(["git", *args], cwd=config.REPO_PATH,
-                          capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+                          capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}")
     if proc.stdout.strip():
@@ -1989,7 +1989,7 @@ def _commit_final_check_tasks(state: dict) -> None:
 
 
 def _run_checked(command: list[str]) -> str:
-    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip()
         raise RuntimeError(f"{' '.join(command)} exited {proc.returncode}: {detail}")
@@ -2134,7 +2134,7 @@ def _validate_archived_change(target: Path) -> None:
         destination = root / "openspec/changes/archive" / target.name
         destination.parent.mkdir(parents=True)
         shutil.copytree(target, destination)
-        proc = subprocess.run(command, cwd=root, capture_output=True, text=True,
+        proc = subprocess.run(command, cwd=root, capture_output=True, text=True, errors="replace",
                               timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     try:
         items = json.loads(proc.stdout)["items"]
@@ -2424,7 +2424,7 @@ def code_review_check(pr_url: str) -> dict | None:
     try:
         proc = subprocess.run(
             ["gh", "pr", "checks", pr_url, "--json", "name,bucket,workflow,link"],
-            cwd=config.REPO_PATH, capture_output=True, text=True,
+            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
             timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         log.warning("gh pr checks timed out after %ss", config.SUBPROCESS_TIMEOUT_SECONDS)
@@ -2457,7 +2457,7 @@ def _bot_comments(endpoint: str) -> list[dict]:
     try:
         proc = subprocess.run(
             ["gh", "api", f"{endpoint}?per_page=100"],
-            cwd=config.REPO_PATH, capture_output=True, text=True,
+            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
             timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         log.warning("gh api %s timed out after %ss", endpoint, config.SUBPROCESS_TIMEOUT_SECONDS)
@@ -2809,7 +2809,7 @@ def _pr_merge_state(pr_url: str) -> tuple[str | None, str | None]:
     when the query fails. Callers treat that as "unknown", never as "clean"."""
     try:
         proc = subprocess.run(["gh", "pr", "view", pr_url, "--json", "state,mergeable"],
-                              cwd=config.REPO_PATH, capture_output=True, text=True,
+                              cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
                               timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         log.warning("gh pr view timed out checking mergeability")
@@ -2973,7 +2973,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
         if cursor:
             cmd += ["-f", f"cursor={cursor}"]
         try:
-            proc = subprocess.run(cmd, cwd=config.REPO_PATH, capture_output=True, text=True,
+            proc = subprocess.run(cmd, cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
                                   timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             log.warning("gh api graphql (review threads) timed out")
@@ -3121,7 +3121,7 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
                 reply = subprocess.run(
                     ["gh", "api", f"repos/{owner_repo}/pulls/{number}/comments/"
                      f"{thread['comment_id']}/replies", "-f", f"body={reason}"],
-                    cwd=config.REPO_PATH, capture_output=True, text=True,
+                    cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
                     timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
                 if reply.returncode != 0:
                     log.warning("could not reply on thread %s: %s",
@@ -3200,7 +3200,7 @@ def resolve_review_thread(thread_id: str) -> bool:
             ["gh", "api", "graphql",
              "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
              "-f", f"id={thread_id}"],
-            cwd=config.REPO_PATH, capture_output=True, text=True,
+            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
             timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         log.warning("gh api graphql (resolveReviewThread %s) timed out", thread_id)
@@ -3373,7 +3373,7 @@ def _pr_head_moved(state: dict, expected: str, head: str | None) -> bool:
 def _gh_squash_merge(pr_url: str, expected: str | None) -> subprocess.CompletedProcess:
     """A client incapable of pinning the reviewed head must fail closed."""
     command = ["gh", "pr", "merge", pr_url, "--squash"]
-    run = lambda args: subprocess.run(args, cwd=config.REPO_PATH, capture_output=True, text=True,
+    run = lambda args: subprocess.run(args, cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
                                       timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if not expected:
         return run(command)
@@ -4632,7 +4632,7 @@ def _git_quiet(*args: str) -> bool:
     """Run a git command, returning success. Never raises — for the best-effort reset."""
     try:
         proc = subprocess.run(["git", *args], cwd=config.REPO_PATH, capture_output=True,
-                              text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+                              text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         log.debug("git %s timed out after %ss", " ".join(args), config.SUBPROCESS_TIMEOUT_SECONDS)
         return False
@@ -4648,7 +4648,7 @@ def _uncommitted_paths() -> list[str]:
     """Modified, staged, unmerged and untracked (non-ignored) paths, parsed from -z output
     so renames and odd file names are handled."""
     status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-                            cwd=config.REPO_PATH, capture_output=True, text=True,
+                            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
                             timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout
     paths, entries = [], [e for e in status.split("\0") if e]
     index = 0
@@ -4724,11 +4724,11 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
     if _git_quiet("fetch", "origin", config.BASE_BRANCH):
         _git_quiet("reset", "--hard", f"origin/{config.BASE_BRANCH}")
     branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                            cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
+                            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
     if branch != config.BASE_BRANCH:
         problems.append(f"could not switch to {config.BASE_BRANCH} (still on {branch or 'unknown'})")
     dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
-                           cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
+                           cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
     if dirty:
         problems.append("tracked changes remain after reset")
     return problems

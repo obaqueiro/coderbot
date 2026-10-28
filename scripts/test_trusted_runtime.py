@@ -93,7 +93,7 @@ def exercise_runtime():
                 process = subprocess.run(["node", str(bridge)], cwd=root, env=request.environment,
                     input=json.dumps({"directory": str(root), "model": "fixture/fixture",
                                       "prompt": "Run fixture tools."}),
-                    capture_output=True, text=True, timeout=30)
+                    capture_output=True, text=True, errors="replace", timeout=30)
                 assert process.returncode == 0, (process.stdout, process.stderr)
                 events = [json.loads(line) for line in process.stdout.splitlines()]
                 assert any(e["type"] == "tool_start" for e in events), events

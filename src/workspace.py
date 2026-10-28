@@ -129,7 +129,7 @@ def load_manifest(root, path=None):
 
 def git(repo, *args, required=True):
     result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                            text=True, timeout=60)
+                            text=True, errors="replace", timeout=60)
     if result.returncode and required:
         # Do not expose remotes with embedded credentials in exception text.
         raise WorkspaceError(f"Git {args[0]} failed in {repo}; check repository configuration")

@@ -68,7 +68,7 @@ def probe(executable="opencode", plugin=None, exercise=None, extra_config=None):
                 exercise_result = exercise(request, root, parent) if exercise else None
                 request("/session/" + parent["id"], method="DELETE")
                 version = subprocess.run([executable, "--version"], env=env, cwd=root,
-                    capture_output=True, text=True, timeout=15, check=True).stdout.strip()
+                    capture_output=True, text=True, errors="replace", timeout=15, check=True).stdout.strip()
                 return {"version": version, "config": "valid", "session_update": "valid",
                         "children": "valid", "permission_list": "valid",
                         **({"exercise": exercise_result} if exercise else {})}

@@ -467,13 +467,13 @@ def _stream_line(line: str) -> None:
 
 def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
                    on_line=_stream_line, input_text=None) -> subprocess.CompletedProcess:
-    """subprocess.run(capture_output=True, text=True, timeout=...) equivalent that hands
+    """subprocess.run(capture_output=True, text=True, errors="replace", timeout=...) equivalent that hands
     every stdout line to on_line as it arrives. Raises subprocess.TimeoutExpired (with
     the partial output) after killing the process, as subprocess.run would."""
     effective_timeout = operations.remaining(timeout)
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, stdin=subprocess.PIPE if input_text is not None else None,
-                            text=True, start_new_session=True)
+                            text=True, errors="replace", start_new_session=True)
     turn_control.register(proc)
     stderr_chunks: list[str] = []
     stderr_reader = threading.Thread(

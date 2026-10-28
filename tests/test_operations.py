@@ -80,6 +80,14 @@ class BudgetTests(unittest.TestCase):
             finally:
                 operations.terminate(leader, grace=.1)
 
+    def test_invalid_utf8_from_a_tool_never_raises(self):
+        # One stray byte from any test runner used to raise UnicodeDecodeError and fail the tick.
+        proc = operations.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok \\xff\\xfe end')"],
+                              timeout=30)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("ok", proc.stdout)
+        self.assertIn("end", proc.stdout)
+
     def test_group_signals_never_target_pid_one_or_our_own_group(self):
         # A mocked process coerces its pid to 1; signalling group 1 inside a container
         # would kill coderbot (PID 1) itself.

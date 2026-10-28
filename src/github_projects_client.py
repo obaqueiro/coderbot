@@ -55,7 +55,7 @@ _cache: dict = {}
 def _gh(*args: str) -> str:
     """Run a gh command and return stdout; RuntimeError (with a token-scope hint when
     the error looks like one) on failure."""
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True,
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, errors="replace",
                           timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         detail = (proc.stderr.strip() or proc.stdout.strip())[-2000:]
@@ -97,7 +97,7 @@ def _target_repo() -> str:
     repo = config.GH_ISSUE_REPO
     if not repo:
         proc = subprocess.run(["git", "-C", str(config.REPO_PATH), "remote", "get-url", "origin"],
-                              capture_output=True, text=True,
+                              capture_output=True, text=True, errors="replace",
                               timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
         if proc.returncode != 0:
             raise RuntimeError("cannot determine the issue repository: no origin remote in "
