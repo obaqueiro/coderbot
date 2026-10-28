@@ -45,7 +45,6 @@ import delivery_checkpoint
 import evidence_delivery
 import message_templates
 import performance
-import architecture_report
 import config
 import drive_client
 import evidence
@@ -2339,7 +2338,6 @@ def do_open_pr(state: dict) -> None:
         task_source.note_pr(state["item"], state.get("item_id"), state["pr_url"])
     except Exception:  # noqa: BLE001
         log.exception("could not link the PR on the backlog item")
-    _notify_architecture(state)
     if not state.get("has_code_review"):
         log.info("no Code Review workflow detected for this task; finalizing without a review wait")
         finalize_pr(state)
@@ -2351,61 +2349,6 @@ def do_open_pr(state: dict) -> None:
     state["review_comment_watermark"] = ""     # only comments created after this are "new"
     _enter_review_wait(state)
 
-
-def _notify_architecture(state: dict, *, update: bool = False) -> None:
-    """Report actual high-impact decisions; never gate automated review or merging."""
-    if not state.get("base_sha") or not state.get("archive_path"):
-        log.warning("architecture report unavailable: task base/archive missing")
-        return
-    try:
-        context = architecture_report.collect(config.REPO_PATH, state["base_sha"],
-                                              state["archive_path"])
-        previous = state.get("architecture_report")
-        if isinstance(previous, dict) and previous.get("head") == context["head"]:
-            return
-        prompt = prompts.render(
-            prompts.ARCHITECTURE_REPORT, paths="\n".join(context["paths"]),
-            plan=context["planned"], patch=context["diff"],
-            complete=str(context["complete"]).lower())
-        for attempt in range(2):
-            reply = agent_runner.run(prompt, contract=False)
-            try:
-                decisions = architecture_report.parse(reply.output, context["paths"])
-                break
-            except ValueError as error:
-                if attempt:
-                    raise
-                log.warning("architecture report validation failed; retrying once: %s", error)
-                prompt += ("\nThe previous response failed validation: " + str(error) +
-                           "\nGenerate a fresh report following the schema and exact changed "
-                           "paths above. Do not invent evidence to satisfy validation.\n")
-        delta = architecture_report.changed(previous.get("decisions") if isinstance(previous, dict)
-                                            else None, decisions)
-        if not decisions:
-            state["architecture_report"] = {"head": context["head"], "decisions": []}
-            save_state(state)
-            return
-        if update and previous and not delta:
-            state["architecture_report"] = {"head": context["head"], "decisions": decisions}
-            save_state(state)
-            return
-        body = architecture_report.format_report(state["pr_url"], context["head"],
-                                                  delta if update and previous else decisions,
-                                                  update=update and bool(previous),
-                                                  complete=context["complete"])
-        report = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
-                                    config.DATA_DIR, "ARCHITECTURE", detail=body)
-        title = "; ".join(decision.get("title", "") for decision in (delta if update and previous else decisions)[:3])
-        label = "Architecture update" if update and previous else "Architecture findings"
-        email(state, "architectural decisions", f"{label}: {title}\nPR: {state['pr_url']}\n"
-              "Informational; review continues. Impacts and evidence are in the attached report.", [report])
-        state["architecture_report"] = {"head": context["head"], "decisions": decisions}
-        save_state(state)
-    except Exception:  # noqa: BLE001 — informational notice cannot stop PR flow
-        log.exception("could not prepare or send informational architecture report")
-
-
-# ---------------------------------------------------------------- automated review
 
 def _pr_owner_number(pr_url: str) -> tuple[str, str]:
     """Parse 'https://github.com/OWNER/REPO/pull/N' into ('OWNER/REPO', 'N')."""
@@ -3405,7 +3348,6 @@ def do_push(state: dict) -> None:
     git("push", "origin", ("HEAD:refs/heads/" + state["remote_branch"])
         if state.get("remote_branch") else state["branch"])
     state["delivered_sha"] = git("rev-parse", "HEAD")
-    _notify_architecture(state, update=True)
     if continuation == "review":
         # The fix is on GitHub now: reply on + resolve the threads the worker declared
         # handled, then wait for the re-review the push triggers.

@@ -28,7 +28,7 @@ class CommunicationLifecycle(unittest.TestCase):
         self.assertIn("<table>", document)
         self.assertIn("Passed", document)
 
-    def test_proposal_architecture_pr_and_merge_in_email_and_slack(self):
+    def test_proposal_pr_and_merge_in_email_and_slack(self):
         for channel in ("email", "slack"):
             with self.subTest(channel=channel), tempfile.TemporaryDirectory() as tmp:
                 repo = Path(tmp) / "repo"
@@ -59,7 +59,6 @@ class CommunicationLifecycle(unittest.TestCase):
                      patch.object(main.gmail_client, "deliver", side_effect=lambda s, subj, body, thread, files: (send(subj, body, thread, files), {"thread_id": thread or "gmail-1", "complete": True})[1]), \
                      patch.object(main.evidence, "record_evidence", return_value=[]), \
                      patch.object(main, "unresolved_review_threads", return_value=[]), \
-                     patch.object(main.architecture_report, "collect", return_value=architecture), \
                      patch.object(main.agent_runner, "run",
                                   return_value=SimpleNamespace(output=json.dumps(decision))):
                     main.announce_milestone(state, "exploring", "Exploring")
@@ -69,13 +68,11 @@ class CommunicationLifecycle(unittest.TestCase):
                     main.announce_milestone(state, "implementing", "Building")
                     main.announce_milestone(state, "verifying", "Checking")
                     main.announce_milestone(state, "archiving", "Archiving")
-                    main._notify_architecture(state)
                     main.finalize_pr(state)
                     self.assertEqual(state["state"], "WAIT_MERGE")
                     main._finish_task(state, "PR merged.", reset_repo=False, merged=True)
                 bodies = [call.args[1] for call in send.call_args_list]
                 self.assertEqual(bodies.count("Exploring"), 1)
-                self.assertTrue(any("Separate production RDS" in body for body in bodies))
                 self.assertTrue(any("Review cover:" in body for body in bodies))
                 self.assertTrue(any(call.args[3] and call.args[3][0].suffix == ".html"
                                     for call in send.call_args_list))
