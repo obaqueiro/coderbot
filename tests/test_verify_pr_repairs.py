@@ -74,7 +74,7 @@ class VerifyPrRepairTests(unittest.TestCase):
              patch.object(main, '_begin_check_repair') as reject:
             main._complete_internal_review(state, result)
         reject.assert_called_once()
-        self.assertNotIn('internal_review_report', state)
+        self.assertNotIn('reviewed_snapshot', state)  # the old review cannot be reused for new content
         self.assertEqual(state['state'], 'INTERNAL_REVIEW')
 
     def test_final_repair_invalidates_old_gates_and_reenters_verify(self):
@@ -94,7 +94,7 @@ class VerifyPrRepairTests(unittest.TestCase):
             main._complete_check_repair(state, Mock(output='fixed'))
         self.assertIn(state['state'], ('VERIFYING', 'E2E'))
         self.assertNotIn('quality_report', state)
-        self.assertNotIn('internal_review_report', state)
+        self.assertNotIn('reviewed_snapshot', state)  # the old review cannot be reused for new content
 
     def test_final_checkbox_commit_is_restart_safe_and_scoped(self):
         with tempfile.TemporaryDirectory() as root:

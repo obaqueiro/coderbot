@@ -82,7 +82,8 @@ class CheckRepairTests(unittest.TestCase):
                 main._complete_check_repair(state, SimpleNamespace(output="Fixed lint regression"))
             self.assertEqual(state["state"], "VERIFYING")
             self.assertNotIn("quality_report", state)
-            self.assertNotIn("internal_review_report", state)
+            # Kept, but reusable only for the exact reviewed content: code changed, so it re-runs.
+            self.assertNotIn("reviewed_snapshot", state)
 
     def test_no_progress_repair_is_bounded_and_slack_choice_resumes_diagnosis(self):
         state = {"state": "E2E", "slug": "task", "item": "task", "session_id": "sid",

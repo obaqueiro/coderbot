@@ -1937,8 +1937,10 @@ def _complete_check_repair(state: dict, result) -> None:
     for key in ("e2e_passed", "final_check_report", "final_check_round", "post_review_check_round"):
         state.pop(key, None)
     if changed or context["checks"]:
-        for key in ("quality_report", "quality_snapshot", "quality_controller_validated",
-                    "internal_review_report", "reviewed_snapshot"):
+        # Verification is recomputed (cheaply, by the controller). The internal review is
+        # kept: it is reused only for the exact content it reviewed (reviewed_snapshot),
+        # so a code-changing repair is re-reviewed and an environment-only one is not.
+        for key in ("quality_report", "quality_snapshot", "quality_controller_validated"):
             state.pop(key, None)
     active = not state.get("archive_path") and (config.REPO_PATH / "openspec/changes" / state["slug"]).is_dir()
     if context.get("evidence"):
