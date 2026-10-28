@@ -83,6 +83,7 @@ SETTINGS = (
     field("CODEBOT_AGENT", "Agent", "Coding agent CLI.", "claude", "choice", choices=("claude", "opencode")),
     field("CODEBOT_TOOL_POLICY", "Agent", "Runtime guardrails: the agent cannot push, open/merge PRs, archive or add worktrees; planning writes only OpenSpec files.", "on", "choice", advanced=True, choices=("on", "off")),
     field("CODEBOT_UTILITY_MODEL", "Agent", "Cheaper Claude model for reply classification, PR titles and task language (e.g. haiku). Empty uses CLAUDE_MODEL.", "", advanced=True),
+    field("CODEBOT_DRAFT_PR", "Agent", "on: open a draft PR right after proposal approval and push after each implementation turn. off: open the PR at the end.", "on", "choice", advanced=True, choices=("on", "off")),
     field("CODEBOT_EXECUTION", "Agent", "inline: one implementer session per feature. subagent: allow per-task subagents (A/B experiment).", "inline", "choice", advanced=True, choices=("inline", "subagent")),
     field("USE_CAVEMAN", "Agent", "Usar Caveman", "false", "exact_bool"),
     field("CLAUDE_CODE_OAUTH_TOKEN", "Claude", "Headless Claude Code authentication token.", secret=True),

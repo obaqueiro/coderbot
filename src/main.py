@@ -1250,14 +1250,59 @@ def do_approval_reply(state: dict, reply: str) -> None:
                           feedback=verdict.get("feedback", ""))
 
 
+def _open_draft_pr(state: dict) -> None:
+    """Best effort, before the first implementation turn: commit the approved OpenSpec
+    change, push the branch and open a draft PR so the work is visible while it
+    progresses. Any failure leaves today's behaviour (the PR is opened at OPEN_PR)."""
+    if (not config.DRAFT_PR or config.TARGET_MODE == "workspace" or state.get("draft_pr_url")
+            or state.get("pr_url") or state.get("draft_pr_attempts", 0) >= 2):
+        return
+    state["draft_pr_attempts"] = state.get("draft_pr_attempts", 0) + 1
+    try:
+        slug = _validated_slug(state.get("slug"))
+        change = f"openspec/changes/{slug}"
+        if git("status", "--porcelain", "--untracked-files=all", "--", change):
+            git("add", "--", change)
+            git("commit", "-m", f"Add approved OpenSpec change {slug}", "--", change)
+        git("push", "-u", "origin", state["branch"])
+        listed = json.loads(_run_checked(["gh", "pr", "list", "--state", "open", "--head", state["branch"],
+                                          "--json", "url", "--limit", "1"]) or "[]")
+        url = listed[0]["url"] if listed else _run_checked([
+            "gh", "pr", "create", "--draft", "--base", config.BASE_BRANCH, "--head", state["branch"],
+            "--title", _pr_title(state), "--body",
+            f"Work in progress: {state['item']}\n\nPlan: `{change}` (approved). Coderbot pushes as it "
+            "implements and marks this PR ready after verification and review."])
+        state["draft_pr_url"] = _https_url(url.strip())
+    except Exception as error:  # noqa: BLE001 - fall back to opening the PR at the end
+        log.warning("could not open the draft PR (attempt %d): %s", state["draft_pr_attempts"], error)
+        save_state(state)
+        return
+    save_state(state)
+    log.info("draft PR opened: %s", state["draft_pr_url"])
+    email(state, "draft PR", f"I opened a draft PR so you can follow the implementation:\n{state['draft_pr_url']}\n\n"
+          "I push after each implementation step and mark it ready once it is verified and reviewed.")
+
+
+def _push_progress(state: dict) -> None:
+    """Best-effort push of the agent's commits to the draft PR; never fails the turn."""
+    if not state.get("draft_pr_url") or state.get("pr_url"):
+        return
+    try:
+        git("push", "origin", state["branch"])
+    except Exception as error:  # noqa: BLE001
+        log.warning("progress push failed; the next turn retries: %s", error)
+
+
 def do_implement(state: dict) -> None:
     if _scope_drift(state):
         return
+    _open_draft_pr(state)
     feedback = state.get("implementation_feedback", "")
     result = agent_runner.resume(
         state["session_id"],
         f"Implementation continuation: {state.get('implementation_turn', 0)}\n" + feedback + "\n\n" + prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
                        e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
+    _push_progress(state)
     if handle_result(state, result, "IMPLEMENTING"):
         return
     _complete_implementation(state, result)
@@ -2299,9 +2344,15 @@ def do_open_pr(state: dict) -> None:
     elif state.get("item_url"):
         # A GitHub issue backs the item: let the merge close it.
         body += f"\n\nCloses {state['item_url']}"
+    if not state.get("pr_url") and state.get("draft_pr_url"):
+        state["pr_url"] = state["draft_pr_url"]
     if state.get("pr_url"):
         state["pr_url"] = _https_url(state["pr_url"])
         _publish_existing_pr(state)
+        if state.get("draft_pr_url") == state["pr_url"] and not state.get("draft_pr_ready"):
+            _run_checked(["gh", "pr", "edit", state["pr_url"], "--title", _pr_title(state), "--body", body])
+            _run_checked(["gh", "pr", "ready", state["pr_url"]])
+            state["draft_pr_ready"] = True
     else:
         git("push", "-u", "origin", state["branch"])
         listed = _run_checked([
@@ -4639,7 +4690,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",

@@ -85,3 +85,12 @@ class FsmWalk(unittest.TestCase):
         self.assertEqual(result["done"], [ITEM], context)
         self.assertIn("Add greet() with a unit test", merged, context)
         self.assertEqual(logs["gh-unsupported.log"], "", context)
+        calls = [json.loads(line) for line in logs["gh.log"].splitlines()]
+        creates = [c for c in calls if c[:2] == ["pr", "create"]]
+        self.assertEqual(len(creates), 1, context)  # one PR for the whole task
+        self.assertIn("--draft", creates[0], context)  # opened right after approval
+        ready = next(i for i, c in enumerate(calls) if c[:2] == ["pr", "ready"])
+        merge = next(i for i, c in enumerate(calls) if c[:2] == ["pr", "merge"])
+        self.assertLess(calls.index(creates[0]), ready, context)
+        self.assertLess(ready, merge, context)
+        self.assertIn("draft PR", [m["subject"].split(" — ")[-1] for m in result["sent"]], context)

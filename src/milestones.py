@@ -15,7 +15,9 @@ STATE_STAGES = {
     "APPLY_FEEDBACK": "implementing", "VERIFYING": "verifying",
     "INTERNAL_REVIEW": "verifying", "E2E": "verifying", "ARCHIVING": "archiving",
     "REPAIR_CHECKS": "verifying",
-    "OPEN_PR": "pr_review", "WAIT_REVIEW": "pr_review", "WAIT_MERGE": "pr_review",
+    # OPEN_PR is still preparing the PR; "PR ready for review" before it existed made
+    # people answer "merge" to a PR that was not there yet.
+    "OPEN_PR": "archiving", "WAIT_REVIEW": "pr_review", "WAIT_MERGE": "pr_review",
     "ADDRESS_REVIEW": "pr_review", "ADDRESS_PR_THREADS": "pr_review",
     "RESOLVE_CONFLICTS": "pr_review", "PUSHING": "pr_review",
 }
