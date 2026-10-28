@@ -456,7 +456,12 @@ def handle_result(state: dict, result, phase: str) -> bool:
     per-state failure budget can never bound this loop — without the cap a session that
     keeps asking (e.g. "what should I work on next?") ping-pongs with the user forever.
     """
-    state["session_id"] = result.session_id
+    if phase == "INTERNAL_REVIEW" and result.session_id == state.get("phase_sessions", {}).get("INTERNAL_REVIEW"):
+        # The fresh reviewer never replaces the implementer: later fix, review-thread and
+        # conflict turns must resume the session that knows the code.
+        state["review_session_id"] = result.session_id
+    else:
+        state["session_id"] = result.session_id
     requested = check_plan.reported(result.output)
     check_plan.remember(state, result.output)
     if config.TARGET_MODE == "workspace":
@@ -4622,7 +4627,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",

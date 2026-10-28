@@ -169,3 +169,19 @@ class CheckpointReplayTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 2)
             finally:
                 agent_runner.set_task_context(None)
+
+
+class ReviewSessionHandover(unittest.TestCase):
+    def test_reviewer_session_never_replaces_the_implementer(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
+            import main
+        state = {"state": "INTERNAL_REVIEW", "item": "t", "session_id": "implementer",
+                 "phase_sessions": {"INTERNAL_REVIEW": "reviewer"}}
+        with patch.object(main, "save_state"), patch.object(main.check_plan, "remember"):
+            main.handle_result(state, SimpleNamespace(session_id="reviewer", output="ok", question=None,
+                                                      attachments=[], preamble=""), "INTERNAL_REVIEW")
+        self.assertEqual(state["session_id"], "implementer")
+        self.assertEqual(state["review_session_id"], "reviewer")

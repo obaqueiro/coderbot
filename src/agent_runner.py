@@ -747,6 +747,8 @@ def resume(session_id: str, prompt: str):
                 context.get("session_context_tokens", 0) > config.CONTEXT_TOKEN_BUDGET)
             if recovering:
                 session_id = recovering
+            elif phase == "INTERNAL_REVIEW" and sessions.get(phase):
+                session_id = sessions[phase]  # later review rounds continue the review session
             elif fresh:
                 prompt = handoff_context.render(context, phase) + "\n\n" + prompt
                 session_id = None
