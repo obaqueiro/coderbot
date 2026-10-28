@@ -992,12 +992,12 @@ def do_pick(state: dict) -> None:
     repo_provenance.record(phase_checkpoint.store(), state, config.REPO_PATH, initial=True)
     state["state"] = "EXPLORING"
     _ensure_task_language(state)
-    agent_runner.set_task_language(state["task_language"])
+    agent_runner.set_task_language(state.get("task_language"))
     if config.COMM_CHANNEL == "slack":
         # Checkpoint the correlation nonce before the network call; retry can
         # reconcile a root Slack accepted just before a process crash.
         state["thread_nonce"] = secrets.token_hex(12)
-        if state["task_language"].casefold() != "english":
+        if state.get("task_language", "English").casefold() != "english":
             intro = f"*{config.INSTANCE_ID}* picked: {state['item']}"
             if state.get("item_url"):
                 intro += f"\nSource: {state['item_url']}"
@@ -4744,7 +4744,7 @@ def _content_filter_stop(state: dict, failed_state: str, *, error=None, user_tex
         "phase": failed_state, "user_text": user_text, "request": getattr(error, "request", ""),
         "partial_response": getattr(error, "partial_response", ""),
         "provider_detail": getattr(error, "provider_detail", "")})
-    body = handoffs.provider_notice(state["provider_block"], state["task_language"])
+    body = handoffs.provider_notice(state["provider_block"], state.get("task_language", "English"))
     if failed_state not in USER_SIDE_WAITS:
         state["stuck_error"] = diagnostics.summary(error=error, detail=body)
     store = phase_checkpoint.store()

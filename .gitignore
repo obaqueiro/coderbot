@@ -5,3 +5,4 @@ __pycache__
 .venv/
 docker-compose.override.yml
 .codebot-supervisor.lock
+.walk-debug/

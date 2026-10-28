@@ -32,3 +32,21 @@ read/write/bash externos, reanudación, dos arranques y puente HTTP. Diecinueve
 pruebas de checks/baseline/artifacts/entrega/cancelación/métricas pasaron en Python
 3.12.13, incluyendo cleanup de nietos y recursos. No se usaron credenciales de
 Jira/Slack/Azure en esas pruebas.
+
+## Controlled baseline: fake-agent walk (2026-10-28, before the streamlining stages)
+
+`tests/test_fsm_walk.py` drives the real tick loop for one trivial task (add a pure
+function and its unit test) with an agent that never errs, real git, OpenSpec 1.9.0 and
+controller checks, on the image's Python 3.12. It isolates coderbot's own overhead from
+model behaviour:
+
+| Measure | Value |
+|---|---|
+| Model calls | 8 (5 working turns: explore, propose, implement, verify, internal review; 3 utility: language, reply routing, architecture report) |
+| Prompt characters sent to working turns | ~71.5k |
+| Prompt characters sent to utility calls | ~11.2k |
+| Messages sent to the human | 13 |
+
+Each later stage re-runs the same walk; the targets are fewer working turns (no agent
+verify turn), far fewer prompt characters, and no utility calls for language or routing
+of keyword replies.

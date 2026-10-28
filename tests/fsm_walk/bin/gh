@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Fake `gh` for the FSM walk: PRs live in $WALK_DIR/gh.json and merge into the bare
+origin. Every call is logged; an unsupported invocation exits 1 and is recorded."""
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+walk = Path(os.environ["WALK_DIR"])
+origin = os.environ["WALK_ORIGIN"]
+db_path = walk / "gh.json"
+db = json.loads(db_path.read_text()) if db_path.exists() else {"prs": []}
+args = sys.argv[1:]
+with (walk / "gh.log").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+
+
+def save():
+    db_path.write_text(json.dumps(db, indent=1))
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def ref(name):
+    out = subprocess.run(["git", "--git-dir", origin, "rev-parse", "refs/heads/" + name],
+                         capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def find(url):
+    number = int(re.search(r"/pull/(\d+)", url)[1])
+    return next(pr for pr in db["prs"] if pr["number"] == number)
+
+
+def view(pr, fields):
+    value = {"state": pr["state"], "headRefName": pr["head"], "headRefOid": ref(pr["head"]) or "",
+             "baseRefName": pr["base"], "isCrossRepository": False, "body": pr["body"],
+             "mergeable": "MERGEABLE", "url": pr["url"], "title": pr["title"], "isDraft": pr.get("draft", False)}
+    return {key: value[key] for key in fields.split(",")}
+
+
+def done(value=""):
+    print(value if isinstance(value, str) else json.dumps(value))
+    sys.exit(0)
+
+
+if args[:2] == ["auth", "status"]:
+    done("logged in")
+if args[:2] == ["pr", "list"]:
+    head = opt("--head")
+    done([view(pr, opt("--json", "url,state")) for pr in db["prs"]
+          if pr["head"] == head and pr["state"] == "OPEN"])
+if args[:2] == ["pr", "create"]:
+    number = len(db["prs"]) + 1
+    url = f"https://github.com/acme/walk/pull/{number}"
+    db["prs"].append({"number": number, "url": url, "head": opt("--head"), "base": opt("--base"),
+                      "title": opt("--title", ""), "body": opt("--body", ""), "state": "OPEN",
+                      "draft": "--draft" in args})
+    save()
+    done(url)
+if args[:2] == ["pr", "view"]:
+    done(view(find(args[2]), opt("--json")))
+if args[:2] == ["pr", "edit"]:
+    pr = find(args[2])
+    pr["body"] = opt("--body", pr["body"])
+    save()
+    done()
+if args[:2] == ["pr", "ready"]:
+    find(args[2])["draft"] = False
+    save()
+    done()
+if args[:2] == ["pr", "checks"]:
+    done([])
+if args[:2] == ["pr", "merge"]:
+    pr = find(args[2])
+    head = ref(pr["head"])
+    expected = opt("--match-head-commit")
+    if expected and expected != head:
+        print("head moved", file=sys.stderr)
+        sys.exit(1)
+    subprocess.run(["git", "--git-dir", origin, "update-ref", "refs/heads/" + pr["base"], head], check=True)
+    pr["state"] = "MERGED"
+    save()
+    done()
+if args[:2] == ["api", "graphql"] and any("reviewThreads" in a for a in args):
+    done({"data": {"repository": {"pullRequest": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}})
+if args[:1] == ["api"]:
+    done([])
+(walk / "gh-unsupported.log").open("a").write(json.dumps(args) + "\n")
+print("fake gh: unsupported " + " ".join(args), file=sys.stderr)
+sys.exit(1)

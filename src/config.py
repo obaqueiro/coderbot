@@ -5,6 +5,11 @@ import re
 import secrets
 from pathlib import Path
 
+# Child processes (coderbot's own `openspec ... --json` calls and the agent's) must not
+# print first-run notices: OpenSpec 1.6 writes its telemetry note to stdout ahead of the
+# JSON, which a fresh HOME turned into an unparseable reply and a stuck task.
+os.environ.setdefault("OPENSPEC_TELEMETRY", "0")
+
 CODEBOT_DIR = Path(__file__).resolve().parent.parent  # repo root (this file lives in src/)
 DATA_DIR = Path(os.environ.get("CODEBOT_DATA_DIR", CODEBOT_DIR / "data"))
 
