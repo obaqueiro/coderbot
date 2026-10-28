@@ -1616,6 +1616,65 @@ def _advance_verified(state: dict) -> None:
     trail(state, "Verification passed; " + ("reusing content-bound internal review" if reusable else "running internal review"))
 
 
+def _controller_verify(state: dict) -> bool:
+    """Verify without an agent turn whenever ground truth suffices: strict OpenSpec
+    validation, the controller's own checklist counts and the focused checks it already
+    ran. Returns False (caller falls back to the agent verification turn, today's path)
+    when something needs the agent: verification tasks to reconcile, an invalid change,
+    or checks that have not run. Failing checks go straight to REPAIR_CHECKS."""
+    slug = _validated_slug(state.get("slug"))
+    task_path = config.REPO_PATH / "openspec/changes" / slug / "tasks.md"
+    if not task_path.is_file():
+        return False
+    pending = task_phases.inspect(config.REPO_PATH, slug)
+    if pending["verification"]:
+        return False
+    if pending["implementation"]:
+        state["implementation_return_round"] = state.get("implementation_return_round", 0) + 1
+        if state["implementation_return_round"] > config.QUALITY_GATE_MAX_ROUNDS:
+            return False  # the agent turn reports why the tasks stay open
+        state["implementation_feedback"] = ("Complete these approved implementation tasks before verification:\n"
+                                            + "\n".join(pending["implementation"]))
+        state["state"] = "IMPLEMENTING"
+        trail(state, "Verification returned to implementation: approved tasks remain incomplete",
+              state["implementation_feedback"])
+        return True
+    results = state.get("focused_check_results") or []
+    failed = [check for check in results
+              if check.get("gate", {}).get("status") != "pass" and check.get("status") not in ("pass", "skipped")]
+    if failed:
+        report = {"status": "fail", "checks": [dict(check, gate={"status": "indeterminate"
+                  if check.get("status") in ("unknown", "infrastructure", "interrupted") else "fail",
+                  "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
+        _begin_check_repair(state, report, resume="VERIFYING")
+        return True
+    try:
+        _run_checked(["openspec", "validate", slug, "--strict", "--no-interactive"])
+        instructions = json.loads(_run_checked(["openspec", "instructions", "apply", "--change", slug, "--json"]))
+        task_phases.validate_progress(config.REPO_PATH, slug, instructions)
+        progress = instructions.get("progress") if isinstance(instructions, dict) else None
+        deferred = len(pending["final_checks"])
+        total, complete = progress["total"], progress["complete"]
+        if instructions.get("state") not in (("all_done", "ready") if deferred else ("all_done",)) \
+                or complete + deferred != total or (deferred and not config.DETERMINISTIC_CHECKS):
+            return False
+    except Exception as error:  # noqa: BLE001 - the agent turn repairs and reports it
+        log.info("controller verification needs the agent: %s", error)
+        return False
+    state["quality_report"] = {"status": "pass", "openspec": "pass", "tasks": f"{complete}/{total}",
+                               "commands": [f"{check.get('check') or check.get('id')}: {check.get('status')}"
+                                            for check in results] or ["openspec validate --strict: pass"],
+                               "preexisting": [], **({"deferred": deferred} if deferred else {})}
+    state["quality_snapshot"] = content_snapshot(config.REPO_PATH)
+    state["quality_controller_validated"] = True
+    state.pop("verify_round", None)
+    state.pop("verify_round_feedback", None)
+    evidence_delivery.register_verified(state, config.REPO_PATH, [])
+    trail(state, "Verified by the controller (OpenSpec, checklist and focused checks); no agent turn needed")
+    _advance_verified(state)
+    return True
+
+
 def do_verify(state: dict) -> None:
     if _verify_preflight(state):
         return
@@ -1627,6 +1686,8 @@ def do_verify(state: dict) -> None:
         if report:
             _advance_verified(state)
             return
+    if not state.get("verification_guidance") and _controller_verify(state):
+        return
     result = agent_runner.resume(state["session_id"], _verify_prompt(state))
     _complete_verify(state, result)
 
