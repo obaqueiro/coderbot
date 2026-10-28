@@ -852,3 +852,28 @@ class AcceptScopeDrift(unittest.TestCase):
                 self.assertEqual(state["state"], "VERIFYING")
                 self.assertNotEqual(state["approved_scope_fingerprint"], "stale-fingerprint")
                 self.assertFalse(main._scope_drift(state))
+
+
+class RetriedSends(unittest.TestCase):
+    def test_a_retried_step_does_not_send_the_same_message_twice(self):
+        state = {"item": "t", "slug": "s", "state": "VERIFYING", "thread_id": "th"}
+        with patch.object(main.gmail_client, "send", return_value="th") as send, \
+             patch.object(main, "trail"), patch.object(main, "_note_contact"):
+            main.email(state, "Verification blocked", "Same question")
+            main.email(state, "Verification blocked", "Same question")  # step retried after a crash
+            main.email(state, "Verification blocked", "A different question")
+        self.assertEqual(send.call_count, 2)
+        state["sent_messages"] = {k: 0 for k in state["sent_messages"]}  # long ago
+        with patch.object(main.gmail_client, "send", return_value="th") as send, \
+             patch.object(main, "trail"), patch.object(main, "_note_contact"):
+            main.email(state, "Verification blocked", "Same question")
+        self.assertEqual(send.call_count, 1)
+
+    def test_a_failed_send_is_retried(self):
+        state = {"item": "t", "slug": "s", "state": "VERIFYING", "thread_id": "th"}
+        with patch.object(main.gmail_client, "send", side_effect=[ConnectionError("down"), "th"]) as send, \
+             patch.object(main, "trail"), patch.object(main, "_note_contact"):
+            with self.assertRaises(ConnectionError):
+                main.email(state, "Verification blocked", "Same question")
+            main.email(state, "Verification blocked", "Same question")
+        self.assertEqual(send.call_count, 2)

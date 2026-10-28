@@ -248,6 +248,29 @@ def _contact_name() -> str:
     return "Slack message" if config.COMM_CHANNEL == "slack" else "email"
 
 
+RESEND_WINDOW_SECONDS = 600
+
+
+def _message_key(subj: str, body: str, thread_id, attachments) -> str:
+    return hashlib.sha256(json.dumps([subj, body, thread_id, sorted(str(a) for a in attachments or [])]).encode()).hexdigest()[:16]
+
+
+def _recently_sent(state: dict, subj: str, body: str, thread_id, attachments) -> bool:
+    """A step that failed after sending and is retried must not send the same message
+    again. Identical subject, body, thread and attachments delivered within
+    RESEND_WINDOW_SECONDS count as the same message; later deliberate repeats go out."""
+    sent = state.get("sent_messages") or {}
+    stamp = sent.get(_message_key(subj, body, thread_id, attachments))
+    return stamp is not None and time.time() - stamp < RESEND_WINDOW_SECONDS
+
+
+def _record_sent(state: dict, subj: str, body: str, thread_id, attachments) -> None:
+    now = time.time()
+    sent = {k: t for k, t in (state.get("sent_messages") or {}).items() if now - t < RESEND_WINDOW_SECONDS}
+    sent[_message_key(subj, body, thread_id, attachments)] = now
+    state["sent_messages"] = sent
+
+
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
           new_thread: bool = False, *, milestone: str | None = None,
           visible_question: str | None = None, localized: bool = False) -> None:
@@ -283,6 +306,11 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
         phase, body = _localized_pair(state, phase, body)
     body = diagnostics.redact(body)
     subj = subject(state, phase)
+    # Milestone banners repeat on purpose (E2E -> WAIT_REPLY -> E2E) and are deduplicated
+    # by banner_state; this guard is for steps retried after a failure.
+    if not milestone and _recently_sent(state, subj, body, thread_id, attachments):
+        log.info("not re-sending %r: the same message went to this thread minutes ago (retried step)", subj)
+        return
     log.info("sending %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
     if attachments:
@@ -306,6 +334,8 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     if fresh_stage:
         milestones.mark(state, fresh_stage)
         save_state(state)
+    if not milestone:
+        _record_sent(state, subj, body, thread_id, attachments)
     # Snapshot for STATUS replies: lets the user recover what the bot last said (and
     # is therefore waiting on) if the original email was lost or unclear.
     state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
@@ -4786,7 +4816,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("declined_findings", "review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("sent_messages", "declined_findings", "review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
