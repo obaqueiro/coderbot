@@ -1301,6 +1301,12 @@ def do_implement(state: dict) -> None:
         return
     _open_draft_pr(state)
     feedback = state.get("implementation_feedback", "")
+    plan = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "plan.md"
+    if state.get("classification") == "architectural" and not plan.exists():
+        # Superpowers' ceremony scales with the task: architectural work gets a written
+        # plan first, in the change folder; bounded work goes straight to the checklist.
+        feedback = (f"First use writing-plans to write {plan.relative_to(config.REPO_PATH)} "
+                    "(Inline Execution, one task per tasks.md item) and commit it; then implement.\n" + feedback)
     result = agent_runner.resume(
         state["session_id"],
         f"Implementation continuation: {state.get('implementation_turn', 0)}\n" + feedback + "\n\n" + prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
