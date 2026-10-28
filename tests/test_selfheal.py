@@ -419,4 +419,6 @@ class SupervisorHygiene(unittest.TestCase):
         for value, expected in (("300", 900), ("", 360), ("2m", 360), ("30", 180)):
             with patch.dict(os.environ, {"CODEBOT_POLL_INTERVAL": value}):
                 self.assertEqual(importlib.reload(supervisor_module).LIVENESS_SECONDS, expected)
-        importlib.reload(supervisor_module)
+        with patch.dict(os.environ, {"CODEBOT_AGENT_TIMEOUT": "7200"}):
+            self.assertEqual(importlib.reload(supervisor_module).OBSERVATION_SECONDS, 8100)
+        self.assertGreaterEqual(importlib.reload(supervisor_module).OBSERVATION_SECONDS, 900)

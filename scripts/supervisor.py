@@ -80,6 +80,18 @@ def _poll_interval():
 
 LIVENESS_SECONDS = max(180, 3 * _poll_interval())
 
+
+def _agent_timeout():
+    try:
+        return int((os.environ.get("CODEBOT_AGENT_TIMEOUT") or "").strip() or 1800)
+    except ValueError:
+        return 1800
+
+
+# A promoted patch is judged by real task progress. The window must outlast one agent
+# turn: at 15 minutes a correct patch was rolled back in the middle of a 30-minute turn.
+OBSERVATION_SECONDS = max(900, _agent_timeout() + 900)
+
 class Supervisor:
     def __init__(self, source, data, mode):
         self.source, self.data, self.mode = Path(source).resolve(), Path(data).resolve(), mode
@@ -332,7 +344,7 @@ class Supervisor:
                 atomic_json(self.repairs.home / "recovery.json", ticket)
                 atomic_json(record_path, {**record, "status": "observing", "epoch": new_epoch})
             self.start()
-            deadline = time.monotonic() + 900
+            deadline = time.monotonic() + OBSERVATION_SECONDS
             while time.monotonic() < deadline:
                 self.active_until = time.monotonic() + 60
                 self.heartbeat()
