@@ -826,3 +826,29 @@ class LoopGuard(unittest.TestCase):
                 main._loop_guard(state, "IMPLEMENTING")
                 main._loop_guard({"item": "t", "state": "WAIT_REPLY"}, "IMPLEMENTING")
         stuck.assert_not_called()
+
+
+class AcceptScopeDrift(unittest.TestCase):
+    def test_option_one_rebaselines_the_scope_and_resumes(self):
+        import handoffs
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp)
+            change = repo / "openspec/changes/feat"
+            change.mkdir(parents=True)
+            (change / "proposal.md").write_text("## Why\\nNeeded.\\n")
+            (change / "design.md").write_text("## Context\\nSimple.\\n")
+            (change / "specs/a").mkdir(parents=True)
+            (change / "specs/a/spec.md").write_text("## ADDED Requirements\\n")
+            (change / "tasks.md").write_text("## 1. Work\\n\\n- [ ] 1.1 Original task\\n")
+            with patch.object(main.config, "REPO_PATH", repo), patch.object(main, "email"), \
+                 patch.object(main, "trail"), patch.object(main, "save_state"):
+                state = {"state": "VERIFYING", "slug": "feat", "item": "t",
+                         "approved_scope_fingerprint": "stale-fingerprint"}
+                self.assertTrue(main._scope_drift(state))
+                self.assertEqual(state["state"], "WAIT_REPLY")
+                card = handoffs.remember_decision(state, "Verification blocked")  # what email() records
+                self.assertIn("1. Accept the current requirements and tasks", card)
+                main._dispatch_wait_reply(state, "m1", "1")
+                self.assertEqual(state["state"], "VERIFYING")
+                self.assertNotEqual(state["approved_scope_fingerprint"], "stale-fingerprint")
+                self.assertFalse(main._scope_drift(state))

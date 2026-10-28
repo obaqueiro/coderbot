@@ -28,6 +28,10 @@ the single actionable question.
 """
 
 
+# Controller token: choosing it re-baselines the approved scope deterministically.
+ACCEPT_SCOPE = "accept-current-scope"
+
+
 def _option(label, reply, *, wait=False, details=False):
     return {"label": label, "reply": reply, "wait": wait, "details": details}
 
@@ -77,7 +81,8 @@ def decision(state, phase, question=None):
                        _option("Keep waiting without changing the work", "", wait=True)]
         elif kind == "scope drift":
             title = "How should we reconcile the changed task scope?"
-            options = [_option("Reconcile the checklist with the approved scope; specify corrections (Recommended)",
+            options = [_option("Accept the current requirements and tasks as the approved scope", ACCEPT_SCOPE),
+                       _option("Reconcile the checklist with the approved scope; specify corrections (Recommended)",
                                "Reconcile the checklist with the approved scope using these corrections:", details=True),
                        _option("Request a scope revision; describe it for review", "Prepare a scope revision for review, not implementation:", details=True),
                        _option("Keep waiting without changing scope", "", wait=True)]

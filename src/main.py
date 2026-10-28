@@ -4079,8 +4079,31 @@ def handle_wait(state: dict) -> None:
     gmail_client.mark_processed(msg_id)
 
 
+def _accept_current_scope(state: dict) -> None:
+    """The user accepted the drifted requirements/tasks as the approved scope: re-baseline
+    and resume. Without this path a scope drift could only loop back to the same block."""
+    slug = _validated_slug(state["slug"])
+    directory = (_validated_archive_path(state["archive_path"], slug) if state.get("archive_path")
+                 else config.REPO_PATH / "openspec/changes" / slug)
+    state["approved_scope_fingerprint"] = proposal_package.scope_fingerprint(proposal_package.collect_directory(directory))
+    if (config.REPO_PATH / "openspec/changes" / slug / "tasks.md").is_file():
+        inventory = task_phases.inventory(config.REPO_PATH, slug)
+        state["approved_task_inventory"] = inventory
+        if "verified_task_inventory" in state:
+            state["verified_task_inventory"] = inventory
+    state.pop("verification_blocker", None)
+    resume = state.get("return_state") or "VERIFYING"
+    state.pop("pending_question", None)
+    state.pop("pending_decision", None)
+    state["state"] = resume if resume in PHASES else "VERIFYING"
+    trail(state, "User accepted the current requirements and tasks as the approved scope")
+
+
 def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
     selection = handoffs.selected_reply(state, reply)
+    if selection is not None and selection.get("reply") == handoffs.ACCEPT_SCOPE:
+        _accept_current_scope(state)
+        return
     if selection is not None:
         if selection.get("error") or selection.get("wait"):
             message = selection.get("error") or "Work is preserved. I will keep waiting; no action was authorized."
