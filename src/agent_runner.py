@@ -15,6 +15,7 @@ import activity
 import config
 import secret_store
 import turn_control
+import tool_policy
 import phase_checkpoint
 import repo_provenance
 from agent_errors import AgentContentFilterError, AgentTransportError
@@ -299,14 +300,17 @@ def _opencode_environment() -> dict[str, str]:
     inline.update(model=config.OPENCODE_MODEL, share="disabled", autoupdate=False)
     # This runtime is explicitly trusted. The managed hook also overrides agents
     # loaded from project/global files after this inline configuration is merged.
-    inline["permission"] = {"*": "allow"}
+    phase = tool_policy.current_phase()
+    env.update(tool_policy.environment(phase))
+    trusted = {"*": "allow", "bash": tool_policy.opencode_bash(phase)} if tool_policy.enabled() else {"*": "allow"}
+    inline["permission"] = trusted
     agents = inline.setdefault("agent", {})
     if not isinstance(agents, dict):
         raise RuntimeError("OPENCODE_CONFIG_CONTENT agent must contain a JSON object")
     for name in set(agents) | {"build", "plan", "general", "explore"}:
         if not isinstance(agents.setdefault(name, {}), dict):
             raise RuntimeError("OPENCODE_CONFIG_CONTENT agent entries must be objects")
-        agents[name]["permission"] = {"*": "allow"}
+        agents[name]["permission"] = dict(trusted)
     for role, model in config.OPENCODE_ROLE_MODELS.items():
         agents.setdefault(role, {})["model"] = model
     for role, effort in config.OPENCODE_ROLE_EFFORTS.items():

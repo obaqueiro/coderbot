@@ -14,6 +14,7 @@ import turn_control
 import operations
 import check_plan
 import prompts
+import tool_policy
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +172,8 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     # Overrides inherited/project defaults, including headless Claude's manual default.
     env["CAVEMAN_DEFAULT_MODE"] = (
         "caveman" if config.USE_CAVEMAN and "--tools" not in cmd else "off")
+    if "--tools" not in cmd:
+        env.update(tool_policy.environment(tool_policy.current_phase()))
     return operations.run(cmd, cwd=config.REPO_PATH, timeout=config.AGENT_TIMEOUT_SECONDS,
                           kind="agent", env=env)
 
@@ -245,8 +248,10 @@ def _invoke_with_model(args: list[str], prompt: str,
         for _ in range(3):
             index = cmd.index("--plugin-dir")
             del cmd[index:index + 2]
-    elif config.USE_CAVEMAN:
-        cmd.extend(["--plugin-dir", str(config.CAVEMAN_PLUGIN_DIR)])
+    else:
+        if config.USE_CAVEMAN:
+            cmd.extend(["--plugin-dir", str(config.CAVEMAN_PLUGIN_DIR)])
+        cmd.extend(tool_policy.claude_args(tool_policy.current_phase()))
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
              " ".join(args) or "run", model, effort,
              len(prompt), _config_report())

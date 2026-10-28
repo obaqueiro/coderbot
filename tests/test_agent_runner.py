@@ -279,7 +279,9 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assert_managed_config(call)
             inline = json.loads(call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
             self.assertEqual(inline["theme"], "custom")
-            self.assertEqual(inline["permission"], {"*": "allow"})
+            # Trusted runtime, except coderbot-only commands (tool_policy).
+            self.assertEqual(inline["permission"]["*"], "allow")
+            self.assertEqual(inline["permission"]["bash"]["git push*"], "deny")
             self.assertEqual(inline["skills"]["urls"], existing["skills"]["urls"])
             self.assertEqual(inline["skills"]["paths"][0], "/existing/skills")
             self.assertIn("existing-plugin", inline["plugin"])

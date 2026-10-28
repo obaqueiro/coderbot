@@ -189,6 +189,11 @@ BASE_BRANCH = os.environ.get("CODEBOT_BASE_BRANCH") or "main"
 AGENT = os.environ.get("CODEBOT_AGENT") or "claude"
 # Deliberately exact: no aliases, whitespace trimming or case folding.
 USE_CAVEMAN = os.environ.get("USE_CAVEMAN") == "true"
+# Lifecycle guardrails enforced by the runtime (src/tool_policy.py); "off" disables them.
+TOOL_POLICY = (os.environ.get("CODEBOT_TOOL_POLICY") or "on").strip().lower() != "off"
+# "inline" (default): one implementer session does the whole feature. "subagent" re-allows
+# per-task subagents during implementation, for a timed A/B comparison.
+EXECUTION = (os.environ.get("CODEBOT_EXECUTION") or "inline").strip().lower()
 CAVEMAN_PLUGIN_DIR = Path("/opt/coderbot/caveman")
 
 # `or` (not a get-default) so an empty env value from .env still falls back,

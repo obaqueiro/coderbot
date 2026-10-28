@@ -1,12 +1,30 @@
 // OpenCode 1.18.18 HTTP/event contract. No private runtime modules required.
 export const RUNTIME_VERSION = '1.18.18';
-export const TRUSTED_PERMISSION = [{ permission: '*', pattern: '*', action: 'allow' }];
+// Coderbot-only commands (src/tool_policy.py, via $CODEBOT_POLICY) stay denied inside
+// the otherwise trusted runtime; later rules win, so denials follow the allow-all rule.
+function deniedCommands() {
+  try {
+    return JSON.parse(process.env.CODEBOT_POLICY || '{}').denied || [];
+  } catch {
+    return [];
+  }
+}
+const bashPatterns = () => deniedCommands().flatMap(command => [command + '*',
+  ...(command.startsWith('git ') ? ['git -C * ' + command.slice(4) + '*'] : [])]);
+export const TRUSTED_PERMISSION = [{ permission: '*', pattern: '*', action: 'allow' },
+  ...bashPatterns().map(pattern => ({ permission: 'bash', pattern, action: 'deny' }))];
+
+function trustedRules() {
+  const patterns = bashPatterns();
+  if (!patterns.length) return {'*': 'allow'};
+  return {'*': 'allow', bash: Object.fromEntries([['*', 'allow'], ...patterns.map(p => [p, 'deny'])])};
+}
 
 export function trustedConfig(config) {
-  config.permission = {'*': 'allow'};
+  config.permission = trustedRules();
   config.agent ||= {};
   for (const name of new Set(['build', 'plan', 'general', 'explore', ...Object.keys(config.agent)])) {
-    config.agent[name] = { ...config.agent[name], permission: {'*': 'allow'} };
+    config.agent[name] = { ...config.agent[name], permission: trustedRules() };
   }
   return config;
 }
