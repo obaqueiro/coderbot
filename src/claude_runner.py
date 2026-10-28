@@ -93,7 +93,9 @@ class ClaudeResult:
             # Joining with an absolute path yields that path; the join only
             # kicks in for (out-of-contract) repo-relative ones.
             candidate = (config.REPO_PATH / line[len("ATTACH:"):].strip()).resolve()
-            if candidate.is_relative_to(OUTBOX_DIR) and candidate.is_file():
+            # os.path never raises: on Python 3.12 Path.is_file() raises for a
+            # >255-byte component, and model text can be that long.
+            if candidate.is_relative_to(OUTBOX_DIR) and os.path.isfile(candidate):
                 valid.append(str(candidate))
         return valid
 

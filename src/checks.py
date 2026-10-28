@@ -5,6 +5,7 @@ import time
 import uuid
 import logging
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 
@@ -192,7 +193,7 @@ def tool_versions(argv, cwd):
     if Path(executable).name in ("node", "npm", "python", "python3", "pytest", "openspec"):
         result = operations.run([executable, "--version"], cwd=cwd, timeout=15, kind="probe")
         versions["version"] = (result.stdout + result.stderr).strip()[:300]
-    elif (Path(cwd) / executable).is_file():
+    elif os.path.isfile(Path(cwd) / executable):  # never raises on over-long names
         import hashlib
         versions["executable_hash"] = hashlib.sha256((Path(cwd) / executable).read_bytes()).hexdigest()
     for name in ("node", "python3"):

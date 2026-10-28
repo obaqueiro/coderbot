@@ -166,3 +166,10 @@ class SentinelPreamble(unittest.TestCase):
     def test_indented_sentinel_is_not_a_split_point(self):
         out = "intro\n  NEED_USER_INPUT: quoted\nNEED_USER_INPUT: real"
         self.assertEqual(claude_runner.sentinel_preamble(out), "intro\n  NEED_USER_INPUT: quoted")
+
+
+class OverlongPaths(unittest.TestCase):
+    def test_attach_line_with_a_long_prose_tail_is_ignored_not_raised(self):
+        # Python 3.12's Path.is_file() raises ENAMETOOLONG for a >255-byte component.
+        line = "ATTACH: " + str(claude_runner.OUTBOX_DIR / ("captura de la pantalla final " * 20))
+        self.assertEqual(claude_runner.ClaudeResult("s", "done\n" + line).attachments, [])

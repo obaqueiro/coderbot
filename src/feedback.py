@@ -1,4 +1,5 @@
 """Durable feedback intake and validated investigation contracts."""
+import os
 import time
 
 import prompts
@@ -56,7 +57,7 @@ def attachments(value):
     valid, missing = [], []
     for raw in paths:
         p = Path(raw).resolve()
-        if p.is_relative_to(root) and p.is_file() and p.stat().st_size:
+        if p.is_relative_to(root) and os.path.isfile(p) and os.path.getsize(p):
             if p not in valid:
                 valid.append(p)
         else:
