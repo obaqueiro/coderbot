@@ -937,6 +937,9 @@ def do_pick(state: dict) -> None:
         choice = parse_json_reply(result.output)
     if not choice.get("item") or not choice.get("slug"):
         raise ValueError(f"PICK output missing item/slug: {choice!r}")
+    # The slug becomes a branch, a directory and file names: model text must not reach
+    # them unbounded or with characters a ref or path cannot hold.
+    choice["slug"] = re.sub(r"[^a-z0-9]+", "-", str(choice["slug"]).casefold()).strip("-")[:60].strip("-") or "task"
     chosen = next((i for i in items
                    if task_source.normalize(i["text"]) == task_source.normalize(choice["item"])),
                   None)
