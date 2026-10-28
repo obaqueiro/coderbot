@@ -19,6 +19,19 @@ role = ContextVar("turn_role", default="work")
 _roles = {}
 
 
+def signal_group(pid, sig) -> bool:
+    """Signal a child's own process group (children start in a new session, so its id is
+    the child's pid). Never signals group 0/1 or coderbot's own group: a mocked or bogus
+    pid must not hit PID 1 (coderbot itself inside a container). Returns whether sent."""
+    if type(pid) is not int or pid <= 1 or pid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pid, sig)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 def register(process: subprocess.Popen) -> None:
     import selfheal_events
     try:
@@ -65,19 +78,13 @@ def request_kick(target_role="work") -> bool:
             if proc.pid in _kicked:
                 continue
             _kicked.add(proc.pid)
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            signal_group(proc.pid, signal.SIGTERM)
 
     def escalate() -> None:
         with _lock:
             for proc in processes:
                 if proc.pid in _processes and proc.poll() is None:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    signal_group(proc.pid, signal.SIGKILL)
 
     timer = threading.Timer(3, escalate)
     timer.daemon = True

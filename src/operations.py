@@ -4,7 +4,6 @@ from contextvars import ContextVar
 import threading
 import time
 import uuid
-import os
 import signal
 import subprocess
 
@@ -137,19 +136,14 @@ def clear():
 
 def terminate(process, grace=3):
     """Signal the whole group even if its leader already exited."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    if not turn_control.signal_group(process.pid, signal.SIGTERM):
         process.wait()
         return
     try:
         process.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    turn_control.signal_group(process.pid, signal.SIGKILL)
     process.wait(timeout=5)
 
 

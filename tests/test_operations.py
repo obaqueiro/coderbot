@@ -80,6 +80,20 @@ class BudgetTests(unittest.TestCase):
             finally:
                 operations.terminate(leader, grace=.1)
 
+    def test_group_signals_never_target_pid_one_or_our_own_group(self):
+        # A mocked process coerces its pid to 1; signalling group 1 inside a container
+        # would kill coderbot (PID 1) itself.
+        from unittest.mock import MagicMock, patch
+        import signal
+        import turn_control
+        with patch.object(turn_control.os, "killpg") as killpg:
+            for pid in (MagicMock().pid, 0, 1, -5, "12", None, os.getpgrp()):
+                self.assertFalse(turn_control.signal_group(pid, signal.SIGTERM))
+            operations.terminate(MagicMock(), grace=.01)
+            killpg.assert_not_called()
+            self.assertTrue(turn_control.signal_group(424242, signal.SIGTERM))
+            killpg.assert_called_once_with(424242, signal.SIGTERM)
+
     def test_tool_state_distinguishes_subagent_and_silent_test(self):
         operations.clear()
         try:

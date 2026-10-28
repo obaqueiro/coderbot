@@ -31,6 +31,7 @@ import urllib.request
 import zlib
 
 import config
+import turn_control
 
 MAX_CIPHERTEXT = 100_000      # bytes of paste JSON fetched
 MAX_PLAINTEXT = 32_768        # bytes after decompression
@@ -363,7 +364,7 @@ def stop(session: dict | None) -> None:
     pid = session.get("tunnel_pid")
     try:
         if _alive(pid):
-            os.killpg(pid, signal.SIGTERM) if pid in _processes else os.kill(pid, signal.SIGTERM)
+            turn_control.signal_group(pid, signal.SIGTERM) if pid in _processes else os.kill(pid, signal.SIGTERM)
             process = _processes.pop(pid, None)
             if process is not None:
                 process.wait(timeout=5)

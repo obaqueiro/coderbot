@@ -461,10 +461,7 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
 
     def _kill_on_timeout() -> None:
         timed_out.set()
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        turn_control.signal_group(proc.pid, signal.SIGKILL)
 
     timer = threading.Timer(effective_timeout, _kill_on_timeout)
     timer.daemon = True
