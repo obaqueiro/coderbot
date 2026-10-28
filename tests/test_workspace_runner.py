@@ -75,6 +75,20 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual(self.state["reported_check_plan"][0]["id"], "existing")
         self.assertIn("reported_check_plan_error", self.state)
 
+    def test_dirty_repositories_wait_in_wait_clean_instead_of_failing_every_tick(self):
+        (self.ui / "scratch.txt").write_text("unsaved")
+        state = bind_and_validate({"state": "IDLE"}, self.context)
+        with patch.object(main, "_load_holds", return_value=[]):
+            runner.pick(state)
+            self.assertEqual(state["state"], "WAIT_CLEAN")
+            runner.pick(state)  # a second dirty pick does not announce again
+            runner.run_phase(state)  # still dirty: no exception, still waiting
+        self.assertEqual(state["state"], "WAIT_CLEAN")
+        self.assertEqual(main.email.call_count, 1)
+        (self.ui / "scratch.txt").unlink()
+        runner.run_phase(state)
+        self.assertEqual(state["state"], "IDLE")
+
     def test_malformed_plan_never_passes_workspace_verification(self):
         self.state["state"] = "VERIFYING"
         runner.remember_checks(self.state, "CHECK_PLAN:")

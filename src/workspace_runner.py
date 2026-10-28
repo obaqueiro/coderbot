@@ -225,7 +225,18 @@ def pick(state):
     if requested:
         main._resume_held_task(state, requested[0])
         return
-    baseline = preflight(context)
+    try:
+        baseline = preflight(context)
+    except workspace.WorkspaceError as error:
+        # Dirty child repositories (e.g. after HOLD or ABORT) used to fail every IDLE
+        # tick. Say so once and recheck quietly from WAIT_CLEAN until they are saved.
+        if not state.get("dirty_notified"):
+            main.email(state, "blocked: dirty working tree", f"{error}. I will recheck automatically and "
+                       "start the next task once every repository is clean.", new_thread=True)
+            state["dirty_notified"] = True
+        state["state"] = "WAIT_CLEAN"
+        return
+    state.pop("dirty_notified", None)
     items = main.task_source.list_pending_items()
     mine = [item for item in items if item.get("claimed_by_me")]
     items = mine or main.prioritize_items(items)
@@ -319,7 +330,10 @@ def run_phase(state):
             state["state"] = "VERIFYING"
         return
     if phase == "WAIT_CLEAN":
-        preflight(target())
+        try:
+            preflight(target())
+        except workspace.WorkspaceError:
+            return  # still dirty: keep waiting without failing the tick
         state["state"] = "IDLE"
         return
     return main.handle_wait(state)

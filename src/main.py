@@ -6316,10 +6316,11 @@ def _run_loop() -> None:
             state = load_state()
             if state.get("workspace_path"):
                 config.REPO_PATH = Path(state["workspace_path"])
-        except (json.JSONDecodeError, OSError):
-            # Corrupt/unreadable state.json: don't crash the process — log and wait
-            # so an operator can repair or delete the file.
-            log.exception("could not read %s; retrying in %ss", config.STATE_PATH,
+        except (ValueError, OSError):
+            # Corrupt/unreadable state.json, or a workspace target that no longer matches
+            # it (a child repo lost origin/HEAD, a new child, `git init` at the root): never
+            # crash into a restart loop — log, wait, and retry once an operator fixes it.
+            log.exception("could not load %s; retrying in %ss", config.STATE_PATH,
                           config.POLL_INTERVAL_SECONDS)
             time.sleep(config.POLL_INTERVAL_SECONDS)
             continue
