@@ -466,3 +466,20 @@ class NoIdleReviewWait(unittest.TestCase):
         fresh = {"state": "OPEN_PR"}
         main._enter_review_wait(fresh)
         self.assertTrue(fresh["await_new_run"])
+
+
+class RepeatedFindings(unittest.TestCase):
+    def test_a_declined_bot_finding_raised_again_is_resolved_without_an_agent_turn(self):
+        bot = {"id": "T1", "path": "src/a.py", "body": "Consider handling None at line 12", "comment_id": 5,
+               "comments": [{"author": "github-actions[bot]"}]}
+        again = dict(bot, id="T2", body="Consider  handling None at line 40")
+        other = dict(bot, id="T3", body="Rename this variable")
+        state = {"pr_url": PR, "review_threads": [bot]}
+        with patch.object(main, "_is_ocr_thread", return_value=True), \
+             patch.object(main.subprocess, "run", return_value=Mock(returncode=0, stdout="{}")), \
+             patch.object(main, "resolve_review_thread", return_value=True) as resolve:
+            main._resolve_review_threads(state, "RESOLVE: T1 declined: None is impossible here")
+            left = main._resolve_repeated_findings(state, [again, other])
+        self.assertEqual(left, [other])
+        self.assertEqual([c.args[0] for c in resolve.call_args_list], ["T1", "T2"])
+        self.assertEqual(state["review_threads"], [bot])

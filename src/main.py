@@ -2736,7 +2736,7 @@ def handle_review_wait(state: dict) -> None:
         state["review_head"] = git("rev-parse", "HEAD")
     except Exception:  # noqa: BLE001
         state.pop("review_head", None)
-    ocr = [t for t in threads if _is_ocr_thread(t)]
+    ocr = _resolve_repeated_findings(state, [t for t in threads if _is_ocr_thread(t)])
     if not ocr:
         log.info("no unresolved OCR threads; PR is clean")
         finalize_pr(state)
@@ -3112,6 +3112,10 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
             log.warning("ignoring RESOLVE for unknown thread %r", thread_id[:80])
             continue
         reason = reason.strip() or "Resolved by codebot."
+        if _is_ocr_thread(thread) and reason.lower().startswith("declined"):
+            # Remember the verdict: the bot re-raising the same finding gets it again
+            # without another agent turn (see handle_review_wait).
+            state.setdefault("declined_findings", {})[_finding_key(thread)] = reason
         try:
             if thread.get("comment_id"):
                 reply = subprocess.run(
@@ -3140,6 +3144,35 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
             log.warning("resolving thread %s timed out", thread_id)
     log.info("resolved %d/%d review thread(s) from RESOLVE lines", resolved, len(known))
     return resolved
+
+
+def _finding_key(thread: dict) -> str:
+    """Identity of a reviewer finding across runs: file plus the opening comment with
+    whitespace, case and line numbers normalized away."""
+    body = re.sub(r"\d+", "#", " ".join(str(thread.get("body", "")).lower().split()))
+    return hashlib.sha256(f"{thread.get('path')}\0{body}".encode()).hexdigest()[:20]
+
+
+def _resolve_repeated_findings(state: dict, threads: list[dict]) -> list[dict]:
+    """Reply to and resolve bot threads that repeat an already-declined finding; return
+    the threads that still need the agent."""
+    declined = state.get("declined_findings") or {}
+    repeats = [t for t in threads if _finding_key(t) in declined]
+    if not repeats:
+        return threads
+    saved = state.get("review_threads")
+    state["review_threads"] = repeats
+    try:
+        _resolve_review_threads(state, "\n".join(
+            f"RESOLVE: {t['id']} {declined[_finding_key(t)]} (already evaluated in an earlier round)"
+            for t in repeats))
+    finally:
+        if saved is None:
+            state.pop("review_threads", None)
+        else:
+            state["review_threads"] = saved
+    log.info("resolved %d repeated finding(s) without an agent turn", len(repeats))
+    return [t for t in threads if t not in repeats]
 
 
 def _remember_bot_comment(state: dict, reply_json: str) -> None:
@@ -4703,7 +4736,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("declined_findings", "review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
