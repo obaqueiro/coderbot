@@ -205,8 +205,13 @@ def turn(state, prompt, *, fresh=False):
                   if name in shared_after or not (context.root / name).exists()}
         journal(state, context, shared, shared_after)
         main.save_state(state)
-    state["session_id"] = result.session_id
-    state["workspace"]["session_id"] = result.session_id
+    if fresh:
+        # A fresh reviewer never replaces the implementer's session: later fix turns
+        # must resume the agent that knows the code.
+        state["workspace"]["review_session_id"] = result.session_id
+    else:
+        state["session_id"] = result.session_id
+        state["workspace"]["session_id"] = result.session_id
     state["workspace"]["attachments"] = list(dict.fromkeys([
         *state["workspace"].get("attachments", []), *getattr(result, "attachments", [])]))
     return result
@@ -381,10 +386,9 @@ def verify(state):
             return
         result = turn(state, f"Check-plan repair attempt {attempt}/{config.QUALITY_GATE_MAX_ROUNDS}; "
             f"recovery revision {state.get('check_plan_repair_revision', 0)}.\n"
-            "Correct only the malformed check contract; do not repeat exploration or implementation. "
-            "Emit CHECK_PLAN: followed by a valid JSON object with version 1 and a checks array. "
-            "Use id, argv as an array of strings, workspace-relative cwd, and timeout in seconds. "
-            'Example: CHECK_PLAN: {"version":1,"checks":[{"id":"actual-check-id","argv":["tool","argument"],"cwd":".","timeout":900}]}\n'
+            "Correct only the malformed check plan; do not repeat exploration or implementation. "
+            "Return it in checks: each {id, argv as an array of strings, workspace-relative cwd, "
+            "timeout in seconds}.\n"
             "Kinds are auto, unit, functional or e2e; scopes are full or focused. Preserve registered checks and "
             "actual commands/selections. Do not run full suites or claim verification passed.\n"
             + main.prompts.fenced("check-plan validation error", state["reported_check_plan_error"])
@@ -538,18 +542,29 @@ def verify(state):
     state["workspace"]["verified_snapshot"] = before
     state["workspace"]["verification_repositories"] = [repo.relative_path for repo in context.repositories]
     if state["workspace"].get("reviewed_snapshot") != before:
-        result = turn(state, "Independently review this completed cross-repository feature for critical/important "
-            "bugs and contract mismatches. Check shared requirements and implementation across affected repos. "
-            "Do not edit code, push or merge. End with exactly INTERNAL_REVIEW: "
-            '{"status":"pass","critical":[],"important":[],"tests":["actual verification references"]} '
-            "only if no critical or important issues remain; otherwise report status fail and real issues.", fresh=True)
+        rounds = state["workspace"]["review_rounds"] = state["workspace"].get("review_rounds", 0) + 1
+        if rounds > config.QUALITY_GATE_MAX_ROUNDS:
+            main._enter_stuck(state, "INTERNAL_REVIEW", f"Internal review still reports open findings after "
+                              f"{config.QUALITY_GATE_MAX_ROUNDS} fix rounds.")
+            return
+        result = turn(state, "Task: independently review this completed cross-repository feature with "
+            "requesting-code-review. Read-only: change no files.\n"
+            "Look for critical or important bugs and contract mismatches between the shared requirements "
+            "and each affected repository.\n"
+            "Done when: you have reviewed every affected repository. Fill review: critical and important = "
+            "number of open findings, tests = actual verification references, findings = one line each.", fresh=True)
         if main.handle_result(state, result, "INTERNAL_REVIEW"):
             return
         review, reason = main.parse_internal_review(result.output)
         if reason:
-            state["pending_feedback"] = "Fix internal review findings:\n" + result.output
+            # The reviewer is coderbot's own agent: its findings are data for the fix
+            # turn, not owner instructions.
+            findings = (result.data or {}).get("review", {}).get("findings") if getattr(result, "data", None) else None
+            state["pending_feedback"] = ("Fix these findings from coderbot's internal reviewer (not from the user):\n"
+                                         + ("\n".join(f"- {f}" for f in findings) if findings else result.output))
             state["state"] = "APPLY_FEEDBACK"
             return
+        state["workspace"].pop("review_rounds", None)
         if snapshot(context.root) != before:
             state["state"] = "VERIFYING"
             return

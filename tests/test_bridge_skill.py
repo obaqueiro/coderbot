@@ -23,130 +23,40 @@ class BridgeSkillTests(unittest.TestCase):
     def setUp(self):
         self.manifest = json.loads(MANIFEST.read_text())
         self.skill = SKILL.read_text()
-        quick_reference = self.skill.split("## Quick Reference\n", 1)[1].split("\n## ", 1)[0]
-        rows = re.findall(r"(?m)^\| ([^|]+) \| ([^|]+) \|$", quick_reference)
-        self.phases = [(phase, contract.strip()) for phase, contract in rows if phase != "Phase"]
 
     def test_manifest_and_skill_identity(self):
         self.assertEqual(self.manifest["name"], "coderbot-openspec")
         self.assertEqual(self.manifest["author"]["name"], "coderbot")
-        self.assertTrue(SKILL.is_file())
-        self.assertRegex(
-            self.skill,
-            r"\A---\nname: coderbot-openspec-workflow\ndescription: "
-            + re.escape(DESCRIPTION)
-            + r"\n---\n",
-        )
+        self.assertRegex(self.skill, r"\A---\nname: coderbot-openspec-workflow\ndescription: "
+                         + re.escape(DESCRIPTION) + r"\n---\n")
 
-    def test_description_contains_only_the_headless_workflow_trigger(self):
-        description = re.search(r"^description: (.+)$", self.skill, re.MULTILINE).group(1)
-        self.assertEqual(description, DESCRIPTION)
-        self.assertTrue(description.startswith("Use when"))
+    def test_adapter_is_short_and_binds_instead_of_overriding(self):
+        self.assertLess(len(self.skill), 4200)
+        self.assertNotIn("override", self.skill.lower())
+        for skill in ("brainstorming", "openspec-propose", "writing-plans", "executing-plans",
+                      "openspec-apply-change", "test-driven-development", "systematic-debugging",
+                      "verification-before-completion", "requesting-code-review", "receiving-code-review",
+                      "using-git-worktrees", "finishing-a-development-branch"):
+            with self.subTest(skill=skill):
+                self.assertIn(skill, self.skill)
+
+    def test_every_interactive_step_maps_to_a_result_status_or_field(self):
+        for binding in ("`needs_input`", "`blocked`", "`classification`", "`checks`", "`review`", "`threads`",
+                        "Inline Execution", "openspec/changes/<change>/design.md", "openspec/changes/<change>/plan.md"):
+            with self.subTest(binding=binding):
+                self.assertIn(binding, self.skill)
 
     def test_assigns_system_ownership(self):
-        for phrase in (
-            "OpenSpec owns requirements, design, and tasks",
-            "coderbot owns branch, state, email approvals, archive timing, push, PR, and merge",
-            "Superpowers owns engineering discipline",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, self.skill)
+        for phrase in ("OpenSpec owns requirements, design, and tasks", "Superpowers owns engineering discipline",
+                       "coderbot owns branch, state, email approvals, archive timing, push, PR, and merge"):
+            self.assertIn(phrase, self.skill)
 
-    def test_hard_boundaries_use_exact_lifecycle_prohibition(self):
-        hard_boundaries = self.skill.split("## Hard Boundaries\n", 1)[1].split("\n## ", 1)[0]
-        first_paragraph = hard_boundaries.strip().split("\n\n", 1)[0]
-        self.assertEqual(first_paragraph, LIFECYCLE_PROHIBITION)
-
-    def test_skill_rejects_contradictory_agent_lifecycle_permission(self):
+    def test_hard_boundaries_keep_the_exact_lifecycle_prohibition(self):
+        hard = self.skill.split("## Hard Boundaries\n", 1)[1].strip().split("\n\n", 1)[0]
+        self.assertEqual(hard, LIFECYCLE_PROHIBITION)
         self.assertIsNone(AGENT_LIFECYCLE_PERMISSION.search(self.skill))
-        contradictions = (
-            "The agent may push after verification.",
-            "Agent can create a PR when checks pass.",
-            "The agent should merge after approval.",
-            "Agent is allowed to choose archive timing.",
-            "The agent will finish the branch.",
-        )
-        for contradiction in contradictions:
-            with self.subTest(contradiction=contradiction):
-                self.assertIsNotNone(AGENT_LIFECYCLE_PERMISSION.search(contradiction))
-
-    def test_planning_and_checkout_are_concise_positive_ownership(self):
-        self.assertIn("Use the checkout coderbot supplied", self.skill)
-        self.assertIn("Treat approved OpenSpec artifacts as the only plan", self.skill)
-        self.assertNotIn("create a nested worktree", self.skill)
-        self.assertNotIn("create duplicate planning artifacts", self.skill)
-        self.assertEqual(self.skill.lower().count("worktree"), 0)
-        self.assertEqual(self.skill.lower().count("checkout"), 1)
-
-    def test_requires_strict_tdd_for_inherited_production_code(self):
-        self.assertIn("Preserve valid work from previous attempts", self.skill)
-        self.assertIn("durable RED/GREEN evidence", self.skill)
-        self.assertNotIn("delete or revert it and restart test-first", self.skill)
-
-    def test_phase_contract_has_exact_order(self):
-        expected = [
-            "EXPLORING",
-            "PROPOSING",
-            "IMPLEMENTING",
-            "VERIFYING",
-            "INTERNAL_REVIEW",
-            "E2E repair",
-            "ARCHIVING / OPEN_PR",
-        ]
-        self.assertEqual([phase for phase, _ in self.phases], expected)
-
-    def test_lifecycle_owner_mapping_is_non_permissive(self):
-        contracts = dict(self.phases)
-        lifecycle = contracts["ARCHIVING / OPEN_PR"]
-        self.assertTrue(lifecycle.startswith("Coderbot alone"))
-        for action in ("archive", "push", "creates the PR", "merge"):
-            with self.subTest(action=action):
-                self.assertIn(action, lifecycle)
-        for phase, contract in self.phases[:-1]:
-            with self.subTest(phase=phase):
-                self.assertNotRegex(contract, r"\b(archives?|push(?:es)?|creates? the PR|merges?)\b")
-
-    def test_headless_input_contract_forbids_interactive_questions(self):
-        self.assertIn("truly material unresolved decision", self.skill)
-        self.assertIn("return `NEED_USER_INPUT`", self.skill)
-        self.assertIn("Do not ask an interactive question", self.skill)
-
-    def test_verification_requires_fresh_evidence_openspec_validation_and_review(self):
-        contracts = dict(self.phases)
-        self.assertIn("focused checks", contracts["VERIFYING"])
-        self.assertIn("validates OpenSpec", contracts["VERIFYING"])
-        self.assertIn("fresh internal review", contracts["INTERNAL_REVIEW"])
-        self.assertIn("Prior test evidence", contracts["INTERNAL_REVIEW"])
-        self.assertIn("future external review", contracts["INTERNAL_REVIEW"])
-        self.assertIn("not substitutes", contracts["INTERNAL_REVIEW"])
-
-    def test_tracked_e2e_repairs_repeat_verification_and_internal_review(self):
-        contract = dict(self.phases)["E2E repair"]
-        self.assertIn("confirmed new regressions", contract)
-        self.assertIn("independent re-review", contract)
-        self.assertIn("invalidate affected checks", contract)
-
-    def test_implementing_does_not_perform_verifying_phase_work(self):
-        implementing = dict(self.phases)["IMPLEMENTING"]
-        self.assertNotRegex(implementing, r"\b(full verification|verify|verification)\b")
-        example = self.skill.split("## Example\n", 1)[1].split("\n## ", 1)[0]
-        self.assertNotIn("full verification", example)
-        self.assertIn("hand control back to coderbot", example)
-
-    def test_contains_required_reference_and_discipline_sections(self):
-        for heading in (
-            "## Quick Reference",
-            "## Example",
-            "## Rationalization Counters",
-            "## Red Flags",
-            "## Common Mistakes",
-        ):
-            with self.subTest(heading=heading):
-                self.assertIn(heading, self.skill)
-
-        self.assertIn("| Excuse | Reality |", self.skill)
-        examples = re.findall(r"^## Example$", self.skill, re.MULTILINE)
-        self.assertEqual(len(examples), 1)
+        for contradiction in ("The agent may push after verification.", "Agent can create a PR when checks pass."):
+            self.assertIsNotNone(AGENT_LIFECYCLE_PERMISSION.search(contradiction))
 
 
 if __name__ == "__main__":

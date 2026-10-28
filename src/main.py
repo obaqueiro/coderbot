@@ -843,60 +843,36 @@ def _seed_self_healing_items(state: dict) -> None:
 
 
 _EVIDENCE_CONTRACT = (
-    " After you're done, an automated evidence step re-runs each new/changed spec/collection "
-    "file by NAME ONLY (e.g. `./run.sh your-new-test.spec.ts`), with no extra CLI flags, and "
-    "no environment variables beyond what forces recording on (video for Playwright). It must "
-    "exercise its real happy path and produce evidence under that exact bare invocation — do "
-    "not gate the meaningful assertions behind a custom flag, mode, or env var (e.g. a "
-    "`--provider xyz` switch) that this invocation will never pass, and do not have the test "
-    "self-skip by default, or no evidence will be captured for the PR.")
-
+    " coderbot later re-runs each new or changed spec by name only (`./run.sh <file>`, "
+    "recording on, no extra flags or environment variables), so its real happy path must run "
+    "and pass under that bare invocation: do not skip it by default or gate its assertions "
+    "behind custom flags.")
 
 _DEMO_TEST_CONTRACT = (
-    "\n- ONE of those tests must be a demo test whose title contains the tag `@evidence`. "
-    "Codebot records ONLY this test as the video evidence shared with the user, so it must "
-    "show THIS feature working, on its own, as a watchable walkthrough:\n"
-    "  - Navigate to where the feature lives and exercise it end-to-end in one continuous flow.\n"
-    "  - Before and after each key interaction, make sure the relevant UI is actually visible "
-    "in the viewport (e.g. `scrollIntoViewIfNeeded()`) — a correct assertion on an "
-    "off-screen element makes a useless video.\n"
-    "  - Hold each state that demonstrates the feature's effect on screen for a moment "
-    "(e.g. `page.waitForTimeout(1000)`) so a human watching the video can see it.\n"
-    "  - Keep unrelated setup minimal and off-camera where possible; assert the visible outcome.\n"
-    "  - NARRATE THE VIDEO ON SCREEN. A silent recording of clicks does not read as evidence "
-    "to the person watching it, so the video must explain itself without any accompanying text:\n"
-    "    - Open with a title card held for ~3s stating the backlog item / feature name and, in "
-    "one or two lines, what the viewer is about to see and what would prove the feature works.\n"
-    "    - Before each key interaction, show a caption naming the step, what is about to happen, "
-    "and why it is evidence (e.g. \"Step 2/4 - saving the form; the new title must appear in the "
-    "header, which was impossible before this change\"). Hold the caption long enough to read "
-    "(~2s) and keep it visible while the step runs.\n"
-    "    - After the decisive step, show a closing caption that names the visible outcome the "
-    "viewer should be looking at and states that it is the implemented behavior.\n"
-    "    - Implement the captions as a DOM overlay you inject into the page (e.g. a fixed-position, "
-    "high-contrast, high z-index banner added via `page.evaluate`, wrapped in a small local "
-    "`narrate(page, text)` helper) so they are captured in the recorded video. Captions must never "
-    "cover the UI the step is demonstrating, and must never be asserted on or otherwise affect "
-    "what the test verifies — the real assertions stay on the application's own UI.")
+    "\n- One test is the demo: its title contains `@evidence`, and coderbot records only it as "
+    "the video for the user. In one continuous flow it shows this feature working: keep the "
+    "relevant UI in view (`scrollIntoViewIfNeeded()`), hold each meaningful state about 1 s, keep "
+    "unrelated setup off camera, and assert the visible outcome. Narrate on screen with a small "
+    "`narrate(page, text)` helper that injects a fixed, high-contrast overlay: a ~3 s title card "
+    "(the feature, and what will prove it works), a ~2 s caption before each key step (\"Step N/M\", "
+    "what happens, why it is evidence), and a closing caption naming the visible outcome. "
+    "Captions never cover the UI being shown and are never asserted on.")
 
 
 def _e2e_note(state: dict) -> str:
     if not state.get("has_e2e_harness"):
-        return ("- No e2e harness exists in this repo yet; verify the change using your own "
-                "judgment (existing test suites, manual checks, etc.) instead of writing e2e "
-                "tests.")
+        return "- This repo has no e2e harness yet: verify with its existing test suites."
     if state.get("e2e_kind") == "newman":
-        return ("- Every user-facing feature MUST include comprehensive Postman collections "
-                "under e2e/collections/, run via Newman (they must pass)." + _EVIDENCE_CONTRACT)
-    return ("- Every user-facing feature MUST include comprehensive Playwright e2e tests in "
-            "e2e/tests/ (they must pass)." + _EVIDENCE_CONTRACT + _DEMO_TEST_CONTRACT)
+        return ("- User-facing behaviour needs Postman collections under e2e/collections/, run via "
+                "Newman." + _EVIDENCE_CONTRACT)
+    return ("- User-facing behaviour needs Playwright tests in e2e/tests/." + _EVIDENCE_CONTRACT
+            + _DEMO_TEST_CONTRACT)
 
 
 def _e2e_report_note(state: dict) -> str:
     if not state.get("has_e2e_harness"):
-        return "End with a summary of what was implemented and how you verified it."
-    return ("End with a summary of what was implemented and the list of new/changed e2e test "
-            "files (one per line, prefixed with `E2E_SPEC: `).")
+        return ""
+    return "- List the new or changed e2e test files in e2e_specs."
 
 
 # ---------------------------------------------------------------- phases

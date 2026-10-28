@@ -104,7 +104,7 @@ class CheckRepairTests(unittest.TestCase):
         prompt = main._reply_prompt(reloaded, "REPAIR_CHECKS", selection["reply"])
         self.assertEqual(reloaded["check_repair"]["attempt"], 1)
         self.assertIn("different fix", prompt)
-        self.assertIn("never push", prompt)
+        self.assertIn("Commit the intended tracked changes", prompt)
 
     def test_legacy_e2e_reply_gets_repair_prompt_not_bare_answer(self):
         state = {"state": "WAIT_REPLY", "return_state": "E2E", "slug": "task",
@@ -112,7 +112,7 @@ class CheckRepairTests(unittest.TestCase):
         with patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
              patch.object(main, "content_snapshot", return_value="same"):
             prompt = main._reply_prompt(state, "E2E", "Fix it; don't ask me to edit the bot")
-        self.assertIn("diagnose BEFORE retrying", prompt)
+        self.assertIn("Diagnose before retrying", prompt)
         self.assertIn("missing-pytz.log", prompt)
         self.assertIn("Fix it; don't ask", prompt)
         self.assertEqual(state["check_repair"]["resume"], "E2E")
