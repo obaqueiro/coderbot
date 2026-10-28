@@ -141,7 +141,9 @@ def _restore_config() -> bool:
         return False
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], prompt: str = "") -> subprocess.CompletedProcess:
+    """Run claude with the prompt on stdin: one argv element is capped at 128 KiB on
+    Linux, and prompts carrying logs or diffs can exceed it."""
     env = secret_store.environment()  # the process env plus this task's credentials
     # Overrides inherited/project defaults, including headless Claude's manual default.
     env["CAVEMAN_DEFAULT_MODE"] = (
@@ -149,7 +151,7 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     if "--tools" not in cmd:
         env.update(tool_policy.environment(tool_policy.current_phase()))
     return operations.run(cmd, cwd=config.REPO_PATH, timeout=config.AGENT_TIMEOUT_SECONDS,
-                          kind="agent", env=env)
+                          kind="agent", env=env, input=prompt or None)
 
 
 # Monotonic deadline until which _active_model() keeps returning the fallback model.
@@ -212,7 +214,7 @@ def _invoke(args: list[str], prompt: str, *, effort=None, structured=False, mode
 def _invoke_with_model(args: list[str], prompt: str,
                        model: str, *, effort=None) -> tuple[subprocess.CompletedProcess, str]:
     effort = effort if effort is not None else config.CLAUDE_EFFORT
-    cmd = ["claude", *args, "-p", prompt, "--model", model,
+    cmd = ["claude", *args, "-p", "--model", model,
            "--effort", effort,
            "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
@@ -229,14 +231,14 @@ def _invoke_with_model(args: list[str], prompt: str,
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
              " ".join(args) or "run", model, effort,
              len(prompt), _config_report())
-    proc = _run(cmd)
+    proc = _run(cmd, prompt)
     if proc.returncode != 0 and _is_config_corrupt(proc.stderr):
         # ~/.claude.json got corrupted (historically by a concurrent writer sharing the
         # file). Snapshot its state, repair it, and retry once before giving up.
         log.error("claude reported a corrupt config; %s", _config_report())
         if _restore_config():
             log.info("retrying claude after config recovery")
-            proc = _run(cmd)
+            proc = _run(cmd, prompt)
     return proc, model
 
 

@@ -56,12 +56,12 @@ class ClaudeRunnerTests(unittest.TestCase):
         with patch("claude_runner._run", return_value=response) as run:
             claude_runner.run("classify this", contract=False)
             claude_runner.run("work on this")
-        first, second = (c.args[0] for c in run.call_args_list)
-        self.assertEqual(first[first.index("-p") + 1], "classify this")
+        (first, first_prompt), (second, second_prompt) = (c.args for c in run.call_args_list)
+        self.assertEqual(first_prompt, "classify this")  # prompts travel on stdin, not argv
         self.assertNotIn("--append-system-prompt", first)
         # Working turns carry the instructions as a system prompt plus the result schema,
         # never prepended to the user prompt.
-        self.assertEqual(second[second.index("-p") + 1], "work on this")
+        self.assertEqual(second_prompt, "work on this")
         self.assertIn("Make the smallest correct change", second[second.index("--append-system-prompt") + 1])
         self.assertIn("--json-schema", second)
 

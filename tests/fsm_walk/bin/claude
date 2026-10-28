@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 
 argv = sys.argv[1:]
-raw_prompt = argv[argv.index("-p") + 1] if "-p" in argv else sys.stdin.read()
+after = argv[argv.index("-p") + 1] if "-p" in argv and argv.index("-p") + 1 < len(argv) else "--"
+raw_prompt = sys.stdin.read() if after.startswith("--") else after  # coderbot sends it on stdin
 prompt = " ".join(raw_prompt.split())  # markers must not depend on prompt line wrapping
 utility = "--tools" in argv and argv[argv.index("--tools") + 1] == ""
 session = argv[argv.index("--resume") + 1] if "--resume" in argv else f"ses-{os.getpid()}"
