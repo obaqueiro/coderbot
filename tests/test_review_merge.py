@@ -452,3 +452,17 @@ class MergeWait(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoIdleReviewWait(unittest.TestCase):
+    def test_no_new_commit_since_the_processed_review_means_no_wait_for_a_new_run(self):
+        state = {"state": "PUSHING", "review_head": "abc"}
+        with patch.object(main, "git", return_value="abc"):
+            main._enter_review_wait(state)
+        self.assertFalse(state["await_new_run"])
+        with patch.object(main, "git", return_value="def"):
+            main._enter_review_wait(state)
+        self.assertTrue(state["await_new_run"])
+        fresh = {"state": "OPEN_PR"}
+        main._enter_review_wait(fresh)
+        self.assertTrue(fresh["await_new_run"])

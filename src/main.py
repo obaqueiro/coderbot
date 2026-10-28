@@ -2483,6 +2483,13 @@ def review_summary(state: dict) -> str:
 
 def _enter_review_wait(state: dict, expect_new_run: bool = True) -> None:
     state["review_since"] = time.time()  # per-run wait clock (survives restarts via state.json)
+    if expect_new_run and state.get("review_head"):
+        # Nothing new since the last processed review (e.g. an evidence lap that pushed no
+        # code): no run is coming, so waiting for one only idled until the timeout.
+        try:
+            expect_new_run = git("rev-parse", "HEAD") != state["review_head"]
+        except Exception:  # noqa: BLE001 - keep waiting for a run, as before
+            pass
     # True when a push should trigger a fresh Code Review run: the poll must then wait
     # for a NEW run link and never conclude from the already-processed run's state.
     state["await_new_run"] = expect_new_run
@@ -2725,6 +2732,10 @@ def handle_review_wait(state: dict) -> None:
         log.warning("could not fetch review threads; retrying next tick")
         return
     state["review_run_link"] = check.get("link")
+    try:
+        state["review_head"] = git("rev-parse", "HEAD")
+    except Exception:  # noqa: BLE001
+        state.pop("review_head", None)
     ocr = [t for t in threads if _is_ocr_thread(t)]
     if not ocr:
         log.info("no unresolved OCR threads; PR is clean")
@@ -4692,7 +4703,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
