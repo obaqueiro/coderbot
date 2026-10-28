@@ -272,7 +272,8 @@ class QuestionReply(unittest.TestCase):
              patch.object(main, "email"):
             main.do_question_reply(state, "ok")
         self.assertEqual(state["state"], "WAIT_STUCK")
-        self.assertEqual(state["stuck_return"], "IDLE")
+        # Resume where the work is preserved, never IDLE (which drops the task).
+        self.assertEqual(state["stuck_return"], "EXPLORING")
 
     def test_re_question_keeps_return_state(self):
         state = self.base("EXPLORING")
@@ -515,6 +516,37 @@ class TransientNetworkErrors(unittest.TestCase):
             self.assertTrue(main._is_transient_network_error(error), error)
         for error in (KeyError("thread_id"), RuntimeError("git failed"), ValueError(),
                       SimpleNamespace(resp=SimpleNamespace(status=404))):
+            self.assertFalse(main._is_transient_network_error(error), error)
+
+    def test_unknown_phase_resumes_the_task_instead_of_dropping_it(self):
+        # "retry" on a stuck task resumes stuck_return; IDLE would drop every task key.
+        for extra, expected in (({}, "EXPLORING"), ({"approved_scope_fingerprint": "f"}, "VERIFYING"),
+                                ({"approved_scope_fingerprint": "f", "pr_url": "https://x/pull/1"}, "WAIT_MERGE")):
+            state = {"state": "WAIT_REPLY", "item": "task", "return_state": "FROM_A_NEWER_BUILD",
+                     "session_id": "s", **extra}
+            with patch.object(main, "_enter_stuck") as stuck, patch.object(main.agent_runner, "resume") as resume:
+                main._answer_question(state, "yes")
+            resume.assert_not_called()
+            self.assertEqual(stuck.call_args.args[1], expected)
+        self.assertEqual(main._work_preserving_phase({}), "IDLE")
+
+    def test_tool_outages_and_resource_errors_are_transient_not_phase_failures(self):
+        # A DNS failure on `git pull` used to burn five attempts and land in WAIT_STUCK.
+        import errno
+        import subprocess
+        for error in (
+                RuntimeError("git pull --ff-only exited 1: fatal: unable to access "
+                             "'https://github.com/x.git/': Could not resolve host: github.com"),
+                RuntimeError("gh api graphql exited 1: HTTP 502: Bad Gateway"),
+                RuntimeError("git push exited 128: error: The requested URL returned error: 503"),
+                RuntimeError("gh: API rate limit exceeded for user"),
+                subprocess.TimeoutExpired(["git", "fetch"], 120),
+                OSError(errno.ENOSPC, "No space left on device"),
+                OSError(errno.EMFILE, "Too many open files")):
+            self.assertTrue(main._is_transient_network_error(error), error)
+        for error in (RuntimeError("git checkout exited 1: error: pathspec 'x' did not match"),
+                      RuntimeError("check failed at line 500 of report"),
+                      OSError(errno.ENOENT, "missing"), OSError(errno.ENAMETOOLONG, "too long")):
             self.assertFalse(main._is_transient_network_error(error), error)
 
     def test_check_commands_logs_transient_error_without_traceback(self):

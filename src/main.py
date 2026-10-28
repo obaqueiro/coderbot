@@ -1,5 +1,6 @@
 """Codebot orchestrator: works the Google Doc backlog one task at a time,
 communicating with the user exclusively by email."""
+import errno
 import fcntl
 import os
 import copy
@@ -123,17 +124,38 @@ def save_state(state: dict) -> None:
             store.update("conversation", row, flow_applied=True)
 
 
+TASK_LANGUAGE_ATTEMPTS = 3
+
+
 def _ensure_task_language(state: dict) -> None:
-    """Classify once from the source ticket, not from the conversation or agent output."""
+    """Classify once from the source ticket, not from the conversation or agent output.
+    Best effort: it runs before mailbox commands every tick, so a failure must never
+    raise (that made even ABORT unreachable). After a few failed attempts the task
+    proceeds in English rather than retrying a utility call on every tick."""
     if not state.get("item") or state.get("task_language"):
         return
-    result = agent_runner.run(prompts.render(
-        prompts.TASK_LANGUAGE, item=state["item"], detail=state.get("item_detail", "")),
-        contract=False)
-    language = parse_json_reply(result.output).get("language")
-    if not isinstance(language, str) or not re.fullmatch(r"[A-Za-z][A-Za-z -]{1,48}", language):
-        raise ValueError(f"invalid task language: {language!r}")
-    state["task_language"] = language.strip()
+    try:
+        result = agent_runner.run(prompts.render(
+            prompts.TASK_LANGUAGE, item=state["item"], detail=state.get("item_detail", "")),
+            contract=False)
+        language = parse_json_reply(result.output).get("language")
+        if not isinstance(language, str) or not 2 <= len(language.strip()) <= 48 \
+                or not language.strip().isprintable():
+            raise ValueError(f"invalid task language: {language!r}")
+        language = language.strip()
+    except turn_control.TurnKicked:
+        raise
+    except Exception as error:  # noqa: BLE001
+        failures = state.get("task_language_failures", 0) + 1
+        state["task_language_failures"] = failures
+        log.warning("task language detection failed (%d/%d): %s", failures,
+                    TASK_LANGUAGE_ATTEMPTS, error)
+        if failures < TASK_LANGUAGE_ATTEMPTS:
+            save_state(state)
+            return
+        language = "English"
+    state["task_language"] = language
+    state.pop("task_language_failures", None)
     save_state(state)
     log.info("task language from backlog item: %s", language)
 
@@ -4624,7 +4646,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
@@ -4738,6 +4760,18 @@ def _content_filter_stop(state: dict, failed_state: str, *, error=None, user_tex
     email(state, label, body, files, localized=True)
 
 
+def _work_preserving_phase(state: dict) -> str:
+    """Where to resume a task whose recorded phase is unknown (corrupt state, or a name
+    from another coderbot version), keeping its work: never IDLE, which drops the task."""
+    if not state.get("item"):
+        return "IDLE"
+    if state.get("pr_url"):
+        return "WAIT_MERGE"
+    if state.get("approved_scope_fingerprint"):
+        return "VERIFYING"
+    return "EXPLORING"
+
+
 def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
     """Stop retrying, remember the failed state, e-mail the user, and enter WAIT_STUCK.
 
@@ -4779,6 +4813,13 @@ def _clear_stuck(state: dict, failed_state: str) -> None:
     state.pop("failure_context", None)
     state.pop("provider_block", None)
     state.pop("technical_retry", None)
+    # A human cleared this failure: re-run the phase's agent turn instead of replaying
+    # the recorded output that led to it (same prompt + unchanged repo would replay).
+    if state.get("item"):
+        try:
+            phase_checkpoint.retire(state, failed_state)
+        except Exception:  # noqa: BLE001 - best effort; never block the retry itself
+            log.exception("could not retire %s checkpoints before retrying", failed_state)
 
 
 def _escalate(state: dict, failed_state: str) -> bool:
@@ -5078,8 +5119,30 @@ def _is_transient_network_error(error: BaseException) -> bool:
         return True
     if type(error).__module__.startswith("httplib2"):  # ServerNotFoundError & co.
         return True
+    if isinstance(error, subprocess.TimeoutExpired):  # a git/gh call outlived its timeout
+        return True
+    # Resource exhaustion and I/O errors are environment problems: retry with backoff
+    # and tell the user, instead of burning the failure budget as if the phase were wrong.
+    if isinstance(error, OSError) and error.errno in _TRANSIENT_ERRNOS:
+        return True
+    # git/gh/CLI wrappers raise RuntimeError with the tool's stderr in the message.
+    if isinstance(error, (RuntimeError, subprocess.CalledProcessError)) and \
+            _TRANSIENT_TOOL_ERROR.search(f"{error} {getattr(error, 'stderr', '') or ''}"):
+        return True
     status = getattr(getattr(error, "resp", None), "status", None)  # googleapiclient HttpError
     return status in (429, 500, 502, 503, 504)
+
+
+_TRANSIENT_ERRNOS = {errno.ENOSPC, errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.EAGAIN,
+                     errno.EBUSY, errno.EIO, errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNREFUSED,
+                     errno.EHOSTUNREACH, errno.ENETUNREACH}
+_TRANSIENT_TOOL_ERROR = re.compile(
+    r"could not resolve host|unable to access|connection (?:timed out|reset|refused)|"
+    r"operation timed out|network is unreachable|temporary failure in name resolution|"
+    r"tls handshake|gnutls|ssl_|early eof|the remote end hung up|"
+    r"(?:http|status|error)[ :/]*(?:429|500|502|503|504)\b|"
+    r"bad gateway|service unavailable|gateway time-?out|rate limit|secondary rate|"
+    r"api rate|overloaded", re.IGNORECASE)
 
 
 def _request_verification(state: dict, note: str = "") -> None:
@@ -5619,10 +5682,11 @@ def _answer_question(state: dict, reply: str) -> None:
     # WAIT_REPLY with return_state intact so the retry re-runs cleanly.
     phase = state.get("return_state")
     if phase not in CONTINUATIONS:
-        _enter_stuck(state, "IDLE",
+        resume = _work_preserving_phase(state)
+        _enter_stuck(state, resume,
                      f"Internal error: I was waiting on a question for unknown phase "
-                     f"{phase!r} and cannot resume it. 'retry' restarts from the backlog; "
-                     "'abort' resets me.")
+                     f"{phase!r} and cannot resume it. 'retry' resumes the task at {resume} "
+                     "with its work and branch intact; 'abort' resets me.")
         return
     pending_question = state.get("pending_question")
     question_rounds = state.get("question_rounds")
@@ -6142,6 +6206,11 @@ def _run_loop() -> None:
                           config.POLL_INTERVAL_SECONDS)
             time.sleep(config.POLL_INTERVAL_SECONDS)
             continue
+        if state.get("state") not in PHASES and state.get("state") not in WAITS \
+                and config.TARGET_MODE != "workspace":
+            unknown, state["state"] = state.get("state"), _work_preserving_phase(state)
+            log.error("unknown state %r in %s; resuming at %s", unknown, config.STATE_PATH,
+                      state["state"])
         prev = state["state"]
         attempt_task_id = state.get("execution_task_id")
         selfheal_events.emit("heartbeat", state)

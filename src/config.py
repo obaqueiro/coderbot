@@ -188,6 +188,18 @@ CAVEMAN_PLUGIN_DIR = Path("/opt/coderbot/caveman")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or "claude-fable-5"
 CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT") or "medium"
 
+def _int(name: str, default: int) -> int:
+    """An integer setting. Empty or unset means the default (`.env.example` ships some
+    keys empty); anything else that is not an integer stops startup with a clear message."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"invalid configuration: {name} must be an integer, got {raw!r}") from None
+
+
 # When the primary model's usage credits run out the CLI exits 1 with HTTP 429 and a
 # "you've reached your <model> limit" message. Rather than burning the retry budget on
 # a model that cannot answer, codebot falls back to this one. Set to an empty value to
@@ -195,14 +207,13 @@ CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT") or "medium"
 CLAUDE_FALLBACK_MODEL = os.environ.get("CLAUDE_FALLBACK_MODEL", "claude-opus-5")
 # How long to keep using the fallback before probing the primary model again, so every
 # later invocation does not pay for a doomed primary attempt first.
-CLAUDE_FALLBACK_COOLDOWN_SECONDS = int(
-    os.environ.get("CLAUDE_FALLBACK_COOLDOWN_SECONDS", "3600"))
+CLAUDE_FALLBACK_COOLDOWN_SECONDS = _int("CLAUDE_FALLBACK_COOLDOWN_SECONDS", 3600)
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL") or ""
 # Empty preserves OpenCode/provider defaults; explicit values control GPT reasoning.
 OPENCODE_EFFORT = (os.environ.get("OPENCODE_EFFORT") or "").strip().lower()
 OPENCODE_TRANSPORT = os.environ.get("CODEBOT_OPENCODE_TRANSPORT", "http")
 DETERMINISTIC_CHECKS = os.environ.get("CODEBOT_DETERMINISTIC_CHECKS", "on").lower() != "off"
-CONTEXT_TOKEN_BUDGET = int(os.environ.get("CODEBOT_CONTEXT_TOKEN_BUDGET", "80000"))
+CONTEXT_TOKEN_BUDGET = _int("CODEBOT_CONTEXT_TOKEN_BUDGET", 80000)
 OPENCODE_ROLE_MODELS = json.loads(os.environ.get("CODEBOT_OPENCODE_ROLE_MODELS", "{}"))
 OPENCODE_ROLE_EFFORTS = json.loads(os.environ.get("CODEBOT_OPENCODE_ROLE_EFFORTS", "{}"))
 
@@ -220,22 +231,21 @@ OPENSPEC_SKILLS_DIR = Path(os.environ.get(
 # DEBUG surfaces per-email/video/git detail in `docker compose logs`.
 LOG_LEVEL = (os.environ.get("CODEBOT_LOG_LEVEL") or "DEBUG").upper()
 
-POLL_INTERVAL_SECONDS = int(os.environ.get("CODEBOT_POLL_INTERVAL", "120"))
+POLL_INTERVAL_SECONDS = _int("CODEBOT_POLL_INTERVAL", 120)
 # CODEBOT_CLAUDE_TIMEOUT is retained as a fallback for existing installations.
-AGENT_TIMEOUT_SECONDS = int(os.environ.get(
-    "CODEBOT_AGENT_TIMEOUT", os.environ.get("CODEBOT_CLAUDE_TIMEOUT", "1800")))
-E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "900"))
-UTILITY_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_UTILITY_TIMEOUT", "30"))
-LOCAL_TOOL_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_LOCAL_TOOL_TIMEOUT", "200"))
-SUBAGENT_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBAGENT_TIMEOUT", "600"))
-PROVIDER_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_PROVIDER_TIMEOUT", "180"))
+AGENT_TIMEOUT_SECONDS = _int("CODEBOT_AGENT_TIMEOUT", _int("CODEBOT_CLAUDE_TIMEOUT", 1800))
+E2E_TIMEOUT_SECONDS = _int("CODEBOT_E2E_TIMEOUT", 900)
+UTILITY_TIMEOUT_SECONDS = _int("CODEBOT_UTILITY_TIMEOUT", 30)
+LOCAL_TOOL_TIMEOUT_SECONDS = _int("CODEBOT_LOCAL_TOOL_TIMEOUT", 200)
+SUBAGENT_TIMEOUT_SECONDS = _int("CODEBOT_SUBAGENT_TIMEOUT", 600)
+PROVIDER_TIMEOUT_SECONDS = _int("CODEBOT_PROVIDER_TIMEOUT", 180)
 # Short calls (git/gh) must never hang the tick loop; a timeout surfaces as a tick
 # failure and feeds the retry/backoff path instead of wedging forever.
-SUBPROCESS_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBPROCESS_TIMEOUT", "120"))
+SUBPROCESS_TIMEOUT_SECONDS = _int("CODEBOT_SUBPROCESS_TIMEOUT", 120)
 # Cap the e2e-fails -> resume-to-fix -> re-run loop so a failure Claude can't resolve
 # (e.g. an external resource stuck from a prior run) doesn't spin forever.
-E2E_MAX_ROUNDS = int(os.environ.get("CODEBOT_E2E_MAX_ROUNDS", "5"))
-QUALITY_GATE_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUALITY_GATE_MAX_ROUNDS", "3"))
+E2E_MAX_ROUNDS = _int("CODEBOT_E2E_MAX_ROUNDS", 5)
+QUALITY_GATE_MAX_ROUNDS = _int("CODEBOT_QUALITY_GATE_MAX_ROUNDS", 3)
 # A suite that ran zero tests (or skipped them all) is always reported as such. With this
 # flag on, it also fails the final gate, but only for checks the agent declared in its
 # CHECK_PLAN; auto-discovered suites are never failed for being empty. Off by default.
@@ -266,11 +276,11 @@ PRIVATEBIN_TTL_SECONDS = _seconds("CODEBOT_PRIVATEBIN_TTL_SECONDS", 3600)
 SECRET_TTL_SECONDS = _seconds("CODEBOT_SECRET_TTL_SECONDS", 14400)
 # After this many CONSECUTIVE failures of the same FSM state, codebot stops retrying
 # silently and emails the user (entering WAIT_STUCK). Any successful tick resets it.
-MAX_STATE_FAILURES = int(os.environ.get("CODEBOT_MAX_STATE_FAILURES", "5"))
+MAX_STATE_FAILURES = _int("CODEBOT_MAX_STATE_FAILURES", 5)
 # Cap the ask-question -> user-reply -> ask-again loop per phase; past this the task
 # escalates to WAIT_STUCK instead of emailing yet another question.
-QUESTION_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUESTION_MAX_ROUNDS", "8"))
-ARCHIVE_MAX_ROUNDS = int(os.environ.get("CODEBOT_ARCHIVE_MAX_ROUNDS", "3"))
+QUESTION_MAX_ROUNDS = _int("CODEBOT_QUESTION_MAX_ROUNDS", 8)
+ARCHIVE_MAX_ROUNDS = _int("CODEBOT_ARCHIVE_MAX_ROUNDS", 3)
 
 # Self-healing: when the target repo lacks a "Code Review" workflow, codebot seeds a
 # backlog item asking for one. "off" disables that item (the review wait is still
@@ -281,17 +291,17 @@ SELF_HEAL_CODE_REVIEW = (os.environ.get("CODEBOT_SELF_HEAL_CODE_REVIEW") or "on"
 # After opening a PR, codebot waits for the "Code Review" GitHub Action
 # (OpenCodeReview) to finish and addresses its comments before notifying the user.
 # Give up waiting for a single run after this long (the action itself caps at 30 min).
-REVIEW_WAIT_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_REVIEW_WAIT_TIMEOUT", str(45 * 60)))
+REVIEW_WAIT_TIMEOUT_SECONDS = _int("CODEBOT_REVIEW_WAIT_TIMEOUT", 45 * 60)
 # Cap the fix<->re-review loop so a comment codebot can't resolve doesn't stall the PR.
-REVIEW_MAX_ROUNDS = int(os.environ.get("CODEBOT_REVIEW_MAX_ROUNDS", "3"))
+REVIEW_MAX_ROUNDS = _int("CODEBOT_REVIEW_MAX_ROUNDS", 3)
 
 # While waiting on the user's merge decision, codebot also polls the PR for unresolved
 # review conversation threads (e.g. a human reviewer's) and fixes them proactively. Cap
 # that fix<->recheck loop so a thread codebot can't resolve doesn't stall the merge.
-PR_THREAD_MAX_ROUNDS = int(os.environ.get("CODEBOT_PR_THREAD_MAX_ROUNDS", "3"))
+PR_THREAD_MAX_ROUNDS = _int("CODEBOT_PR_THREAD_MAX_ROUNDS", 3)
 # Cap consecutive merge-conflict resolution attempts on one PR (the base branch can keep
 # moving while other PRs merge); past this the task escalates to WAIT_STUCK.
-CONFLICT_MAX_ROUNDS = int(os.environ.get("CODEBOT_CONFLICT_MAX_ROUNDS", "3"))
+CONFLICT_MAX_ROUNDS = _int("CODEBOT_CONFLICT_MAX_ROUNDS", 3)
 
 # Silence check-ins. While a task is in flight, codebot emails a short check-in on the
 # task thread whenever the thread has been quiet — no email sent or received on it —
@@ -321,10 +331,10 @@ def _parse_durations(spec: str) -> list[int]:
 
 PING_SCHEDULE_SECONDS = _parse_durations(
     os.environ.get("CODEBOT_PING_SCHEDULE") or "24h")
-SLACK_MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_SLACK_MAX_ATTACH_BYTES", str(100 * 1024 * 1024)))
+SLACK_MAX_ATTACHMENT_BYTES = _int("CODEBOT_SLACK_MAX_ATTACH_BYTES", 100 * 1024 * 1024)
 
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
-MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))
+MAX_ATTACHMENT_BYTES = _int("CODEBOT_MAX_ATTACH_BYTES", 22 * 1024 * 1024)
 
 # Evidence videos (the stitched Playwright mp4) are uploaded to Google Drive and
 # linked from the email and the activity trail instead of being attached: a demo
@@ -347,8 +357,7 @@ DRIVE_REVIEWERS = [p.strip() for p in (os.environ.get("CODEBOT_DRIVE_REVIEWERS")
 # is wedged beyond any plausible real operation and the heartbeat is allowed to go
 # stale so the container healthcheck can force a restart.
 HEARTBEAT_PATH = DATA_DIR / "heartbeat"
-HEARTBEAT_MAX_TICK_SECONDS = int(
-    os.environ.get("CODEBOT_HEARTBEAT_MAX_TICK", str(AGENT_TIMEOUT_SECONDS + 900)))
+HEARTBEAT_MAX_TICK_SECONDS = _int("CODEBOT_HEARTBEAT_MAX_TICK", AGENT_TIMEOUT_SECONDS + 900)
 
 # Project-specific runtime facts prepended to every agentic prompt (how to run the
 # tests, what is NOT available in the container, ...). Either the env var or the file

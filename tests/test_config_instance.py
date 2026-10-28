@@ -64,3 +64,29 @@ class InstanceId(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntegerSettings(unittest.TestCase):
+    def test_empty_means_default_and_invalid_names_the_setting(self):
+        # `.env.example` ships some integer keys empty; that used to crash at import.
+        with patch.dict(os.environ, {"CODEBOT_HEARTBEAT_MAX_TICK": "", "X_N": " 7 "}):
+            self.assertEqual(config._int("CODEBOT_HEARTBEAT_MAX_TICK", 42), 42)
+            self.assertEqual(config._int("X_N", 1), 7)
+        with patch.dict(os.environ, {"X_N": "2m"}), \
+                self.assertRaisesRegex(SystemExit, "X_N must be an integer, got '2m'"):
+            config._int("X_N", 1)
+
+    def test_shipped_env_example_imports(self):
+        import subprocess
+        import sys
+        root = Path(__file__).resolve().parent.parent
+        env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp")}
+        for line in (root / ".env.example").read_text().splitlines():
+            key, sep, value = line.partition("=")
+            if sep and not line.lstrip().startswith("#") and re.fullmatch(r"[A-Z_][A-Z0-9_]*", key.strip()):
+                env[key.strip()] = value.strip()
+        with tempfile.TemporaryDirectory() as data:
+            env.update(CODEBOT_DATA_DIR=data, CODEBOT_REPO_PATH=data)
+            proc = subprocess.run([sys.executable, "-c", "import config"], cwd=root / "src",
+                                  env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])

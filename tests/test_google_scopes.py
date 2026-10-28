@@ -39,3 +39,27 @@ class ConditionalScopes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CredentialLoading(unittest.TestCase):
+    def test_missing_token_is_an_ordinary_error_not_process_exit(self):
+        # SystemExit passed through every `except Exception`, so a missing token in an
+        # optional feature (Drive upload) became a crash-restart loop.
+        import google_auth
+        from pathlib import Path
+        from unittest.mock import patch
+        with patch.object(google_auth.config, "TOKEN_PATH", Path("/nonexistent/token.json")):
+            with self.assertRaises(RuntimeError):
+                google_auth.load_credentials()
+
+    def test_token_rewrite_is_atomic(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        import google_auth
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "token.json"
+            target.write_text("old")
+            google_auth._write_atomically(target, '{"new": 1}')
+            self.assertEqual(target.read_text(), '{"new": 1}')
+            self.assertEqual(os.listdir(tmp), ["token.json"])

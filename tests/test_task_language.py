@@ -41,6 +41,28 @@ class TaskLanguageTests(unittest.TestCase):
         self.assertIn(state["item"], run.call_args.args[0])
         self.assertIn(state["item_detail"], run.call_args.args[0])
 
+    def test_detection_failure_never_raises_and_falls_back_to_english(self):
+        # Detection runs before mailbox commands every tick; raising here would make
+        # ABORT unreachable for as long as the utility call keeps failing.
+        state = {"item": "Exportar CSV", "state": "EXPLORING"}
+        with patch.object(main.agent_runner, "run", side_effect=TimeoutError("slow")) as run, \
+             patch.object(main, "save_state"):
+            for _ in range(main.TASK_LANGUAGE_ATTEMPTS - 1):
+                main._ensure_task_language(state)
+                self.assertNotIn("task_language", state)
+            main._ensure_task_language(state)
+            main._ensure_task_language(state)
+        self.assertEqual(state["task_language"], "English")
+        self.assertNotIn("task_language_failures", state)
+        self.assertEqual(run.call_count, main.TASK_LANGUAGE_ATTEMPTS)
+
+    def test_accepts_non_ascii_language_names(self):
+        state = {"item": "Eksporter CSV", "state": "EXPLORING"}
+        with patch.object(main.agent_runner, "run", return_value=SimpleNamespace(
+                output='{"language":"Norwegian Bokmål"}')), patch.object(main, "save_state"):
+            main._ensure_task_language(state)
+        self.assertEqual(state["task_language"], "Norwegian Bokmål")
+
     def test_working_sessions_and_openspec_keep_ticket_language(self):
         agent_runner.set_task_language("Spanish")
         with patch.object(config, "AGENT", "opencode"), \
