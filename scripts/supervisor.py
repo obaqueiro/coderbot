@@ -152,7 +152,30 @@ class Supervisor:
             self.log_thread.join(timeout=2)
 
     def paused(self):
-        return read_json(self.repairs.home / "control.json", {}).get("action") == "pause"
+        return read_json(self.repairs.home / "control.json", {}).get("action") in ("pause", "cooldown")
+
+    def trip(self, detail):
+        """Restart budget exhausted: back off instead of pausing forever. Cooldowns grow
+        5 min, 10 min, ... up to 1 h; after each one the worker gets one probe start
+        (half-open), and 10 healthy minutes close the breaker."""
+        control = read_json(self.repairs.home / "control.json", {})
+        trips = control.get("trips", 0) + 1
+        delay = min(3600, 300 * 2 ** (trips - 1))
+        self.repairs.event("worker_unavailable", {"id": self.boot}, detail=detail)
+        self.notify()
+        atomic_json(self.repairs.home / "control.json",
+                    {"action": "cooldown", "until": time.time() + delay, "trips": trips})
+
+    def breaker_tick(self):
+        """Move cooldown -> probe when it expires, probe -> closed after 10 healthy minutes."""
+        path = self.repairs.home / "control.json"
+        control = read_json(path, {})
+        if control.get("action") == "cooldown" and time.time() >= control.get("until", 0):
+            atomic_json(self.repairs.home / "restarts.json", {"since": time.time(), "used": 0})
+            atomic_json(path, {"action": "probe", "trips": control.get("trips", 1), "since": time.time()})
+        elif (control.get("action") == "probe" and self.worker is not None and self.worker.poll() is None
+              and time.time() - control.get("since", time.time()) >= 600):
+            path.unlink(missing_ok=True)
 
     def restart_allowed(self):
         path = self.repairs.home / "restarts.json"
@@ -348,8 +371,15 @@ class Supervisor:
         with exclusive(self.source / ".codebot-supervisor.lock"), exclusive(self.repairs.home / "supervisor.lock"):
             transaction = read_json(self.repairs.home / "promotion.json", {})
             if transaction.get("status") == "conflict":
-                raise RepairError("Prior rollback conflict requires operator intervention")
-            self.repairs.rollback()  # Resolve interrupted promotion before starting any worker.
+                # Raising here crash-looped the container silently. Keep the supervisor up,
+                # the worker stopped, and tell the operator.
+                self.repairs.event("worker_unavailable", {"id": self.boot},
+                                   detail="Prior rollback conflict requires operator intervention "
+                                          "(see data/supervisor/promotion.json)")
+                self.notify()
+                atomic_json(self.repairs.home / "control.json", {"action": "pause"})
+            else:
+                self.repairs.rollback()  # Resolve interrupted promotion before starting any worker.
             heartbeat_stop = threading.Event()
             def pulse():
                 while not heartbeat_stop.wait(5):
@@ -363,8 +393,9 @@ class Supervisor:
                     if time.monotonic() >= self.next_notification:
                         self.notify()
                         self.next_notification = time.monotonic() + 60
+                    self.breaker_tick()
                     control = read_json(self.repairs.home / "control.json", {})
-                    if control.get("action") == "pause":
+                    if control.get("action") in ("pause", "cooldown"):
                         self.stop()
                         time.sleep(1)
                         continue
@@ -377,9 +408,7 @@ class Supervisor:
                         # permission to rewrite application code without a diagnosis.
                         self.stop()
                         if not self.restart_allowed():
-                            self.repairs.event("worker_unavailable", {"id": self.boot}, detail="Worker heartbeat/readiness stalled")
-                            self.notify()
-                            atomic_json(self.repairs.home / "control.json", {"action": "pause"})
+                            self.trip("Worker heartbeat/readiness stalled")
                             continue
                         self.start()
                     for path in sorted((self.repairs.home / "events").glob("*.json")):
@@ -408,9 +437,7 @@ class Supervisor:
                                 "provider": os.environ.get("CODEBOT_TASK_SOURCE", "gdoc"), "conversation": state.get("thread_id")})
                             continue
                         if not allowed:
-                            self.repairs.event("worker_unavailable", {"id": self.boot}, detail=redact("".join(self.tail)))
-                            self.notify()
-                            atomic_json(self.repairs.home / "control.json", {"action": "pause"})
+                            self.trip(redact("".join(self.tail)))
                         else:
                             self.stop()
                             time.sleep(self.restart_count * 2)

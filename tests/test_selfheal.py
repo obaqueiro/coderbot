@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -296,6 +297,32 @@ class SelfHealingTests(unittest.TestCase):
         for _ in range(3):
             self.assertTrue(Supervisor(self.source, self.data, "observe").restart_allowed())
         self.assertFalse(Supervisor(self.source, self.data, "observe").restart_allowed())
+
+    def test_exhausted_restarts_back_off_and_probe_instead_of_pausing_forever(self):
+        supervisor = Supervisor(self.source, self.data, "observe")
+        control = self.repairs.home / "control.json"
+        with patch.object(supervisor, "notify"):
+            supervisor.trip("startup outage")
+        first = read_json(control)
+        self.assertEqual((first["action"], first["trips"]), ("cooldown", 1))
+        self.assertTrue(supervisor.paused())
+        atomic_json(control, {**first, "until": 0})  # cooldown over
+        supervisor.breaker_tick()
+        self.assertEqual(read_json(control)["action"], "probe")
+        self.assertFalse(supervisor.paused())
+        self.assertEqual(read_json(self.repairs.home / "restarts.json")["used"], 0)
+        with patch.object(supervisor, "notify"):
+            supervisor.trip("still down")
+        second = read_json(control)
+        self.assertEqual(second["trips"], 2)
+        self.assertGreater(second["until"] - time.time(), 550)  # 10 min: the backoff doubled
+
+    def test_corrupt_supervisor_state_is_quarantined_not_fatal(self):
+        path = self.repairs.home / "restarts.json"
+        path.write_text("{torn")
+        self.assertEqual(read_json(path, {"used": 0}), {"used": 0})
+        self.assertFalse(path.exists())
+        self.assertTrue(list(self.repairs.home.glob("restarts.json.corrupt-*")))
 
     def test_pid_reuse_never_signals_unrelated_process(self):
         with patch("scripts.supervisor.process_table", return_value={42: {"ticks": "new"}}), \

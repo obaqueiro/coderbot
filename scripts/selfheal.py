@@ -57,9 +57,18 @@ def atomic_json(path, value):
 
 
 def read_json(path, default=None):
+    """A JSON file, or `default` when it is missing. A corrupt file is quarantined
+    (renamed aside for inspection) and read as `default`, so one torn write can never
+    crash-loop the supervisor at boot."""
     try:
         return json.loads(Path(path).read_text())
     except FileNotFoundError:
+        return default
+    except (ValueError, UnicodeDecodeError):
+        try:
+            Path(path).replace(Path(f"{path}.corrupt-{int(time.time())}"))
+        except OSError:
+            pass
         return default
 
 
