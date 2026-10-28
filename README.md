@@ -230,6 +230,44 @@ their original spelling.
 
 ## Lifecycle
 
+### How coderbot drives the agent
+
+- **One fixed system prompt, short phase cards.** Working turns get a ~2.5k-character
+  system prompt (role, working rules, environment, result protocol) once per call,
+  never repeated inside the conversation. Each phase sends a short card that names the
+  one Superpowers/OpenSpec skill it uses, numbered steps, a "Done when" and the result
+  fields to fill. The bridge skill `coderbot-openspec-workflow` maps every interactive
+  step of those skills to coderbot (questions, approvals, file locations, "which
+  approach?", worktrees, finishing).
+- **Structured results.** Every working turn ends with one JSON result: status
+  (`done`, `done_with_concerns`, `needs_input`, `needs_approval`, `blocked`), summary,
+  question, attachments, checks, and phase fields (verification, review, threads,
+  classification, PR title). Claude Code enforces it with `--json-schema`; OpenCode is
+  asked for a JSON block (its native json_schema mode is broken up to 1.19.5). A
+  missing result gets one repair turn where a structured field is required; otherwise
+  the text is used as before. See `src/turns.py` and `docs/runtime-checks.md`.
+- **Guardrails in the runtime** (`CODEBOT_TOOL_POLICY`, default on). The agent cannot
+  push, create/merge/close/ready/edit PRs, archive OpenSpec changes or add worktrees;
+  planning phases write only under `openspec/` and cannot commit; implementation and
+  review turns cannot spawn subagents (`CODEBOT_EXECUTION=subagent` re-allows them for
+  an A/B test). Claude Code: deny rules plus a fail-open PreToolUse guard that also
+  catches `git -C . push` and `bash -c "…"`; OpenCode: bash deny patterns.
+- **Draft PR right after approval** (`CODEBOT_DRAFT_PR`, default on). Coderbot commits
+  the approved OpenSpec change, opens a draft PR, pushes after every implementation
+  turn, and marks it ready after verification, review and archival.
+- **Controller-owned verification.** When OpenSpec validates, the checklist is complete
+  and the focused checks passed, VERIFYING needs no agent turn. Each test command runs
+  once per plan even if declared under several ids, and an unchanged re-declared
+  command reuses its result.
+- **One review in the fresh session**, using Superpowers' `code-reviewer.md` template
+  filled with the change and the branch diff. Bot findings the agent already declined
+  are answered and resolved without another agent turn; no review wait is spent after
+  a push that changed nothing.
+- **Bounded loops.** Review, PR-thread, conflict and archive rounds are capped per task;
+  a loop guard stops a task that repeats the same transition on an unchanged
+  repository. Plain replies (`1`, `yes`, `sí`, `ok`, `lgtm`, `retry`) need no model call;
+  `CODEBOT_UTILITY_MODEL` (e.g. `haiku`) runs the remaining classifiers cheaply.
+
 ### Trusted autonomous runtime and performance
 
 Coderbot's runtime is fully trusted: the principal and every subagent have all
@@ -457,20 +495,11 @@ what changed, the PR and task links, and an index of evidence that was actually
 available. After feedback is pushed, it relates the request to the changes and
 new evidence. Upload failures are called out rather than passing for delivered files.
 
-**At PR creation**, before waiting for an optional automated Code Review run, codebot
-also sends a separate, informational architecture report. It compares the archived
-OpenSpec plan with the committed PR diff, calls out high-impact implemented decisions
-and unverified assumptions (for example, a separate managed database or elevated
-container permissions), and links each item to a changed PR file. If review or later
-feedback materially changes one of these decisions, only the delta is sent. An
-unavailable analysis does not claim that no decisions exist. This report never asks
-for another approval or delays automated review, the PR-ready handoff or merge.
-
 Every tick starts by checking the mailbox for commands (ABORT / STATUS / DONE / HOLD /
 CONTINUE, see below). Any state that keeps failing detours through WAIT_STUCK (see
 "Failure handling"), and HOLD parks a task from any state.
-Any phase can detour through WAIT_REPLY: if the coding agent needs the user, it ends its
-output with `NEED_USER_INPUT: <question>`; codebot sends the question in the task's
+Any phase can detour through WAIT_REPLY: if the coding agent needs the user, its result has
+status `needs_input` and one question with options; codebot sends the question in the task's
 configured email or Slack thread (optionally with `ATTACH: <path>` screenshots/videos)
 and resumes the same session with the reply. When an exploration reply completes the
 phase without another question, its explanation is sent to that thread before proposing.
@@ -534,7 +563,7 @@ automatically retried. Follow-up conversation receives these facts, not just a f
 Every external `git`/`gh` call has a timeout (`CODEBOT_SUBPROCESS_TIMEOUT`, default 120s)
 so a hung command surfaces as a failure (feeding the budget) instead of wedging the loop.
 
-Every working prompt starts with an "execution environment" preamble of runtime facts.
+Every working turn gets one fixed system prompt with the runtime facts and working rules.
 Add project-specific ones (how to run the tests, what is NOT available in the
 container) in `data/environment.md` or `CODEBOT_ENVIRONMENT_NOTES`. Untrusted text
 (e2e output, review comments, email bodies) is fenced as data inside prompts so an
