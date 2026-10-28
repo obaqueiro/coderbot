@@ -258,10 +258,13 @@ def selected_reply(state, reply):
     value = _active_decision(state)
     if value is None:
         return None
-    match = re.fullmatch(r"\s*(?:option\s+|opción\s+|opcion\s+)?([1-9]|yes|sí|si|no)[.!]?\s*", reply, re.IGNORECASE)
+    match = re.fullmatch(r"\s*(?:option\s+|opción\s+|opcion\s+)?([1-9]|yes|sí|si|no|"
+                         r"ok|okay|lgtm|dale|adelante|de acuerdo|go ahead)[.!]?\s*", reply, re.IGNORECASE)
     if not match:
         return {"wait": False, "reply": reply, "prose": True} if reply.strip() else None
     token = match[1].casefold()
+    if token in ("ok", "okay", "lgtm", "dale", "adelante", "de acuerdo", "go ahead"):
+        token = "yes"  # plain affirmatives answer a Yes/No decision without a classifier call
     if not token.isdigit():
         if not value["binary"]:
             return {"error": "Please select an option number; Yes/No does not identify an action here."}

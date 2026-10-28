@@ -1184,7 +1184,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
     # user's own words with a fresh, dedicated session (like do_merge_reply) and only
     # advance on an explicit go-ahead; anything else keeps us waiting for real approval.
     explicit = reply.strip().casefold().rstrip(".! ")
-    verdict = ({"action": "approve"} if explicit in ("approve", "approved", "aprobado", "aprobar", "implementa")
+    verdict = ({"action": "approve"} if explicit in ("approve", "approved", "aprobado", "aprobar", "apruebo",
+                                                       "implementa", "lgtm", "go ahead", "adelante")
                else parse_json_reply(agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)
                           + handoffs.classification_context(state),
                          contract=False).output))
@@ -4823,7 +4824,10 @@ def _escalate(state: dict, failed_state: str) -> bool:
 
 def do_stuck_reply(state: dict, reply: str) -> None:
     """Handle the user's reply while WAIT_STUCK: retry / abort / complete / instructions."""
-    verdict = parse_json_reply(
+    keyword = {"retry": "retry", "reintenta": "retry", "reintentar": "retry", "try again": "retry",
+               "abort": "abort", "aborta": "abort", "complete": "complete"}.get(
+        reply.strip().casefold().rstrip(".! "))
+    verdict = {"action": keyword} if keyword else parse_json_reply(
         agent_runner.run(prompts.render(prompts.CLASSIFY_STUCK_REPLY, reply=reply)
                          + handoffs.classification_context(state),
                          contract=False).output)

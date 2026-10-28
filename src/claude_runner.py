@@ -183,10 +183,10 @@ def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
 
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
-def _invoke(args: list[str], prompt: str, *, effort=None, structured=False) -> ClaudeResult:
+def _invoke(args: list[str], prompt: str, *, effort=None, structured=False, model=None) -> ClaudeResult:
     global _fallback_until
     options = {"effort": effort} if effort is not None else {}
-    proc, model = _invoke_with_model(args, prompt, _active_model(), **options)
+    proc, model = _invoke_with_model(args, prompt, model or _active_model(), **options)
     if (proc.returncode != 0 and _is_usage_exhausted(proc) and _fallback_model()
             and model != _fallback_model()):
         log.warning("model %s is out of usage credits; falling back to %s for %ds",
@@ -279,12 +279,29 @@ def _finish(result: "ClaudeResult") -> "ClaudeResult":
     return ClaudeResult(result.session_id, repaired.output, repaired.data)
 
 
+UTILITY_ISOLATION = ["--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                     "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence"]
+
+
+def _utility(prompt: str) -> ClaudeResult:
+    """A one-shot classifier/title call: no tools, settings, MCP or saved session, low
+    effort, optionally a cheaper model (CODEBOT_UTILITY_MODEL); one retry on the main
+    model if the cheaper one fails for another reason than exhausted credits."""
+    if not config.UTILITY_MODEL:
+        return _invoke(UTILITY_ISOLATION, prompt, effort="low")
+    try:
+        return _invoke(UTILITY_ISOLATION, prompt, effort="low", model=config.UTILITY_MODEL)
+    except RuntimeError as error:
+        log.warning("utility model %s failed (%s); retrying on %s", config.UTILITY_MODEL, error, _active_model())
+        return _invoke(UTILITY_ISOLATION, prompt, effort="low")
+
+
 def run(prompt: str, contract: bool = True) -> ClaudeResult:
     # One-shot utility calls (PICK, reply classifiers) pass contract=False so their sole
     # output instruction is the JSON contract in their own prompt.
     if not contract:
         with operations.budget(config.UTILITY_TIMEOUT_SECONDS):
-            return _invoke(["--tools", ""], prompt)
+            return _utility(prompt)
     return _finish(_invoke(_work_args(), prompt, structured=True))
 
 

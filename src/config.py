@@ -191,6 +191,9 @@ AGENT = os.environ.get("CODEBOT_AGENT") or "claude"
 USE_CAVEMAN = os.environ.get("USE_CAVEMAN") == "true"
 # Lifecycle guardrails enforced by the runtime (src/tool_policy.py); "off" disables them.
 TOOL_POLICY = (os.environ.get("CODEBOT_TOOL_POLICY") or "on").strip().lower() != "off"
+# Model for one-shot utility calls (reply classification, PR title, task language).
+# Empty uses CLAUDE_MODEL. Claude Code only; OpenCode keeps its role models.
+UTILITY_MODEL = (os.environ.get("CODEBOT_UTILITY_MODEL") or "").strip()
 # "inline" (default): one implementer session does the whole feature. "subagent" re-allows
 # per-task subagents during implementation, for a timed A/B comparison.
 EXECUTION = (os.environ.get("CODEBOT_EXECUTION") or "inline").strip().lower()

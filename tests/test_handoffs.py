@@ -309,3 +309,14 @@ class HumanHandoffs(unittest.TestCase):
         self.assertIn("Changed (implementation report): Added pagination", send.call_args.args[2])
         self.assertIn("report.html", send.call_args.args[2])
         self.assertEqual(state["state"], "WAIT_MERGE")
+
+
+class PlainAffirmatives(unittest.TestCase):
+    def test_short_affirmatives_answer_binary_decisions_without_a_classifier(self):
+        import handoffs
+        state = {"state": "WAIT_APPROVAL", "slug": "s"}
+        handoffs.remember_decision(state, "proposal for review")
+        for reply in ("ok", "OK.", "lgtm", "dale", "adelante!", "go ahead"):
+            with self.subTest(reply=reply):
+                self.assertEqual(handoffs.selected_reply(state, reply), {"wait": False, "reply": "approve"})
+        self.assertTrue(handoffs.selected_reply(state, "ok but rename the table")["prose"])
