@@ -86,7 +86,7 @@ class CheckpointReplayTests(unittest.TestCase):
                     with self.assertRaises(subprocess.TimeoutExpired):
                         agent_runner.resume("implementation", "review code")
                 agent_runner.set_task_context({"state": "INTERNAL_REVIEW", "branch": "b", "item": "task"})
-                with patch.object(agent_runner, "_opencode", return_value=agent_runner.OpenCodeResult("review", "done")) as run:
+                with patch.object(agent_runner, "_opencode", return_value=agent_runner.OpenCodeResult("review", '{"status": "done", "summary": "done"}')) as run:
                     agent_runner.resume("implementation", "review code")
                 self.assertEqual(run.call_args.args[1], "review")
                 self.assertIn("connection failure", run.call_args.args[0])
@@ -137,7 +137,7 @@ class CheckpointReplayTests(unittest.TestCase):
              patch.object(phase_checkpoint.config, "DATA_DIR", Path(root) / "data"), \
              patch.object(phase_checkpoint.config, "REPO_PATH", Path(root)), \
              patch.object(agent_runner.config, "AGENT", "opencode"), \
-             patch("agent_runner._opencode", return_value=agent_runner.OpenCodeResult("review", "done")) as call:
+             patch("agent_runner._opencode", return_value=agent_runner.OpenCodeResult("review", '{"status": "done", "summary": "done"}')) as call:
             subprocess.run(["git", "init", "-q", root], check=True)
             (Path(root) / ".gitignore").write_text("data/\n")
             state = {"state": "INTERNAL_REVIEW", "branch": "b", "item": "t"}

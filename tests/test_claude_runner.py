@@ -58,7 +58,12 @@ class ClaudeRunnerTests(unittest.TestCase):
             claude_runner.run("work on this")
         first, second = (c.args[0] for c in run.call_args_list)
         self.assertEqual(first[first.index("-p") + 1], "classify this")
-        self.assertIn(claude_runner.SENTINEL, second[second.index("-p") + 1])
+        self.assertNotIn("--append-system-prompt", first)
+        # Working turns carry the instructions as a system prompt plus the result schema,
+        # never prepended to the user prompt.
+        self.assertEqual(second[second.index("-p") + 1], "work on this")
+        self.assertIn("Make the smallest correct change", second[second.index("--append-system-prompt") + 1])
+        self.assertIn("--json-schema", second)
 
     def test_falls_back_to_opus_when_primary_model_credits_exhausted(self):
         exhausted = subprocess.CompletedProcess([], 1, json.dumps({

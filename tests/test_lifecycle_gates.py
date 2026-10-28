@@ -191,7 +191,7 @@ class LifecycleGateTests(unittest.TestCase):
              patch.object(main.subprocess, "run", side_effect=checks) as process:
             main.do_verify(state)
 
-        self.assertIn("verification phase", resume.call_args.args[1])
+        self.assertIn("verify OpenSpec change", resume.call_args.args[1])
         self.assertEqual(state["state"], "INTERNAL_REVIEW")
         self.assertNotIn("verify_round", state)
         self.assertEqual(
@@ -289,8 +289,8 @@ class LifecycleGateTests(unittest.TestCase):
             second_prompt = resume.call_args.args[1]
 
         self.assertNotIn("REJECTED", first_prompt)
-        self.assertIn("immutable base SHA `develop`", first_prompt)
-        self.assertIn("REJECTED (round 1 of 2)", second_prompt)
+        self.assertIn("against base commit develop", first_prompt)
+        self.assertIn("rejected (round 1 of 2)", second_prompt)
         self.assertIn("quality gate status is not pass", second_prompt)
         self.assertIn("- npm run lint: fail (100 errors)", second_prompt)
         self.assertTrue(second_prompt.endswith(first_prompt))  # feedback is prepended only

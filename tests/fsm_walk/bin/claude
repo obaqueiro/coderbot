@@ -55,9 +55,15 @@ The system SHALL greet a person by name.
 """
 
 
-def respond(text):
-    print(json.dumps({"type": "result", "subtype": "success", "session_id": session,
-                      "result": text, "is_error": False}))
+def respond(answer):
+    """Utility calls answer text; working calls (--json-schema) return structured_output
+    like the real CLI, with the summary as the text result."""
+    envelope = {"type": "result", "subtype": "success", "session_id": session, "is_error": False}
+    if isinstance(answer, dict):
+        envelope.update(result=answer["summary"], structured_output={"status": "done", **answer})
+    else:
+        envelope["result"] = answer
+    print(json.dumps(envelope))
     sys.exit(0)
 
 
@@ -75,16 +81,17 @@ def phase():
             if marker in prompt:
                 return "utility:" + marker, json.dumps(answer)
         return None, None
-    if "exploring this improvement" in prompt:
-        return "EXPLORE", "Exploration complete: a small pure function plus a unit test."
-    if "formalize the exploration" in prompt:
+    if "explore this backlog item" in prompt:
+        return "EXPLORE", {"summary": "Exploration complete: a small pure function plus a unit test.",
+                           "classification": "bounded", "pr_title": "Add greeting"}
+    if "turn the exploration into OpenSpec change" in prompt:
         (change / "specs/greeting").mkdir(parents=True, exist_ok=True)
         (change / "proposal.md").write_text(PROPOSAL)
         (change / "design.md").write_text("## Context\nA pure function; no state.\n")
         (change / "tasks.md").write_text("## 1. Greeting\n\n- [ ] 1.1 Add greet() with a unit test\n")
         (change / "specs/greeting/spec.md").write_text(SPEC)
-        return "PROPOSE", PROPOSAL
-    if "approved the proposal" in prompt:
+        return "PROPOSE", {"summary": PROPOSAL}
+    if "The user approved OpenSpec change" in prompt:
         Path("greet.py").write_text('def greet(name):\n    return f"Hello, {name}!"\n')
         Path("test_greet.py").write_text(
             "import unittest\nfrom greet import greet\n\n\nclass Greet(unittest.TestCase):\n"
@@ -95,21 +102,23 @@ def phase():
         git("commit", "-qm", "Add greet() with a unit test")
         plan = {"version": 1, "checks": [{"id": "unit", "argv": ["python3", "-m", "unittest", "-q"],
                                           "cwd": ".", "scope": "focused", "inputs": ["greet.py", "test_greet.py"]}]}
-        return "IMPLEMENT", "Implemented greet() test-first.\nCHECK_PLAN: " + json.dumps(plan)
-    if "verification phase of change" in prompt:
+        return "IMPLEMENT", {"summary": "Implemented greet() test-first.", "checks": plan["checks"]}
+    if "verify OpenSpec change" in prompt:
         gate = {"status": "pass", "commands": ["python3 -m unittest: pass"], "preexisting": [],
                 "openspec": "pass", "tasks": tasks_count()}
-        return "VERIFY", "All checks pass.\nQUALITY_GATE: " + json.dumps(gate)
-    if "internal review of change" in prompt:
-        review = {"status": "pass", "critical": 0, "important": 0, "tests": ["python3 -m unittest: pass"]}
-        return "INTERNAL_REVIEW", "Fresh review found nothing to fix.\nINTERNAL_REVIEW: " + json.dumps(review)
+        return "VERIFY", {"summary": "All checks pass.", "verification": gate}
+    if "review OpenSpec change" in prompt:
+        review = {"critical": 0, "important": 0, "tests": ["python3 -m unittest: pass"]}
+        return "INTERNAL_REVIEW", {"summary": "Fresh review found nothing to fix.", "review": review}
     return None, None
 
 
 name, text = phase()
 with (walk / "claude.log").open("a") as log:
+    system = argv[argv.index("--append-system-prompt") + 1] if "--append-system-prompt" in argv else ""
     log.write(json.dumps({"phase": name, "utility": utility, "resume": "--resume" in argv,
-                          "chars": len(prompt)}) + "\n")
+                          "chars": len(prompt), "system_chars": len(system),
+                          "schema": "--json-schema" in argv, "settings": "--settings" in argv}) + "\n")
 if name is None:
     (walk / f"unknown-prompt-{os.getpid()}.txt").write_text(raw_prompt)
     print(json.dumps({"type": "result", "subtype": "error", "is_error": True,

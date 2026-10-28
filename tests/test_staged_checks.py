@@ -178,18 +178,16 @@ class StagedChecksTests(unittest.TestCase):
         self.assertEqual(result["stage"], "focused_e2e")
         self.assertEqual(self.store.list("operation", "task", identity="full-e2e-launch"), [])
 
-    def test_policy_is_in_working_phase_and_headless_contracts(self):
-        for text in (prompts.ENVIRONMENT, prompts.IMPLEMENT, prompts.VERIFY, prompts.PROPOSE,
-                     prompts.RESOLVE_CONFLICTS, claude_runner.SENTINEL_CONTRACT):
-            self.assertIn("Staged testing policy", text)
-            self.assertIn("not a mandatory feature gate", text)
-            self.assertIn("unit and functional", text)
-            self.assertNotIn("full suite if the conflicts touched shared code", text)
+    def test_testing_policy_is_stated_once_in_the_system_prompt(self):
+        text = claude_runner.SENTINEL_CONTRACT
+        self.assertIn("Run focused tests yourself; coderbot runs the final checks", text)
+        self.assertIn("Never run an unfiltered end-to-end suite", text)
+        for card in (prompts.VERIFY, prompts.RESOLVE_CONFLICTS):
+            self.assertNotIn("full suite if the conflicts touched shared code", card)
+        self.assertIn("never an unfiltered full suite", prompts.RESOLVE_CONFLICTS)
 
-    def test_minimal_code_policy_reaches_working_and_headless_prompts(self):
-        for text in (prompts.ENVIRONMENT, prompts.PROPOSE, claude_runner.SENTINEL_CONTRACT):
-            self.assertIn("as little code as possible", text)
-            self.assertIn("net code", text)
+    def test_minimal_code_policy_reaches_every_working_turn(self):
+        self.assertIn("Make the smallest correct change", claude_runner.SENTINEL_CONTRACT)
 
     def test_diagnostic_plan_does_not_erase_registered_full_suite(self):
         check_plan.remember(self.state, 'CHECK_PLAN: {"version":1,"checks":[{"id":"full","argv":["playwright","test"]}]}')

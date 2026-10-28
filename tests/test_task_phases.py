@@ -80,8 +80,7 @@ class TaskPhaseTests(unittest.TestCase):
             def reconcile(session, prompt):
                 self.assertEqual(session, "sid")
                 self.assertIn("Reconcile integrated demo", prompt)
-                self.assertIn("Never credit checks, reviews or demos", prompt)
-                self.assertIn("Separate historical", prompt)
+                self.assertIn("Fill verification", prompt)
                 path.write_text(pending.replace("- [ ]", "- [x]"))
                 return SimpleNamespace(output='QUALITY_GATE: {"status":"pass",'
                     '"commands":["demo: pass"],"openspec":"pass","tasks":"2/2"}')

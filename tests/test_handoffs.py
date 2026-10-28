@@ -117,10 +117,14 @@ class HumanHandoffs(unittest.TestCase):
 
     def test_agent_contract_requires_one_decision_then_wait(self):
         from claude_runner import SENTINEL_CONTRACT
-        self.assertIn("exactly one self-contained question", SENTINEL_CONTRACT)
-        self.assertIn("own following line", SENTINEL_CONTRACT)
-        self.assertIn("wait for that answer", SENTINEL_CONTRACT)
-        self.assertIn("Do not repeat", SENTINEL_CONTRACT)
+        import turns
+        self.assertIn("one question, 2-4 options, recommended first", SENTINEL_CONTRACT)
+        # One question per turn by construction: the result has a single question field,
+        # rendered as one NEED_USER_INPUT block with each option on its own line.
+        rendered = turns.render({"status": "needs_input", "summary": "Context.",
+                                 "question": {"text": "Which store?", "options": ["SQLite", "Postgres"]}})
+        self.assertEqual(rendered.count("NEED_USER_INPUT:"), 1)
+        self.assertTrue(rendered.endswith("NEED_USER_INPUT: Which store?\n1. SQLite\n2. Postgres"))
 
     def test_selection_routes_to_existing_handler_without_feedback_investigation(self):
         state = {"state": "WAIT_REPLY", "return_state": "VERIFYING", "slug": "task",

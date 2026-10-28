@@ -99,10 +99,9 @@ class Asking(Base):
 
     def test_agent_is_told_about_requests_only_when_enabled(self):
         import claude_runner
-        self.assertIn("CREDENTIAL_REQUEST:", claude_runner.contract_text())
+        self.assertIn("credential {env, service, purpose}", claude_runner.contract_text())
         with patch.object(config, "CREDENTIAL_REQUESTS", False):
-            self.assertNotIn("CREDENTIAL_REQUEST", claude_runner.contract_text())
-            self.assertEqual(claude_runner.contract_text(), claude_runner.SENTINEL_CONTRACT)
+            self.assertNotIn("credential {env", claude_runner.contract_text())
 
     def test_skipped_credentials_relax_requested_checks(self):
         plan = {"version": 1, "checks": [{"id": "live", "argv": ["pytest"], "env_keys": ["STRIPE_KEY"]}]}

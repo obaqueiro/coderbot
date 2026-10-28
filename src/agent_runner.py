@@ -16,6 +16,7 @@ import config
 import secret_store
 import turn_control
 import tool_policy
+import turns
 import phase_checkpoint
 import repo_provenance
 from agent_errors import AgentContentFilterError, AgentTransportError
@@ -359,9 +360,10 @@ def _opencode_environment() -> dict[str, str]:
 
 
 class OpenCodeResult:
-    def __init__(self, session_id: str, output: str):
+    def __init__(self, session_id: str, output: str, data: dict | None = None):
         self.session_id = session_id
         self.output = output
+        self.data = data  # the validated result object (turns.RESULT_SCHEMA), or None
 
     @property
     def question(self) -> str | None:
@@ -375,6 +377,25 @@ class OpenCodeResult:
     def attachments(self) -> list[str]:
         # Delegate path validation to the established implementation.
         return claude_runner.ClaudeResult(self.session_id, self.output).attachments
+
+
+def _opencode_finish(result):
+    """Render the turn's JSON result; one repair turn when it is missing (OpenCode's
+    native json_schema format is unusable, docs/runtime-checks.md C10)."""
+    output, data = turns.finalize(result.output)
+    if data is None and result.session_id and turns.needs_result(tool_policy.current_phase()):
+        try:
+            with operations.budget(config.UTILITY_TIMEOUT_SECONDS * 4):
+                repaired = _opencode(turns.REPAIR_PROMPT, result.session_id)
+            output_r, data_r = turns.finalize(repaired.output)
+            if data_r is not None:
+                log.info("turn result recovered by a repair turn")
+                return OpenCodeResult(result.session_id, output_r, data_r)
+        except Exception as error:  # noqa: BLE001 - the original text still stands
+            log.warning("result repair failed: %s", error)
+        log.warning("turn ended without a result object; using its text")
+        return result
+    return OpenCodeResult(result.session_id, output, data)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -663,6 +684,8 @@ def run(prompt: str, contract: bool = True):
             with operations.budget(config.UTILITY_TIMEOUT_SECONDS if not contract else config.AGENT_TIMEOUT_SECONDS):
                 result = (_working_opencode(full, recovering, interrupted=True) if recovering
                           else _opencode(full))
+            if contract:
+                result = _opencode_finish(result)
         else:
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
@@ -734,8 +757,10 @@ def resume(session_id: str, prompt: str):
         if config.AGENT == "claude":
             result = claude_runner.resume(session_id, prompt) if session_id else claude_runner.run(prompt)
         elif config.AGENT == "opencode":
-            result = _working_opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt,
-                                       session_id, interrupted=bool(recovering))
+            # A rotated (fresh) session needs the full instructions; a resume only a reminder.
+            prefix = claude_runner.RESUME_REMINDER if session_id else claude_runner.contract_text()
+            result = _opencode_finish(_working_opencode(prefix + "\n\n" + prompt,
+                                                        session_id, interrupted=bool(recovering)))
         else:
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:

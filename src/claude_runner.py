@@ -9,12 +9,12 @@ from pathlib import Path
 
 import config
 import secret_store
-import handoffs
 import turn_control
 import operations
 import check_plan
 import prompts
 import tool_policy
+import turns
 
 log = logging.getLogger(__name__)
 
@@ -27,49 +27,20 @@ SENTINEL = "NEED_USER_INPUT:"
 # the outbox must be referenced by absolute path.
 OUTBOX_DIR = (config.DATA_DIR / "outbox").resolve()
 
-EVIDENCE_CONTRACT = f"""
-Evidence files (screenshots, screen recordings, videos, test/run reports) must NEVER
-be committed to the git repo, added to a branch, or pushed as part of a PR — the repo
-is for application and test code only, never for recorded proof. Whenever you produce
-evidence, or the user asks you to "attach" evidence, save the file(s) under
-{OUTBOX_DIR}/ and list each one's ABSOLUTE path on its own line starting with
-`ATTACH: ` in your response; codebot shares them in the task's conversation thread. This
-applies in every phase (implementing, addressing review feedback, answering a
-question) — not only when you use the NEED_USER_INPUT mechanism below.
-Questions, decisions, recommendations and context needed for a reply MUST also
-appear as readable prose in your response. Never make the user open ATTACH files
-or read raw JSON to discover what you are asking. Attach logs/specs/full technical
-reports as supporting material, not as a replacement for the conversation.
-"""
+# The working-turn instructions are one fixed system prompt (prompts.SYSTEM): never
+# repeated inside user turns, where every resume used to pile up the same policy text.
+# The names below remain for callers; OpenCode, which has no --append-system-prompt
+# here, receives contract_text() at the start of a fresh session instead.
+EVIDENCE_CONTRACT = ""
+RESUME_REMINDER = "(End this turn with the result object described in your instructions.)"
 
-SENTINEL_CONTRACT = prompts.MINIMAL_CHANGE_POLICY + prompts.TESTING_POLICY + f"""
-You are running headlessly with no interactive user. If at any point you need
-the user to answer a question or make a decision, do NOT ask interactively.
-Instead, END your response with a line starting exactly with `{SENTINEL}`
-followed by exactly one self-contained question. Put each numbered option on its
-own following line, then stop working and wait for that answer. Do not repeat the
-question in your preceding summary or ask another decision in the same turn.
-Otherwise finish the work and summarize what you did.
-Controller configuration, duplicate check registrations and bounded timeout increases
-are operational repairs, not human decisions. Emit CHECK_PLAN with explicit timeout
-values when needed; never ask the user to edit the controller for them. Keep ATTACH
-and CHECK_PLAN contracts separate from the final question.
-Make the question self-contained: explain the decision, available options and
-important consequences in plain language. Do not emit only 'answer the attached
-question' or put the actionable request solely in an attachment.
-{EVIDENCE_CONTRACT}
-{handoffs.DECISION_INSTRUCTIONS}
-Each of your turns is a brand-new, one-shot headless process: nothing monitors
-this session between invocations. If you start a background process (including
-via the Bash tool's run_in_background), it is orphaned the moment this turn
-ends — no future turn will check on it, read its output, or wait for it. NEVER
-end a turn by saying you are "waiting" for a background job to finish; that
-job will never be checked again and the task will stall. Run builds, servers,
-and test suites to completion in the foreground within the current turn. If
-something is occupying a resource you need (e.g. a port already bound), find
-and stop the actual owning process yourself rather than assuming a background
-task will free it up later.
-"""
+
+def contract_text() -> str:
+    """The working-session instructions; the credential rule only when the feature is on."""
+    return prompts.system_prompt(OUTBOX_DIR, credentials=bool(getattr(config, "CREDENTIAL_REQUESTS", False)))
+
+
+SENTINEL_CONTRACT = contract_text()
 
 
 def sentinel_preamble(output: str) -> str:
@@ -98,9 +69,10 @@ def sentinel_question(output: str) -> str | None:
 
 
 class ClaudeResult:
-    def __init__(self, session_id: str, output: str):
+    def __init__(self, session_id: str, output: str, data: dict | None = None):
         self.session_id = session_id
         self.output = output
+        self.data = data  # the validated result object (turns.RESULT_SCHEMA), or None
 
     @property
     def question(self) -> str | None:
@@ -211,7 +183,7 @@ def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
 
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
-def _invoke(args: list[str], prompt: str, *, effort=None) -> ClaudeResult:
+def _invoke(args: list[str], prompt: str, *, effort=None, structured=False) -> ClaudeResult:
     global _fallback_until
     options = {"effort": effort} if effort is not None else {}
     proc, model = _invoke_with_model(args, prompt, _active_model(), **options)
@@ -232,7 +204,7 @@ def _invoke(args: list[str], prompt: str, *, effort=None) -> ClaudeResult:
         # routinely empty on failure ("claude exited 1:"). Report both.
         raise RuntimeError(f"claude exited {proc.returncode}: "
                            f"stderr={proc.stderr[-2000:]!r} stdout={proc.stdout[-2000:]!r}")
-    return _parse(proc)
+    return _parse(proc, structured=structured)
 
 
 def _invoke_with_model(args: list[str], prompt: str,
@@ -266,51 +238,55 @@ def _invoke_with_model(args: list[str], prompt: str,
     return proc, model
 
 
-def _parse(proc: subprocess.CompletedProcess) -> ClaudeResult:
+def _parse(proc: subprocess.CompletedProcess, *, structured: bool = False) -> ClaudeResult:
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as err:
         raise RuntimeError(f"claude returned non-JSON output: {proc.stdout[:2000]!r}") from err
     if "session_id" not in data:
         raise RuntimeError(f"claude output missing session_id: {proc.stdout[:2000]!r}")
-    result = ClaudeResult(session_id=data["session_id"], output=data.get("result", ""))
+    output, result_data = data.get("result", "") or "", None
+    if structured:
+        output, result_data = turns.finalize(output, data.get("structured_output"))
+    result = ClaudeResult(session_id=data["session_id"], output=output, data=result_data)
     log.info("claude returned session=%s output=%d chars sentinel=%s",
              result.session_id, len(result.output), result.question is not None)
     log.debug("claude output:\n%s", result.output)
     return result
 
 
-CREDENTIAL_CONTRACT = """
-If a check or live test needs a credential you do not have (for example a third-party
-API key), never ask for its value in a question. Instead END your response with one line
-  CREDENTIAL_REQUEST: {"env": "VARIABLE_NAME", "service": "<service>", "purpose": "<why>"}
-and stop working. The user either provides it (it then appears as environment variable
-VARIABLE_NAME for you and for controller-run checks) or tells you to continue without it.
-Never print, log, write to a file or commit a credential's value. Checks that need it list
-it in "env_keys" with "optional": true, so they are skipped rather than failed without it.
-"""
+def _work_args() -> list[str]:
+    return ["--append-system-prompt", contract_text(), "--json-schema", turns.SCHEMA_JSON]
 
 
-def contract_text() -> str:
-    """The working-session contract; the credential part only when the feature is on."""
-    return SENTINEL_CONTRACT + (CREDENTIAL_CONTRACT if getattr(config, "CREDENTIAL_REQUESTS", False) else "")
+def _finish(result: "ClaudeResult") -> "ClaudeResult":
+    """A working turn always ends with a validated result object, rendered for the
+    controller. A missing one (the CLI reports success with structured_output null when
+    the model cannot satisfy the schema) gets ONE repair resume without tools; if that
+    fails too, the raw text stands, which is today's behaviour."""
+    if result.data is not None or not turns.needs_result(tool_policy.current_phase()):
+        return result
+    try:
+        repaired = _invoke(["--resume", result.session_id, "--tools", "", *_work_args()], turns.REPAIR_PROMPT,
+                           structured=True)
+    except Exception as error:  # noqa: BLE001 - the original turn's text still stands
+        log.warning("result repair failed: %s", error)
+        return result
+    if repaired.data is None:
+        log.warning("turn ended without a result object; using its text")
+        return result
+    log.info("turn result recovered by a repair resume")
+    return ClaudeResult(result.session_id, repaired.output, repaired.data)
 
 
 def run(prompt: str, contract: bool = True) -> ClaudeResult:
-    # Agentic working sessions get the NEED_USER_INPUT contract. One-shot utility calls
-    # (PICK, reply classifiers) pass contract=False so their sole output instruction is
-    # the JSON contract in their own prompt — the sentinel contract would otherwise let
-    # a classifier emit NEED_USER_INPUT instead of JSON and loop the reply forever.
-    full = contract_text() + "\n\n" + prompt if contract else prompt
+    # One-shot utility calls (PICK, reply classifiers) pass contract=False so their sole
+    # output instruction is the JSON contract in their own prompt.
     if not contract:
         with operations.budget(config.UTILITY_TIMEOUT_SECONDS):
-            return _invoke(["--tools", ""], full)
-    return _invoke([], full)
+            return _invoke(["--tools", ""], prompt)
+    return _finish(_invoke(_work_args(), prompt, structured=True))
 
 
 def resume(session_id: str, prompt: str) -> ClaudeResult:
-    # Re-state the evidence rule on every resumed turn, not just the task's first
-    # run(): each phase is a fresh headless process resuming old conversation history,
-    # and a prompt several turns back (e.g. "attach the evidence file") is easy for the
-    # model to reinterpret as "commit it" without this reminder at the decision point.
-    return _invoke(["--resume", session_id], EVIDENCE_CONTRACT + "\n\n" + prompt)
+    return _finish(_invoke(["--resume", session_id, *_work_args()], prompt, structured=True))

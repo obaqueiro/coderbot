@@ -182,7 +182,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertIn("actual diff", turn.call_args.args[1])
         self.assertIn("harness", turn.call_args.args[1])
-        self.assertIn("not a mandatory feature gate", turn.call_args.args[1])
+        self.assertIn("Focused-plan recovery attempt", turn.call_args.args[1])
         self.assertEqual(self.state["state"], "VERIFYING")
         main.save_state(self.state)
         self.state = json.loads(main.config.STATE_PATH.read_text())

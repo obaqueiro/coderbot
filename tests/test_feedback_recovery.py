@@ -36,7 +36,7 @@ class FeedbackRecoveryTests(unittest.TestCase):
         self.assertNotIn("replan", state)
         receive.assert_not_called()
         self.assertIn(message, resume.call_args.args[1])
-        self.assertIn("do NOT modify files", resume.call_args.args[1])
+        self.assertIn("change no files", resume.call_args.args[1])
         self.assertIn("Displayed decision", run.call_args.args[0])
 
     def test_exploration_answer_with_adjusted_option_never_investigates_approved_artifacts(self):
