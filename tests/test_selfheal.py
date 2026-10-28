@@ -410,3 +410,13 @@ class SelfHealingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SupervisorHygiene(unittest.TestCase):
+    def test_liveness_tolerates_long_poll_intervals_and_bad_values(self):
+        import importlib
+        import scripts.supervisor as supervisor_module
+        for value, expected in (("300", 900), ("", 360), ("2m", 360), ("30", 180)):
+            with patch.dict(os.environ, {"CODEBOT_POLL_INTERVAL": value}):
+                self.assertEqual(importlib.reload(supervisor_module).LIVENESS_SECONDS, expected)
+        importlib.reload(supervisor_module)

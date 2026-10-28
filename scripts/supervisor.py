@@ -69,6 +69,17 @@ def signal_owned(owned, sig):
                 pass
 
 
+
+# The worker writes its heartbeat once per poll interval; allow three missed beats.
+def _poll_interval():
+    try:
+        return int((os.environ.get("CODEBOT_POLL_INTERVAL") or "").strip() or 120)
+    except ValueError:
+        return 120  # the supervisor must start even when the worker's config is invalid
+
+
+LIVENESS_SECONDS = max(180, 3 * _poll_interval())
+
 class Supervisor:
     def __init__(self, source, data, mode):
         self.source, self.data, self.mode = Path(source).resolve(), Path(data).resolve(), mode
@@ -150,6 +161,17 @@ class Supervisor:
         self.worker = None
         if self.log_thread:
             self.log_thread.join(timeout=2)
+
+    def prune(self, keep_days=7):
+        """Handled events and delivered notifications are history; keep a week of them."""
+        cutoff = time.time() - keep_days * 86400
+        for pattern in ("events/*.handled", "notifications/*.delivered", "outbox/*.delivered"):
+            for path in self.repairs.home.glob(pattern):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                except OSError:
+                    pass
 
     def paused(self):
         return read_json(self.repairs.home / "control.json", {}).get("action") in ("pause", "cooldown")
@@ -392,6 +414,7 @@ class Supervisor:
                     self.heartbeat()
                     if time.monotonic() >= self.next_notification:
                         self.notify()
+                        self.prune()
                         self.next_notification = time.monotonic() + 60
                     self.breaker_tick()
                     control = read_json(self.repairs.home / "control.json", {})
@@ -402,8 +425,8 @@ class Supervisor:
                     if self.worker is None:
                         self.start()
                     status = worker_event(self.repairs.home / "worker.json")
-                    if (status.get("boot") == self.boot and time.time() - status.get("created", 0) > 180
-                            or status.get("boot") != self.boot and time.monotonic() - self.started_at > 180):
+                    if (status.get("boot") == self.boot and time.time() - status.get("created", 0) > LIVENESS_SECONDS
+                            or status.get("boot") != self.boot and time.monotonic() - self.started_at > LIVENESS_SECONDS):
                         # Liveness failure first receives a bounded restart, not
                         # permission to rewrite application code without a diagnosis.
                         self.stop()
