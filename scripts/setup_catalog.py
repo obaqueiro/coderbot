@@ -12,6 +12,18 @@ JIRA_STATUS_KEYS = ("CODEBOT_JIRA_PICK_STATUS", "CODEBOT_JIRA_ACTIVE_STATUS",
                     "CODEBOT_JIRA_REVIEW_STATUS", "CODEBOT_JIRA_DONE_STATUS")
 SLACK_APP_SETTINGS_URL = "https://api.slack.com/apps"
 GITHUB_TOKEN_URL = "https://github.com/settings/tokens"
+SELF_HEAL_OPTIONS = (
+    ("Disabled", "off"),
+    ("Observe only (no repairs)", "observe"),
+    ("Propose repairs (manual promotion)", "propose"),
+    ("Enabled (automatic validated repairs)", "auto"),
+)
+SELF_HEAL_SETUP_HELP = (
+    "Automatic mode may edit Coderbot Python source and restart its worker. "
+    "Start with Observe, then Propose before enabling automatic repairs. "
+    "Rebuild the image and recreate the container to apply a mode change; "
+    "saving setup only updates .env and never restarts the bot."
+)
 
 
 @dataclass(frozen=True)
@@ -31,7 +43,10 @@ def field(key, group, help, default="", kind="text", secret=False, advanced=Fals
 
 
 SETTINGS = (
-    field("CODEBOT_REPO_PATH", "Repository", "Absolute path to the target Git checkout.", kind="directory"),
+    field("CODEBOT_REPO_PATH", "Repository", "Absolute path to a Git checkout or feature workspace.", kind="directory"),
+    field("CODEBOT_WORKSPACE_MANIFEST", "Repository", "Optional JSON manifest inside the workspace for discovery, base overrides and checks.", advanced=True),
+    field("CODEBOT_SELF_HEAL", "Self-healing", "Enable or disable controller self-healing.",
+          "off", "choice", choices=tuple(value for _label, value in SELF_HEAL_OPTIONS)),
     field("CODEBOT_BASE_BRANCH", "Repository", "Trunk branch for task branches and PRs.", "main"),
     field("CODEBOT_PROJECT_NAME", "Repository", "Human-readable project name used in prompts."),
     field("CODEBOT_INSTANCE", "Repository", "Optional instance name; blank generates a stable adjective-animal name."),
@@ -87,7 +102,7 @@ SETTINGS = (
     field("CODEBOT_CLAUDE_TIMEOUT", "Limits", "Legacy alias for agent timeout; retained on upgrades.", advanced=True),
     field("CODEBOT_E2E_TIMEOUT", "Limits", "E2E timeout in seconds.", "900", "positive", advanced=True),
     field("CODEBOT_UTILITY_TIMEOUT", "Limits", "Utility LLM timeout.", "30", "positive", advanced=True),
-    field("CODEBOT_LOCAL_TOOL_TIMEOUT", "Limits", "Read/search operation timeout.", "45", "positive", advanced=True),
+    field("CODEBOT_LOCAL_TOOL_TIMEOUT", "Limits", "Local tool operation and subagent queue timeout in seconds.", "200", "positive", advanced=True),
     field("CODEBOT_SUBAGENT_TIMEOUT", "Limits", "Subagent operation timeout.", "600", "positive", advanced=True),
     field("CODEBOT_PROVIDER_TIMEOUT", "Limits", "Provider retry timeout.", "180", "positive", advanced=True),
     field("CODEBOT_OPENCODE_TRANSPORT", "Limits", "OpenCode transport: http or legacy cli.", "http", advanced=True),
@@ -134,7 +149,8 @@ assert len(BY_KEY) == len(SETTINGS), "duplicate configuration setting"
 
 # Runtime aliases, and variables injected solely into subprocesses, not user knobs.
 REVIEWED_NON_SETTINGS = {"GITHUB_TOKEN", "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
-                         "XDG_CACHE_HOME", "XDG_STATE_HOME", "PICA_E2E_VIDEO", "PW_VIDEO"}
+                         "XDG_CACHE_HOME", "XDG_STATE_HOME", "PW_VIDEO",
+                         "CODEBOT_SUPERVISOR_DIR", "CODEBOT_WORKER_BOOT", "CODEBOT_RUNTIME_EPOCH"}
 
 
 def relevant(setting: Setting, values: dict[str, str]) -> bool:
@@ -166,6 +182,8 @@ def validate_value(setting: Setting, value: str) -> str | None:
     # Every single-line value except exact 'true' is a valid disabled setting.
     if setting.kind == "exact_bool":
         return None
+    if setting.key == "CODEBOT_SELF_HEAL" and not value:
+        return "choose off, observe, propose or auto; use off to disable self-healing"
     if setting.choices and value and value not in setting.choices:
         return "choose one of: " + ", ".join(setting.choices)
     if setting.kind in ("positive", "nonnegative") and value:
@@ -191,8 +209,8 @@ def validate_value(setting: Setting, value: str) -> str | None:
     if setting.kind == "schedule" and value.lower() not in ("off", "none", "0", "false"):
         if not re.fullmatch(r"[1-9]\d*[smhd]?(?:\s*,\s*[1-9]\d*[smhd]?)*", value, re.I):
             return "use comma-separated durations such as 30m,1h, or off"
-    if setting.key == "CODEBOT_REPO_PATH" and value and not (Path(value).is_absolute() and (Path(value) / ".git").exists()):
-        return "select an absolute Git checkout (with .git)"
+    if setting.key == "CODEBOT_REPO_PATH" and value and not (Path(value).is_absolute() and Path(value).is_dir()):
+        return "select an absolute target directory (Git checkout or workspace)"
     if setting.key == "CODEBOT_JIRA_URL" and value and not re.fullmatch(r"https://[^/\s]+\.atlassian\.net/?", value):
         return "enter https://<site>.atlassian.net"
     if setting.key == "CODEBOT_JIRA_PICK_LABEL" and value and not re.fullmatch(r"[^\s]+", value):
@@ -217,6 +235,9 @@ def validate(values: dict[str, str]) -> list[str]:
     source = values.get("CODEBOT_TASK_SOURCE") or "gdoc"
     channel = values.get("CODEBOT_COMM_CHANNEL") or "email"
     agent = values.get("CODEBOT_AGENT") or "claude"
+    target = values.get("CODEBOT_REPO_PATH")
+    if target and not (Path(target) / ".git").exists() and source == "github" and not values.get("CODEBOT_GH_ISSUE_REPO"):
+        required.append("CODEBOT_GH_ISSUE_REPO")
     if source == "gdoc":
         required.append("CODEBOT_DOC_ID")
     elif source == "github" and not values.get("CODEBOT_GH_PROJECT_URL"):

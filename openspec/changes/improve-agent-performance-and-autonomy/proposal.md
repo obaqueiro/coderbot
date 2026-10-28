@@ -1,6 +1,6 @@
 ## Why
 
-La ejecución MC-3694 acumuló más de 28 horas con bloqueos de subagentes esperando permisos externos, reintentos de fases y verificación repetida; los checks terminados ocuparon aproximadamente 50 minutos de tiempo calendario. Coderbot necesita autonomía operativa completa y una ejecución medible, recuperable y proporcional al cambio, manteniendo cobertura y revisión independientes.
+Una ejecución prolongada acumuló más de 28 horas con bloqueos de subagentes esperando permisos externos, reintentos de fases y verificación repetida; los checks terminados ocuparon aproximadamente 50 minutos de tiempo calendario. Coderbot necesita autonomía operativa completa y una ejecución medible, recuperable y proporcional al cambio, manteniendo cobertura y revisión independientes.
 
 ## What Changes
 
@@ -34,4 +34,4 @@ La ejecución MC-3694 acumuló más de 28 horas con bloqueos de subagentes esper
 - Integraciones gestionadas: plugin OpenCode, skills, Dockerfile, entrypoint, healthcheck, setup y documentación de configuración/harnesses.
 - Estado durable: migraciones aditivas y recuperación de tareas existentes; mantener compatibilidad con Claude/OpenCode, Slack/email y los tres backlogs.
 - Tests: integración headless de permisos principal/hijos, fault injection, baseline e invalidación, limpieza, recuperación y artifacts; benchmark de ciclo con latencias controladas.
-- Despliegue: implementación incremental local y rollout únicamente de Coderbot después de staging. El código, configuración y harness de PICA u otra aplicación destino quedan fuera del alcance por decisión del usuario; se omiten optimizaciones que requieran modificarlos.
+- Despliegue: implementación incremental local y rollout únicamente de Coderbot después de staging. El código, configuración y harness de cualquier aplicación destino quedan fuera del alcance; se omiten optimizaciones que requieran modificarlos.

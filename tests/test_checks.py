@@ -17,7 +17,7 @@ class CheckRunnerTests(unittest.TestCase):
             repo.mkdir()
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
             store = ExecutionStore(Path(root) / "data/db")
-            plan = [Check(str(i), [sys.executable, "-c", "import time; time.sleep(.1)"],
+            plan = [Check(str(i), [sys.executable, "-c", f"import time; time.sleep(.1); print({i})"],
                           resources=["port:8111"]) for i in range(2)]
             results = execute_plan(plan, repo, store, "t")
             # Operation start times are stored before lock acquisition; use the
@@ -26,7 +26,8 @@ class CheckRunnerTests(unittest.TestCase):
             self.assertEqual([r["check"] for r in results], ["0", "1"])
     def test_reuse_and_invalidation_for_content_and_environment(self):
         from unittest.mock import patch
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root, \
+             patch("checks.tool_versions", return_value={"executable": sys.executable, "version": "test"}):
             repo = Path(root) / "repo"
             repo.mkdir()
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -57,3 +58,16 @@ class CheckRunnerTests(unittest.TestCase):
         xml = '<testsuite><testcase classname="X" name="a"><failure message="bad">trace</failure></testcase></testsuite>'
         self.assertEqual(parse_output(xml, 1, "junit")["failures"], {"X:a": "bad\ntrace"})
         self.assertEqual(parse_output('{"failures":{"a":"bad"}}', 1, "json")["status"], "fail")
+
+    def test_positive_execution_counts_require_recognized_reporter_output(self):
+        from check_results import parse_output
+        for output, reporter, expected in (("  2 passed\n", "playwright", 2),
+                ('{"failures": {}, "ran": 3}', "json", 3),
+                ('<testsuite><testcase name="a"/></testsuite>', "junit", 1)):
+            self.assertEqual(parse_output(output, 0, reporter)["test_count"], expected)
+        self.assertNotIn("test_count", parse_output("feature.spec.ts", 0, "text"))
+
+    def test_partial_browser_failure_inventory_cannot_be_attributed_as_baseline_only(self):
+        from check_results import parse_output
+        output = "  1) [chromium] feature.spec.ts:2:3 › scenario\nAssertionError: bad\n  2 failed\n"
+        self.assertEqual(parse_output(output, 1, "playwright")["status"], "unknown")

@@ -20,6 +20,13 @@ _roles = {}
 
 
 def register(process: subprocess.Popen) -> None:
+    import selfheal_events
+    try:
+        from pathlib import Path
+        ticks = Path(f"/proc/{process.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        selfheal_events.emit("child_started", pid=process.pid, start_ticks=ticks)
+    except (OSError, IndexError):
+        pass
     global _process, _requested
     with _lock:
         if role.get() == "work":

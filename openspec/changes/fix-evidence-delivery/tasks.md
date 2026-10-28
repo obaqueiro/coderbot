@@ -1,7 +1,7 @@
 ## 1. Regression coverage and harness contract
 
 - [x] 1.1 Add failing codebot regressions reproducing empty cached recording/upload, zero-attachment investigation replies and delivery-only requests incorrectly entering replanning.
-- [x] 1.2 Document the separate PICA filtered-inventory fix and acceptance cases (grep/invert, four passing demos, zero matches, skipped/failing/retried cases and incomplete unfiltered suite); verify codebot reports harness rejection precisely without bypassing it.
+- [x] 1.2 Document generic recording validation and recovery; verify codebot reports harness rejection precisely without bypassing it or encoding target-specific inventories.
 
 ## 2. Provenance and media processing
 
@@ -34,4 +34,4 @@
 
 - [x] 6.1 Add end-to-end controller tests covering fresh delivery, existing current demo, failed conversion/upload/access/PR sync, restart reconciliation and duplicate prevention.
 - [x] 6.2 Run focused and full codebot tests and strict OpenSpec validation; record results and any remaining blockers without marking partial tasks complete.
-- [x] 6.3 Document deployment/rollback, sharing configuration and explicit PR #114 recovery procedure including head/provenance checks and no merge; do not execute deployment or publication as part of this change.
+- [x] 6.3 Document deployment/rollback, sharing configuration and explicit PR recovery procedure including head/provenance checks and no merge; do not execute deployment or publication as part of this change.

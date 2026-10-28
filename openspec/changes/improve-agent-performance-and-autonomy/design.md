@@ -2,7 +2,7 @@
 
 Ver `proposal.md` para motivación y las seis delta specs para contratos. La aplicación Python tiene una FSM en `src/main.py`, runners Claude/OpenCode y persistencia JSON; `activity.py` conserva solo el turno actual y consulta SQLite de OpenCode. El runtime desplegado fija OpenCode 1.18.18, cuyo CLI atiende permisos únicamente del sessionID principal. Los hijos conservan herramientas en running al solicitar acceso externo. El entorno se considera de confianza total por decisión explícita del usuario.
 
-`VERIFYING` acepta fallos reproducidos en main, mientras `do_e2e` exige exit code cero. Prompts y skills favorecen suites y reviews repetidas. `evidence.py` busca rutas fijas y regraba; el harness PICA observado publica bajo outbox, instala dependencias y construye una imagen por ejecución, comparte puertos y usa un worker. Coderbot es un controlador genérico de repos externos: este cambio mejora su invocación y recogida de resultados, sin modificar PICA ni exigir flags nuevos a un target.
+`VERIFYING` acepta fallos reproducidos en main, mientras `do_e2e` exige exit code cero. Prompts y skills favorecen suites y reviews repetidas. `evidence.py` busca rutas fijas y regraba; los harnesses externos pueden repetir preparación, publicar fuera del checkout y compartir recursos. Coderbot es un controlador genérico de repos externos: este cambio mejora su invocación y recogida de resultados, sin modificar aplicaciones destino ni exigirles flags nuevos.
 
 ## Goals / Non-Goals
 
@@ -63,11 +63,11 @@ Crear `handoff_context.py` con requisitos aprobados, decisiones, diff summary, f
 
 Prompts y bridge skill coherentes: TDD útil para comportamiento, focalizados, suite final propiedad de controller, review independiente sin verificación completa duplicada, recuperación de trabajo RED/GREEN válido. Delegar unidades independientes que amortizan overhead; límite inicial 3 workers LLM configurable. Locks por puertos, checkout write ownership, Compose, imágenes y preparación; tests externos concurrentes solo con recursos distintos. No hacer ediciones simultáneas en mismos archivos.
 
-### 6. Preparación y harness genérico con adapter PICA
+### 6. Preparación y contrato genérico del harness
 
-Crear `preparation.py` y contrato opcional versionado del harness: prepare fingerprint, suites/providers, resources y artifact manifest. Preinstalar plugins/dependencias de puente en Dockerfile; separar registry público y scope @aloi para preparación sin auth privada global innecesaria. Verificar instalaciones antes de marcar prepared. No modificar ni imprimir tokens del registry.
+Crear `preparation.py` y contrato opcional versionado del harness: prepare fingerprint, suites/providers, resources y artifact manifest. Preinstalar plugins/dependencias de puente en Dockerfile; separar registry público y scopes privados configurados para preparación sin auth privada global innecesaria. Verificar instalaciones antes de marcar prepared. No modificar ni imprimir tokens del registry.
 
-Harness legacy conserva ./run.sh y detección; su caché solo se utiliza si preparación separada verificable ya disponible. Documentar y probar adapter PICA dentro de Coderbot: agrupar specs con el --provider existente y reconocer outputs externos. No cambiar run.sh, fixtures ni configuración de PICA. Las instalaciones internas de un harness legacy quedan a cargo de ese harness; solo se optimizan las llamadas que realiza Coderbot. Workers siguen 1 cuando el target comparte recursos. El contrato opcional se consume únicamente si ya existe, sin requerir añadir archivos al destino.
+Harness legacy conserva ./run.sh y detección; su caché solo se utiliza si preparación separada verificable ya disponible. Los grupos de specs/proveedores, recursos y outputs externos se declaran mediante contratos del destino, nunca mediante inventarios o adapters de una aplicación particular dentro de Coderbot. No cambiar run.sh, fixtures ni configuración del destino. Las instalaciones internas de un harness legacy quedan a cargo de ese harness; solo se optimizan las llamadas que realiza Coderbot. Workers siguen 1 cuando el target comparte recursos. El contrato opcional se consume únicamente si ya existe, sin requerir añadir archivos al destino.
 
 ### 7. Artifacts y finalización idempotente
 
@@ -106,6 +106,6 @@ Benchmark deterministic end-to-end con fake provider y subprocess reales ligeros
 4. Integrar checks/baseline y final gate detrás de configuración de rollout; activar por defecto tras tests de ambos runners y rutas de feedback.
 5. Activar handoffs/contexto, preparación, manifests y finalización durable; actualizar setup/docs/skills coherentes.
 6. Ejecutar suites focalizadas por incremento, suite completa final local y benchmark; staging de una tarea con permisos y recursos aislados.
-7. Rollout de Coderbot después de checkpoint de tarea activa. Registrar image/version y resultados antes/después. Se elimina el rollout del harness PICA por la corrección explícita de alcance del usuario.
+7. Rollout únicamente de Coderbot después de checkpoint de tarea activa. Registrar image/version y resultados antes/después; no modificar aplicaciones destino.
 
 Rollback conserva state.json y backup de store antes de migración; detener intento con cleanup y restaurar imagen/config compatibles con cursor de fase. No borrar trabajo/artifacts ni volver a un runtime con solicitudes operativas pendientes; trust-total permanece aunque se reviertan optimizaciones. Datos aditivos no requieren downgrade destructivo y los checks sin identidad antigua se vuelven a validar conservadoramente.

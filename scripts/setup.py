@@ -14,12 +14,12 @@ import urllib.request
 from pathlib import Path
 
 from scripts.setup_catalog import (BY_KEY, GITHUB_TOKEN_URL, JIRA_STATUS_KEYS, SETTINGS,
-                                   SLACK_APP_SETTINGS_URL,
+                                   SLACK_APP_SETTINGS_URL, SELF_HEAL_OPTIONS, SELF_HEAL_SETUP_HELP,
                                    effective, normalize_value, relevant, validate, validate_value)
 from scripts.setup_env import EnvFile
 
 ROOT = Path(__file__).resolve().parent.parent
-PRIMARY_PAGES = ("Repository", "Backlog", "Conversation", "Agent", "Evidence")
+PRIMARY_PAGES = ("Repository", "Backlog", "Conversation", "Agent", "Evidence", "Self-healing")
 VM_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*\Z")
 
 # Sent to `ssh ... sh -eu` on stdin, never interpolated with user input. Recreate
@@ -106,6 +106,8 @@ def fields_for(page: str, values: dict[str, str], search: str = ""):
                 (s.group in ("Claude", "OpenCode") and relevant(s, values) and not s.advanced)]
     if page == "Evidence":
         return [s for s in SETTINGS if s.group == "Evidence" and not s.advanced]
+    if page == "Self-healing":
+        return [s for s in SETTINGS if s.group == "Self-healing" and not s.advanced]
     if page == "Advanced":
         return [s for s in SETTINGS if search.casefold() in (s.key + " " + s.help).casefold()]
     return []
@@ -760,6 +762,28 @@ def _text_section(env: EnvFile, page: str) -> EnvFile:
         while index < len(queue):
             setting = queue[index]
             current = effective(setting, values)
+            if setting.key == "CODEBOT_SELF_HEAL":
+                print(SELF_HEAL_SETUP_HELP)
+                for number, (label, mode) in enumerate(SELF_HEAL_OPTIONS, 1):
+                    print(f"  {number}. {label} ({mode})")
+                try:
+                    entered = input(f"CODEBOT_SELF_HEAL [{current or 'off'}] "
+                                    "(number or mode; Enter keeps; /clear disables): ").strip().lower()
+                except EOFError:
+                    print("Draft discarded; .env was not changed.")
+                    return env
+                if entered.isdecimal() and 1 <= int(entered) <= len(SELF_HEAL_OPTIONS):
+                    value = SELF_HEAL_OPTIONS[int(entered) - 1][1]
+                else:
+                    value = "off" if entered == "/clear" else entered or current or "off"
+                if error := validate_value(setting, value):
+                    print(error)
+                    continue
+                values[setting.key] = value
+                if env.values.get(setting.key) != value:
+                    changes[setting.key] = value
+                index += 1
+                continue
             if setting.key == "CODEBOT_GH_PROJECT_URL":
                 if github_boards is None:
                     try:
@@ -1102,6 +1126,7 @@ def text_setup(env: EnvFile) -> bool:
                     "Conversation": {"Backlog", "Evidence"},
                     "Evidence": {"Backlog", "Conversation"},
                     "Agent": set(),
+                    "Self-healing": set(),
                     "Advanced": set(PRIMARY_PAGES),
                 }
                 completed.difference_update(dependents[section])

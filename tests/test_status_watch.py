@@ -10,7 +10,7 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 class StandaloneStatusWatch(unittest.TestCase):
     def test_answers_only_status_then_exits_when_task_advances(self):
-        active = {"state": "IMPLEMENTING", "item": "PICA", "slug": "pica",
+        active = {"state": "IMPLEMENTING", "item": "Example app", "slug": "example-app",
                   "thread_id": "C123:1.0", "task_language": "Spanish",
                   "last_transition": 100.0}
         later = dict(active, state="VERIFYING")
@@ -26,7 +26,7 @@ class StandaloneStatusWatch(unittest.TestCase):
             status_watch.watch(0)
         poll.assert_called_once_with("C123:1.0")
         self.assertIn("Fase: IMPLEMENTING", send.call_args.args[1])
-        self.assertIn("Tarea: PICA", send.call_args.args[1])
+        self.assertIn("Tarea: Example app", send.call_args.args[1])
         self.assertNotIn("no puedo confirmar", send.call_args.args[1])
         consumed.assert_called_once_with("C123:2.0")
         agent.assert_not_called()

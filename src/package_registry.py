@@ -7,7 +7,7 @@ def public_runtime_npmrc(source, destination):
     source, destination = Path(source), Path(destination)
     lines = source.read_text().splitlines() if source.is_file() else []
     # Preserve scopes and credential entries byte-for-byte. Only the global registry
-    # changes; private @aloi requests still use their scoped URL and token.
+    # changes; private scoped requests still use their configured URL and token.
     lines = [line for line in lines if not line.strip().startswith("registry=")]
     lines.append("registry=https://registry.npmjs.org/")
     destination.parent.mkdir(parents=True, exist_ok=True)

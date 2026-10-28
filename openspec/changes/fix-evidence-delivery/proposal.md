@@ -1,6 +1,6 @@
 ## Why
 
-PR #114 recorded passing demos but its filtered-run validator rejected them; codebot then cached an empty delivery as complete. Later requests were diverted to product replanning, and messages claiming to share videos contained zero attachments. Evidence delivery must be independently verifiable and recoverable.
+A rejected filtered recording can cause codebot to cache an empty delivery as complete. Later requests may be diverted to product replanning, and messages claiming to share videos can contain zero attachments. Evidence delivery must be independently verifiable and recoverable.
 
 ## What Changes
 
@@ -9,7 +9,7 @@ PR #114 recorded passing demos but its filtered-run validator rejected them; cod
 - Retry empty, failed or stale delivery checkpoints without repeating successful recording or duplicating uploads.
 - Route evidence delivery requests through controller-owned delivery at safe points, independently of product replanning and merge authorization.
 - Deliver real attachments or verified links; distinguish upload, reviewer access, PR synchronization and notification outcomes.
-- Provide an explicit, nonautomatic recovery procedure for PR #114 after deployment.
+- Provide an explicit, nonautomatic recovery procedure for existing PRs after deployment.
 - Retain explicit PR decisions received during review repairs until the same decision is actionable; never treat them as lateral chat or bypass existing merge gates.
 
 ## Capabilities
@@ -25,4 +25,4 @@ None. Existing review gates and milestone communication remain applicable.
 
 Codebot: `src/evidence.py`, `src/artifact_manifest.py`, `src/delivery_checkpoint.py`, `src/drive_client.py`, `src/feedback.py`, `src/main.py`, configuration, tests and operational documentation. No deployment, external upload, merge or live-state mutation is performed by implementation tests.
 
-The PICA `e2e/validate-results.cjs` fix belongs to a separate repository/change; this repo-local change includes its regression contract and coordinated follow-up, not unauthorized edits to that checkout. A local checkout was discovered at `/Users/baqueiro/repos/aloi/features/ejecuciones-mensuales/processing-interface-claude-analytics`; its branch and working changes must be checked before separately authorized implementation.
+Target harness validators belong to their own repositories. This change validates Coderbot's handling of rejected recordings without encoding application-specific inventories or making unauthorized target edits.

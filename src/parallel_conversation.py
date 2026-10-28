@@ -20,11 +20,76 @@ OPEN_INPUTS = {"ready", "clarifying", "waiting_approval", "processing"}
 log = logging.getLogger(__name__)
 
 
-def process_one(store, repo, generate, deliver):
+def _notify(row, stage, callback):
+    """Status delivery is independent of interpretation; transport failure never drops input."""
+    if callback is not None:
+        try:
+            callback(row, stage)
+        except Exception as error:
+            import diagnostics
+            log.warning("conversation status delivery pending: %s", diagnostics.summary(error=error))
+
+
+def status_text(row, stage):
+    import diagnostics
+    spanish = row["data"]["snapshot"].get("task_language", "").casefold() == "spanish"
+    kind = stage.split(":", 1)[0]
+    attempts = row["data"].get("attempts", 0)
+    classification = row["data"].get("processing_stage", "classification") == "classification"
+    action = ("interpretar el mensaje" if classification else "preparar la respuesta") if spanish else (
+        "classify the message" if classification else "prepare the response")
+    if kind == "received":
+        body = ("Recibí tu mensaje y lo guardé en cola; aún no se ha aplicado." if spanish else
+                "Received and durably queued your message; it has not been applied yet.")
+    elif kind == "classifying":
+        body = (f"Estoy interpretando tu mensaje, intento {attempts + 1}/3." if spanish else
+                f"Classifying your message, attempt {attempts + 1}/3.")
+    elif kind == "responding":
+        body = ("Estoy preparando la respuesta a tu mensaje." if spanish else
+                "Preparing the response to your message.")
+    elif kind == "queued":
+        body = ("Mensaje interpretado; el despacho por el controlador está pendiente." if spanish else
+                "Message classified; controller dispatch is pending.")
+    else:
+        cause = row["data"].get("last_error", "Outcome unavailable")
+        body = (f"No pude {action}: {cause}." if spanish else f"Could not {action}: {cause}.")
+        if kind == "retry":
+            delay = min(2 ** attempts, 30)
+            body += (f" Conservo el mensaje; reintento automático {attempts + 1}/3 en {delay}s. No lo reenvíes." if spanish else
+                     f" Message retained; automatic retry {attempts + 1}/3 in {delay}s. Do not resend it.")
+        else:
+            body += (f" Pausé el procesamiento tras {attempts} intentos fallidos. El mensaje sigue guardado. "
+                     "Consulta STATUS; cuando el servicio se recupere puedes reenviar la misma solicitud sin reformularla." if spanish else
+                     f" Processing paused after {attempts} failed attempts. The message remains saved. "
+                     "Use STATUS; once the service recovers you can resend the same request without rephrasing it.")
+        if classification:
+            body += (" No se llegó a interpretar ni aplicar esta solicitud." if spanish else
+                     " This request was not classified or applied.")
+    body += (" No se autorizó ninguna acción sobre la tarea por este aviso." if spanish else
+             " This notice authorizes no workflow action.")
+    excerpt = diagnostics.redact(row["data"]["text"])[:100].replace("\n", " ")
+    return body + "\n\n" + ("Mensaje: " if spanish else "Message: ") + excerpt
+
+
+def status_summary(store, state, repo):
+    """STATUS exposes routing/retry progress separately from the coding phase."""
+    rows = [row for row in store.list("conversation", store.task_identity(state, repo))
+            if row["status"] in ("pending", "classifying", "retry", "failed", "generating", "classified")
+            and row["data"]["snapshot"].get("thread_id") == state.get("thread_id")
+            and not row["data"].get("superseded_by")]
+    if not rows:
+        return ""
+    row = max(rows, key=lambda item: item["created"])
+    stage = {"retry": "retry", "failed": "blocked", "classifying": "classifying",
+             "generating": "responding", "classified": "queued"}.get(row["status"], "received")
+    return status_text(row, stage)
+
+
+def process_one(store, repo, generate, deliver, *, notify=None):
     """One worker owns lateral records; the controller alone consumes flow records."""
     with store.connection() as db:
         records = db.execute("SELECT * FROM conversation WHERE status IN "
-                             "('pending','classified','generating','generated','retry','failed') ORDER BY created").fetchall()
+                              "('pending','classifying','classified','generating','generated','retry','failed') ORDER BY created").fetchall()
     rows = [store._decode(r) for r in records]
     blocked_tasks = set()
     row = None
@@ -53,7 +118,11 @@ def process_one(store, repo, generate, deliver):
         if not row["data"].get("classification"):
             fixed = deterministic(row["data"]["snapshot"], row["data"]["original_text"])
             if fixed is None:
-                result = generate(classification_prompt(row), None)
+                import agent_runner
+                row = store.update("conversation", row, status="classifying", processing_stage="classification")
+                _notify(row, "classifying:" + str(row["data"].get("attempts", 0) + 1), notify)
+                with agent_runner.routing():
+                    result = generate(classification_prompt(row), None)
                 fixed = json.loads(result.output)
             row = save_classification(store, row, fixed)
         if row["data"]["route"] == "flow":
@@ -70,31 +139,49 @@ def process_one(store, repo, generate, deliver):
         if row["data"].get("output") is None:
             sessions = [r["data"].get("session_id") for r in store.list("conversation", row["task_id"])
                         if r["data"].get("session_id")]
-            row = store.update("conversation", row, status="generating")
+            row = store.update("conversation", row, status="generating", processing_stage="response")
             result = generate(response_prompt(row, inputs), row["data"].get("session_id") or
                               (sessions[0] if sessions else None), on_session=remember)
             row = store.update("conversation", row, status="generated", output=result.output,
                                session_id=result.session_id)
         receipt = deliver(row)
         store.update("conversation", row, status="complete" if receipt["complete"] else "generated",
-                     notification_id=receipt["notification_id"], last_error=receipt.get("error"))
+                      notification_id=receipt["notification_id"], last_error=receipt.get("error"),
+                      retry_at=0 if receipt["complete"] else time.time() + 30)
     except Exception as error:
         from agent_errors import AgentContentFilterError
+        import diagnostics
+        import subprocess
         row = store.get("conversation", row["id"])
         attempts = row["data"].get("attempts", 0) + 1
         if row["data"].get("output") is not None:
             status = "generated"
         else:
             status = "failed" if isinstance(error, AgentContentFilterError) or attempts >= 3 else "retry"
+        cause = diagnostics.summary(error=error)
+        if isinstance(error, subprocess.TimeoutExpired):
+            cause = f"execution deadline exceeded ({error.timeout:.2f}s limit)"
+            if getattr(error, "elapsed", None) is not None:
+                cause += f"; elapsed {error.elapsed:.2f}s"
         row = store.update("conversation", row, status=status, attempts=attempts,
                            retry_at=time.time() + min(2 ** attempts, 30),
-                           last_error=f"{type(error).__name__}: {error}")
+                           last_error=f"{type(error).__name__}: {cause}")
+        if status == "retry":
+            _notify(row, "retry:" + str(attempts), notify)
         if status == "failed":
             spanish = row["data"]["snapshot"].get("task_language", "").casefold() == "spanish"
-            notice = ("No pude procesar este mensaje lateral. Conservé el trabajo y la decisión pendiente. "
-                      "Envía un mensaje nuevo o reformulado para continuar la conversación." if spanish else
-                      "I could not process this lateral message. Work and the pending decision are preserved. "
-                      "Send a new or reformulated message to continue the conversation.")
+            notice = status_text(row, "blocked")
+            if isinstance(error, AgentContentFilterError):
+                import diagnostics
+                view = row["data"]["snapshot"]
+                block = diagnostics.safe({"source": "user reply", "phase": "parallel conversation",
+                    "user_text": row["data"]["original_text"], "request": error.request,
+                    "partial_response": error.partial_response, "provider_detail": error.provider_detail})
+                view = {**view, "provider_block": block}
+                notice = handoffs.provider_notice(block, view.get("task_language", "English"))
+                notice += "\n\n" + ("La tarea y la decisión pendiente no cambiaron." if spanish else
+                                        "The task and pending decision are unchanged.")
+                row = store.update("conversation", row, snapshot=view)
             current = store.update("conversation", row, output=notice, generation_failed=True)
             try:
                 receipt = deliver(current)
@@ -107,9 +194,10 @@ def process_one(store, repo, generate, deliver):
 
 
 class Worker:
-    def __init__(self, store_factory, repo, generate, deliver):
+    def __init__(self, store_factory, repo, generate, deliver, *, notify=None):
         self.store_factory, self.repo = store_factory, repo
         self.generate, self.deliver = generate, deliver
+        self.notify = notify
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.thread = threading.Thread(target=self.run, name="task-conversation", daemon=True)
@@ -117,7 +205,7 @@ class Worker:
     def run(self):
         while not self.stop.is_set():
             try:
-                processed = process_one(self.store_factory(), self.repo, self.generate, self.deliver)
+                processed = process_one(self.store_factory(), self.repo, self.generate, self.deliver, notify=self.notify)
             except Exception:
                 log.exception("conversation worker failed")
                 processed = False
@@ -137,12 +225,17 @@ def flow_pending(store, state, repo):
                   key=lambda r: r["created"])
 
 
-def delivery(store, row, repo, directory, backend):
+def delivery(store, row, repo, directory, backend, *, notice=None):
     import message_delivery
     view = row["data"]["snapshot"]
+    files = []
+    if notice is None and view.get("provider_block"):
+        import diagnostics
+        files.append(diagnostics.report(store, view, repo, directory, "parallel conversation",
+            detail=row["data"]["output"], identity="conversation-failure:" + row["id"]))
     return message_delivery.deliver(store, view, repo, directory, backend,
-        "Task conversation", row["data"]["output"], view.get("thread_id"),
-        identity="conversation:" + row["id"])
+        "Task conversation", status_text(row, notice) if notice else row["data"]["output"], view.get("thread_id"), files,
+        identity=("conversation-status:" + row["id"] + ":" + notice) if notice else "conversation:" + row["id"])
 
 
 def _safe(value):
@@ -153,9 +246,10 @@ def _safe(value):
     if isinstance(value, list):
         return [_safe(v) for v in value[:20]]
     if isinstance(value, str):
+        value = redaction.redact(value)
         value = re.sub(r"(?i)(bearer\s+|(?:api[_-]?key|password|secret)\s*[:=]\s*)\S+",
-                       r"\1[redacted]", value)
-        return redaction.redact(value)[:5000]
+                        r"\1[redacted]", value)
+        return value[:5000]
     return value
 
 
@@ -174,6 +268,10 @@ def snapshot(store, state, repo):
             "archive_path", "pr_url", "execution_checkpoint_id", "workspace_path",
             "last_effective_progress", "quality_report", "proposal_snapshot")
     view = _safe(copy.deepcopy({k: state[k] for k in keys if k in state}))
+    if state.get("stuck_error") or state.get("reported_check_plan_error") or state.get("provider_block"):
+        import diagnostics
+        view["failure_context"] = _safe(copy.deepcopy(state.get("failure_context") or
+            diagnostics.failure_context(store, state, repo)))
     view["execution_task_id"] = store.task_identity(state, repo)
     view["decision_version"] = decision_version(state)
     view["captured_at"] = time.time()
@@ -240,6 +338,32 @@ def validate(value):
     return value
 
 
+def classification_snapshot(view):
+    """Routing needs the current decision and input references, not reports or history."""
+    result = _safe({k: view[k] for k in ("item", "slug", "state", "task_language", "return_state",
+        "stuck_return", "stuck_error", "pr_url", "decision_version") if k in view})
+    result = {k: v[:256] if isinstance(v, str) else v for k, v in result.items()}
+    incomplete = False
+    def clip(text, limit):
+        nonlocal incomplete
+        text = _safe(text)
+        if len(text) > limit:
+            incomplete = True
+        return text[:limit]
+    result["pending_question"] = clip(view.get("pending_question") or "", 1200)
+    decision = view.get("pending_decision") or {}
+    result["pending_decision"] = {k: decision[k] for k in ("binary", "wait_state", "origin") if k in decision}
+    result["pending_decision"]["question"] = clip(decision.get("question", ""), 800)
+    options = decision.get("options", [])
+    incomplete |= len(options) > 4
+    result["pending_decision"]["options"] = [{"label": clip(option.get("label", ""), 600),
+        "wait": option.get("wait", False), "details": option.get("details", False)} for option in options[:4]]
+    result["inputs"] = [{k: v[:240] if isinstance(v, str) else v for k, v in item.items()
+        if k in ("id", "kind", "status", "question", "text")} for item in _safe(view.get("inputs", []))[:6]]
+    result["routing_context_incomplete"] = incomplete
+    return _safe(result)
+
+
 def classification_prompt(row):
     return ("Classify an authorized task-thread message BEFORE any action. No tools. "
             "Use the entire message, negations, conditions and displayed decision. "
@@ -255,12 +379,13 @@ def classification_prompt(row):
              "requested_action for workflow actions and inputs of kind change for requests "
              "to modify, verify, generate or deliver work. They will be queued for the controller. "
              "Do not infer an action from a question, negation or hypothetical discussion. "
+             "If routing_context_incomplete is true, do not resolve or authorize a workflow decision; ask for clarification. "
             "Return ONLY JSON: {\"intent\":\"answer|conversation|change_request|ambiguous\","
             "\"resolves_pending_question\":false,\"requested_action\":null,"
             "\"action_depends_on_change\":false,\"inputs\":[{\"kind\":\"context|change\","
             "\"text\":\"exact user assertion\",\"needs_clarification\":false,"
             "\"replaces\":null,\"clarifies\":null}]}. Do not invent user assertions.\n"
-            + prompts.fenced("task snapshot", json.dumps(row["data"]["snapshot"], ensure_ascii=False))
+            + prompts.fenced("routing snapshot", json.dumps(classification_snapshot(row["data"]["snapshot"]), ensure_ascii=False))
             + prompts.fenced("explicit btw", str(row["data"]["explicit_btw"]))
             + prompts.fenced("user message", _safe(row["data"]["text"])))
 
@@ -299,6 +424,9 @@ def deferred_pr_reply(view, text):
 
 def save_classification(store, row, value):
     value = validate(value)
+    if classification_snapshot(row["data"]["snapshot"])["routing_context_incomplete"]:
+        value = {**value, "intent": "ambiguous", "resolves_pending_question": False, "requested_action": None}
+        return store.update("conversation", row, status="classified", route="lateral", classification=value)
     if row["data"]["explicit_btw"]:
         value = {**value, "intent": "change_request" if value.get("inputs") else "conversation",
                  "resolves_pending_question": False, "requested_action": None}
@@ -403,7 +531,7 @@ def delivery_blockers(store, state, repo):
     """Unclassified receipts cannot silently race an irreversible handoff."""
     task = store.task_identity(state, repo)
     pending = [r for r in store.list("conversation", task)
-               if r["status"] in {"pending", "generating", "failed", "retry", "classified"}
+               if r["status"] in {"pending", "classifying", "generating", "failed", "retry", "classified"}
                and not r["data"].get("superseded_by")
                and (not r["data"].get("classification") or
                     r["data"].get("classification", {}).get("inputs") and

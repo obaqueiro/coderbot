@@ -132,8 +132,9 @@ class FeedbackRecoveryTests(unittest.TestCase):
         state = {"item": "task", "state": "IMPLEMENTING", "session_id": "session",
                  "task_language": "Spanish", "technical_retry": {"attempts": 3}}
         with patch.object(main.agent_runner, "run") as run, \
-             patch.object(main.gmail_client, "send", return_value="thread"), \
-             patch.object(main, "trail"), patch.object(main, "_note_contact"), \
+              patch.object(main.gmail_client, "send", return_value="thread"), \
+              patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread"}), \
+              patch.object(main, "trail"), patch.object(main, "_note_contact"), \
              patch.object(main, "save_state"):
             main._content_filter_stop(state, "IMPLEMENTING")
         run.assert_not_called()
@@ -199,7 +200,7 @@ class FeedbackRecoveryTests(unittest.TestCase):
         report = {"snapshot": "head", "requirements": [{"id": "effort", "status": "implemented",
                    "implementation": "toolbar", "verification": "tests"}]}
         self.assertEqual(verification_ledger.validate_coverage(inventory, report, "head"), ["Model selector"])
-        self.assertEqual(review_intent.provenance({"author": "pr-code-review-aloi", "body": "ai-review-inline"}), "automated")
+        self.assertEqual(review_intent.provenance({"author": "custom-reviewer", "body": "ai-review-inline"}), "automated")
         self.assertEqual(review_intent.provenance({"author": "unknown"}), "unknown")
 
     def test_transient_review_failure_does_not_consume_round(self):

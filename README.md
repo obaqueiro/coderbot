@@ -8,6 +8,16 @@ managed OpenSpec workflow via a selectable headless coding agent (Claude Code or
 OpenCode), and talks to the team by email (default) or Slack (`CODEBOT_COMM_CHANNEL=slack`).
 Several instances can share a backlog; Slack instances each use their own app.
 
+Coderbot is repository- and organization-agnostic. Target-specific checks, provider
+groups, preparation and artifacts belong in the target's declarative contracts,
+not hardcoded application adapters. See [harness contracts](docs/harness-contract.md).
+
+Target mode is automatic: a root `.git` means single repository; otherwise the
+directory is a workspace. See [feature workspaces](docs/workspaces.md).
+
+Optional independent supervision and validated Python repairs are documented in
+[self-healing](docs/self-healing.md); automatic repair is disabled by default.
+
 The communication façade supports optional live task progress. Slack edits the
 initial feature message with its phase, `:loading:` while working, `:question:`
 when user input is required, and the last three safe operational log lines.
@@ -112,7 +122,7 @@ among all pending items (prerequisites and enablers first).
 ### GitHub Projects v2 (`CODEBOT_TASK_SOURCE=github`)
 
 The backlog is a Projects v2 board (`CODEBOT_GH_PROJECT_URL`, e.g.
-`https://github.com/orgs/getriverly/projects/3`, or `CODEBOT_GH_PROJECT_OWNER` +
+`https://github.com/orgs/example/projects/3`, or `CODEBOT_GH_PROJECT_OWNER` +
 `CODEBOT_GH_PROJECT_NUMBER`). A task is a board card backed by an **issue of the
 target repo** (the checkout's `origin`, or `CODEBOT_GH_ISSUE_REPO`): the issue title
 is the task text, its body the clarifications, and images in the body are downloaded
@@ -231,13 +241,19 @@ service when changing plugins/configuration.
 
 OpenCode defaults to the managed HTTP event bridge (`CODEBOT_OPENCODE_TRANSPORT=http`)
 so tool starts, child activity and provider retries are observable. Defaults:
-aggregate agent 1800 s, E2E 900 s, local read/search 45 s, subagent 600 s,
+aggregate agent 1800 s, E2E 900 s, local tools other than bash/task 200 s, subagent 600 s,
 provider retry 180 s and utilities 30 s. Each is environment-overridable in the
 setup catalog. KICK also cancels controller-run tests and evidence operations.
 
+Tool execution watchdogs start only on `running`, never `pending`; argument
+generation and queueing still consume the aggregate agent budget. Repeated running
+updates do not extend local tool deadlines. Completed/error events retire the
+watchdog, including errors before execution; child metadata updates retain subagent
+progress tracking.
+
 Only primary sessions may launch subagents; child sessions (including resumed ones)
 are rejected before entering the concurrency queue. `CODEBOT_MAX_SUBAGENTS` defaults
-to 3. Queued delegations wait at most `CODEBOT_LOCAL_TOOL_TIMEOUT` (45 s by default).
+to 3. Queued delegations wait at most `CODEBOT_LOCAL_TOOL_TIMEOUT` (200 s by default).
 Completed or failed tasks release their slot even when the runtime skips the
 after-tool hook. On delegation rejection or queue timeout, the agent must finish
 that unit directly rather than retrying delegation or increasing runtime limits.
@@ -305,13 +321,42 @@ tests. The current documents and staged diff are backed up outside the repositor
 under `data/verification-recovery/` before any replacement. Review legitimate spec
 changes first; omit this option when they must be kept and reconcile them manually.
 
-Implementation/review use focused checks; the deterministic runner owns complete
-final checks and compares identifiable failures against the immutable `base_sha`.
+Top engineering priority: implement the requested behavior with as little code as
+possible. Prefer reuse, simplification and justified net code removal; preserve
+existing functionality, tests, readability and safety. Line-count tricks do not count.
+
+With `CODEBOT_DETERMINISTIC_CHECKS=true` (default), the feature gate runs extensive
+unit/functional checks, then genuinely selected E2E covering the actual changes,
+including changed harness paths. E2E plans declare `kind: "e2e"`, focused plans declare
+`scope: "focused"`, and a structured reporter must prove positive test execution
+(`playwright`, `junit`, or `json` with `ran`). Missing/empty focused evidence blocks
+the feature gate. Old unfiltered full-suite registrations remain saved, but do not
+run or block feature verification, retries, publication or archival. Explicitly
+selected commands with legacy `scope: "full"` are treated as focused checks; an
+unfiltered command cannot masquerade as focused. Historical broad results appear
+separately as non-required `audit_checks`, without being passed, waived or reused
+as current feature evidence. `suite_status` retains raw outcomes (including those
+audits); gate `status` depends on required checks only. A separate explicit controller
+audit call (`staged_checks.run(..., audit=True)`) retains the full regression path.
+At most two actual full E2E launches per task are admitted, including
+baseline executions; reservations survive crashes and cache hits cost nothing.
+Planning completion/archive alone does not invalidate code checks. Changed approved
+requirements, design or task text still require reconciliation; approval fingerprints
+ignore checkboxes, not intent. Agents must not launch full or baseline suites themselves.
+
+The deterministic runner compares identifiable failures against immutable `base_sha`.
 Results are reused only with matching content, command, tools and declared
 environment. Unknown failures and incomparable baseline environments do not pass.
 The default response to every failed/unknown/infrastructure check is diagnose and
-implement a fix, including inherited failures, not ask the user what to do or repeat
-the same command blindly. `REPAIR_CHECKS` reads actual feature/baseline logs, repairs
+repair approved behavior or operational prerequisites, not expand scope to fix
+unrelated product debt or repeat the same command blindly. Confirmed baseline-only
+failures do not block the regression gate: `status` can be `pass` while raw
+`suite_status` remains `fail`. New/worsened failures, unknown attribution and missing
+required feature evidence still block required-check evaluation; historical broad
+audit failures are informational in the focused feature gate. Workspace-local checks can use isolated
+repository baselines only with explicitly repository-local inputs; shared/composite
+failures remain unresolved without an immutable composite baseline. Agent prose or
+being "outside scope" is not baseline evidence. `REPAIR_CHECKS` reads actual feature/baseline logs, repairs
 declared dependencies in the check's interpreter and fixes approved code/test/runner
 behavior without requiring SSH or manual bot edits. The controller then reruns only
 affected invalidated checks; unaffected valid results remain reusable. Agent prose
@@ -323,6 +368,21 @@ starts a fresh repair attempt, not another blind run. Product/scope changes or
 unobtainable external prerequisites still require a concrete decision. Legacy final
 check waits recover through the same path when the user replies; `VERIFY` is not
 needed to restart planning or reset state.
+
+In an existing workspace `WAIT_STUCK` caused by the old full-audit budget gate,
+plain `retry` deterministically resumes the same task, preserving prior guidance,
+approvals, registrations and audit reservations. The bot first reconciles a selected
+plan against the actual repository/harness diff, then runs required checks and
+continues normal checklist reconciliation and independent review. Interrupted
+plan-recovery turns do not spend completed-repair attempts. This does not authorize
+missing-evidence completion, publication, merge or DONE.
+
+Check-plan metadata accepts `timeout_seconds` as an alias for `timeout`; conflicting
+values, unknown fields and string-valued `argv` remain invalid. Validation names
+the check and offending field. Plan repairs use durable attempt/recovery revisions
+so rejected outputs are not replayed as new attempts; explicit `retry` resets the
+repair counter, not passing evidence or the full-E2E budget.
+
 Responses to user questions and their attachments are sent in the same thread in
 every phase before the continuation advances. Failed/partial delivery preserves the
 waiting phase and question rather than dropping the answer behind a progress banner.
@@ -415,6 +475,16 @@ configured email or Slack thread (optionally with `ATTACH: <path>` screenshots/v
 and resumes the same session with the reply. When an exploration reply completes the
 phase without another question, its explanation is sent to that thread before proposing.
 
+Task-thread messages are acknowledged as durably received before interpretation, without
+claiming that their instructions were applied. Routing gets only the current decision and
+bounded input references; detailed verification/history remains available to the separate
+answering session. Routing lowers configured reasoning effort to `low` (override via the
+existing `CODEBOT_OPENCODE_ROLE_EFFORTS` entry `routing`) and uses a 60-second budget, or
+the configured utility budget if longer. Coding model/effort and approval gates are unchanged.
+Classification, retry and terminal failure notices use independent, deduplicated delivery
+receipts. STATUS also shows message-processing progress. Timeouts report the effective
+inherited deadline and elapsed time, not a larger nominal coding-turn timeout.
+
 Evidence (screenshots, recordings, reports) is always routed to the task thread via that same
 `ATTACH: <path>` convention (saved under the outbox dir), in every phase — never
 committed to the target repo. Every resumed turn restates this rule. As a safety
@@ -451,6 +521,15 @@ thread with:
 - **complete** — mark the task done in the backlog and move on, or
 - **instructions** — free-form guidance; codebot applies it in the working session, then
   resumes the failed step.
+
+Failure notices identify the concrete cause, impact, recorded recovery and verification
+evidence, followed by one decision menu. Diagnostics retain redacted rejected check plans
+and recorded results; repair counters alone are not proof of fresh provider calls.
+Provider-filter notices quote the user's message and available submitted request, or
+identify an internal bot request rather than asking the user to rephrase text they never
+wrote. Long requests have visible excerpts and complete redacted attachments. Withheld
+response text and unknown filter triggers are not invented; unchanged attempts are not
+automatically retried. Follow-up conversation receives these facts, not just a file path.
 
 Every external `git`/`gh` call has a timeout (`CODEBOT_SUBPROCESS_TIMEOUT`, default 120s)
 so a hung command surfaces as a failure (feeding the budget) instead of wedging the loop.
@@ -607,8 +686,8 @@ PR content are set aside and the "PR ready" email says so.
 **Recommended**: run the guided terminal setup on a macOS or Linux host.
 `scripts/setup.sh` works from bash or zsh, bootstraps a pinned Textual UI into
 `.venv/`, and falls back to a menu-driven text mode if that UI is unavailable.
-The first screen lists Repository, Backlog, Conversation, Agent, Evidence and
-Advanced. Open sections in any order; `Test` checks only the current section
+The first screen lists Repository, Backlog, Conversation, Agent, Evidence,
+Self-healing and Advanced. Open sections in any order; `Test` checks only the current section
 and its saved prerequisites, while `Save and Close` repeats that test and
 immediately saves that section to `.env` on success. Failures leave the section
 open with its draft intact and explain what to fix. A checkmark appears beside
@@ -628,6 +707,12 @@ up the original, and writes successful sections atomically:
 scripts/setup.sh
 scripts/setup.sh --text    # also works: bash scripts/setup.sh / zsh scripts/setup.sh
 ```
+
+Open **Self-healing** to select **Disabled** (`off`, default) or **Enabled**
+(`auto`, automatic validated Python repairs). **Observe** and **Propose** are
+available for a gradual rollout. Saving changes `.env` only; rebuild the image
+and recreate the container separately to apply the mode. See
+[self-healing](docs/self-healing.md) for repair boundaries and rollout guidance.
 
 ### One-time copy to an SSH VM
 
@@ -1089,7 +1174,7 @@ evidence for the PR handoff in the selected conversation channel:
 - **Playwright**: the implementation must include one demo test tagged `@evidence`
   that walks through the feature visibly. Codebot first re-runs only that test
   (`./run.sh <spec> --grep @evidence`), falling back to the feature's full specs when
-  no clip appears, with `PICA_E2E_VIDEO=on` and `PW_VIDEO=on` exported (either forces
+  no clip appears, with `PW_VIDEO=on` exported (the target harness can use it to enable
   `video: "on"` in `e2e/playwright.config.ts`). The resulting `.webm` clips from
   `e2e/test-results/` are stitched into a single H.264 `data/evidence.mp4` with ffmpeg
   (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate cleanly).

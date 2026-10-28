@@ -24,3 +24,6 @@ class ReviewIntentTests(unittest.TestCase):
         self.assertEqual(review_intent.provenance({"author": "alice", "author_type": "User"}), "human")
         self.assertEqual(review_intent.provenance({"author": "reviewer", "author_type": "Bot"}), "automated")
         self.assertEqual(review_intent.provenance({"author": "unknown"}), "unknown")
+        self.assertEqual(review_intent.provenance({"author": "custom-reviewer[bot]"}), "automated")
+        self.assertEqual(review_intent.provenance({"author": "custom-reviewer", "author_type": "User"}), "human")
+        self.assertEqual(review_intent.provenance({"author": "custom-reviewer"}), "unknown")

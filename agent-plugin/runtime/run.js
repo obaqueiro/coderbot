@@ -1,6 +1,6 @@
 // Managed OpenCode HTTP bridge: all session events, including children, are visible.
 import {spawn} from 'node:child_process';
-import {TRUSTED_PERMISSION} from './protocol.js';
+import {TRUSTED_PERMISSION, toolEvent} from './protocol.js';
 import {runAsyncTurn} from './async-turn.js';
 
 const input = JSON.parse(await new Promise((resolve, reject) => {
@@ -97,13 +97,8 @@ try {
           if (part.type === 'tool') {
             const child = part.state.metadata?.sessionId;
             if (child) family.add(child);
-            const identity = part.id || `${part.sessionID}:${part.callID}`;
-            const done = ['completed', 'error'].includes(part.state.status);
-            if ((done && !completedParts.has(identity)) || (!done && (!startedParts.has(identity) || child))) {
-              if (done) completedParts.add(identity);
-              else startedParts.add(identity);
-              emit(done ? 'tool_use' : 'tool_start', {part: {...part, id: identity}, sourceSessionID: part.sessionID});
-            }
+            const update = toolEvent(part, startedParts, completedParts);
+            if (update) emit(update.type, {part: update.part, sourceSessionID: part.sessionID});
           }
           if (part.type === 'step-finish') emit('step_finish', {part, sourceSessionID: part.sessionID});
         }

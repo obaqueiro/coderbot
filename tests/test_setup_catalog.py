@@ -63,6 +63,21 @@ class CatalogAudit(unittest.TestCase):
             self.assertIsNone(validate_value(setting, value))
         self.assertIsNotNone(validate_value(setting, "typo"))
 
+    def test_self_healing_has_main_section_with_safe_default_and_all_modes(self):
+        from scripts.setup_catalog import SELF_HEAL_OPTIONS, validate_value
+        setting = BY_KEY["CODEBOT_SELF_HEAL"]
+        self.assertIn("Self-healing", guided_setup.PRIMARY_PAGES)
+        self.assertEqual(guided_setup.fields_for("Self-healing", {}), [setting])
+        self.assertIn(setting, guided_setup.fields_for("Advanced", {}, "self_heal"))
+        self.assertEqual(setting.default, "off")
+        self.assertEqual(setting.choices, tuple(mode for _label, mode in SELF_HEAL_OPTIONS))
+        for mode in setting.choices:
+            with self.subTest(mode=mode):
+                self.assertIsNone(validate_value(setting, mode))
+                self.assertEqual(guided_setup.test_section("Self-healing", {setting.key: mode}), [])
+        for invalid in ("", "on", "true", "wrong"):
+            self.assertIsNotNone(validate_value(setting, invalid))
+
     def test_pasted_doc_url_and_multiple_trusted_email_addresses(self):
         from scripts.setup_catalog import validate_value
         doc = BY_KEY["CODEBOT_DOC_ID"]
@@ -333,6 +348,53 @@ class CatalogAudit(unittest.TestCase):
 
 
 class LosslessEnv(unittest.TestCase):
+    def test_text_menu_enables_and_disables_self_healing_without_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            original = "# keep\nUNKNOWN=untouched\nGH_TOKEN=secret\n"
+            path.write_text(original)
+            section = str(guided_setup.PRIMARY_PAGES.index("Self-healing") + 1)
+            with patch("builtins.input", side_effect=[section, "auto", "s", section, "off", "s", "q"]), \
+                 patch.object(guided_setup.subprocess, "run") as process, \
+                 redirect_stdout(StringIO()) as output:
+                self.assertTrue(guided_setup.text_setup(EnvFile(path)))
+            process.assert_not_called()
+            self.assertEqual(EnvFile(path).values["CODEBOT_SELF_HEAL"], "off")
+            self.assertEqual(path.read_text(), original + "CODEBOT_SELF_HEAL=off\n")
+            self.assertIn("CODEBOT_SELF_HEAL=auto", path.with_name(".env.bak.2").read_text())
+            self.assertIn("Enabled", output.getvalue())
+            self.assertIn("recreate", output.getvalue())
+            self.assertIn("[x] Self-healing", output.getvalue())
+
+    def test_text_self_healing_numbered_modes_and_clear_disable(self):
+        for entered, expected in (("1", "off"), ("2", "observe"), ("3", "propose"), ("4", "auto"), ("/clear", "off")):
+            with self.subTest(entered=entered), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / ".env"
+                path.write_text("CODEBOT_SELF_HEAL=propose\n")
+                with patch("builtins.input", side_effect=[entered, "s"]), redirect_stdout(StringIO()):
+                    guided_setup._text_section(EnvFile(path), "Self-healing")
+                self.assertEqual(EnvFile(path).values["CODEBOT_SELF_HEAL"], expected)
+
+    def test_text_self_healing_defaults_off_and_keeps_existing_mode(self):
+        for existing in (None, "observe", "propose", "auto"):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / ".env"
+                if existing:
+                    path.write_text(f"CODEBOT_SELF_HEAL={existing}\n")
+                with patch("builtins.input", side_effect=["", "s"]), redirect_stdout(StringIO()):
+                    guided_setup._text_section(EnvFile(path), "Self-healing")
+                self.assertEqual(EnvFile(path).values["CODEBOT_SELF_HEAL"], existing or "off")
+
+    def test_text_self_healing_discard_does_not_enable_repairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            original = "CODEBOT_SELF_HEAL=off\n"
+            path.write_text(original)
+            with patch("builtins.input", side_effect=["auto", "d"]), redirect_stdout(StringIO()):
+                guided_setup._text_section(EnvFile(path), "Self-healing")
+            self.assertEqual(path.read_text(), original)
+            self.assertEqual(list(path.parent.glob(".env.bak.*")), [])
+
     def test_preserves_unknown_comments_inactive_values_and_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"

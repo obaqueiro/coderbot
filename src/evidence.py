@@ -278,10 +278,9 @@ def _run_recording(specs: list[str], extra_args: list[str]) -> str:
             ["./run.sh", *specs, *extra_args], cwd=E2E_DIR,
             timeout=config.E2E_TIMEOUT_SECONDS,
             exclusive=[str(E2E_DIR)],
-            # The target harness exposes a documented opt-in to Playwright's `video: "on"`
-            # setting. Both spellings: PICA_E2E_VIDEO for harnesses built against this
-            # contract and PW_VIDEO for older Playwright configs that gate on it.
-            env={**os.environ, "PICA_E2E_VIDEO": "on", "PW_VIDEO": "on"},
+            # Harnesses may opt in to Playwright's video setting via PW_VIDEO.
+            # Preserve any other repository-configured environment variables.
+            env={**os.environ, "PW_VIDEO": "on"},
         )
     except subprocess.TimeoutExpired:
         # Evidence is best-effort: tear down the leaked stack and harvest whatever
@@ -307,9 +306,9 @@ def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False)
     """
     def clips() -> dict[Path, tuple]:
         files = set()
-        for root in (E2E_DIR / "test-results", config.DATA_DIR / "outbox/pica-e2e"):
-            if root.exists():
-                files.update(p for p in root.rglob("*.webm") if "html" not in p.relative_to(root).parts)
+        root = E2E_DIR / "test-results"
+        if root.exists():
+            files.update(p for p in root.rglob("*.webm") if "html" not in p.relative_to(root).parts)
         return {p: (p.stat().st_mtime_ns, p.stat().st_size, artifact_manifest.file_hash(p)) for p in files}
 
     before = clips()
@@ -352,7 +351,7 @@ def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False)
         return []
     if not new:
         log.warning("no NEW .webm files after evidence run (before=%d, after=%d); "
-                    "check PICA_E2E_VIDEO/PW_VIDEO wiring and test-results mount, and whether "
+                    "check PW_VIDEO wiring and test-results mount, and whether "
                     "the spec skipped itself (bare `./run.sh <spec>` invocation, no extra "
                     "flags/env). Run output tail:\n%s", len(before), len(after), tail)
     videos = new

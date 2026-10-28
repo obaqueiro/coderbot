@@ -3,7 +3,7 @@ def provenance(thread):
     author = thread.get("author", "")
     body = thread.get("body", "")
     kind = thread.get("author_type", "")
-    if kind == "Bot" or author.endswith("[bot]") or "ai-review-inline" in body or author == "pr-code-review-aloi":
+    if kind == "Bot" or author.endswith("[bot]") or "ai-review-inline" in body:
         return "automated"
     if kind == "User":
         return "human"

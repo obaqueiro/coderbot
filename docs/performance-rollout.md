@@ -2,23 +2,21 @@
 
 ## Alcance
 
-Se despliega exclusivamente Coderbot. La tarea de modificar el harness PICA se
-retiró por decisión del usuario. Se utilizan las capacidades existentes del destino;
-no se cambiaron sus scripts, configuración, tests ni código durante el rollout.
+Se despliega exclusivamente Coderbot, con autorización explícita. Se utilizan las
+capacidades existentes del destino; sus scripts, configuración, tests y código
+quedan fuera del rollout.
 
-## Release activado
+## Preparación y verificación
 
-- Código: release `performance-f2f9008`, separado del checkout original de app.
-- Imagen validada: `codebot-performance-staging:dfb1375`.
-- Backup privado: `/home/azureuser/codebot/rollout-backups/20260930T234904Z`.
-- Se conservaron el directorio de datos original y todos los mounts resueltos,
-  incluyendo seeds Claude/npm del usuario azureuser y el socket Docker.
-- Estado anterior y después del arranque: `E2E`, rama
-  `codebot-rd8s-configuracion-modelo-esfuerzo-pica`, sesión
-  `ses_f11b3f84bffePj1lh65w7JRQAC`.
-- Coderbot arrancó saludable y comenzó checks deterministas. El store conservó
-  los resultados terminados y distinguió los checks interrumpidos por recreación.
-- El checkout original de Coderbot conserva todos sus cambios previos sin commit.
+1. Validar la imagen y el código en staging aislado del checkout destino.
+2. Registrar versión anterior/nueva y ubicación del backup en metadata privada de
+   operación, no en documentación compartida.
+3. Conservar datos, mounts resueltos, seeds del agente/npm y socket Docker.
+4. Capturar checkpoint de la tarea activa antes de detener el controlador.
+5. Verificar salud, continuidad de rama/sesión y reutilización de checks terminados;
+   los checks interrumpidos deben seguir identificados como tales.
+
+El checkout original y sus cambios previos se conservan sin sobrescribirlos.
 
 ## Recuperación
 
@@ -26,7 +24,7 @@ no se cambiaron sus scripts, configuración, tests ni código durante el rollout
 backup SQLite consistente tras detener el intento y reemplaza solo el mount /app.
 La imagen anterior queda etiquetada para rollback. La configuración de rollback
 debe conservar los mounts del contenedor inspeccionado; no expandir `~` bajo sudo,
-que resolvería seeds como /root en vez de /home/azureuser.
+que resolvería los seeds al home de root en vez del usuario del servicio.
 
 No restaurar un backup de estado viejo sobre una tarea que ya avanzó. Primero
 detener y limpiar el intento, conservar el cursor/store actual y elegir una imagen
@@ -36,16 +34,12 @@ de confianza total correspondiente.
 
 ## Verificación de rollback aislado
 
-La imagen anterior `codebot-performance-rollback:20260930t234904z` se probó en
-un contenedor aislado con el código/plugin gestionado nuevo: la integración
-headless de confianza total pasó en OpenCode 1.18.18 y quince pruebas de store,
-reanudación, cancelación, artifacts y entrega pasaron en Linux. Esto valida
-compatibilidad de la imagen anterior con los datos aditivos sin revertir el
-servicio productivo ni perder las mejoras de permisos.
+Probar la imagen anterior en un contenedor aislado con el código/plugin gestionado
+compatible. Validar integración headless de confianza total, store, reanudación,
+cancelación, artifacts y entrega sin revertir el servicio productivo.
 
 La verificación de mounts comprueba que release cambia solo /app y rollback
 restaura las fuentes originales, manteniendo seeds, datos y checkout destino.
-La recuperación productiva conservó rama/sesión y reutilizó resultados terminados;
-se observaron builds aprobados y lint indeterminado. Los resultados de checks
-del destino siguen reportándose por separado del éxito del rollout: no se afirma
-que la tarea PICA esté terminada ni que todos sus tests aprueben.
+Los resultados de checks del destino se reportan por separado del éxito del rollout:
+un arranque saludable no implica que la tarea activa esté terminada ni que todos
+sus tests aprueben.

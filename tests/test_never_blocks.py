@@ -32,8 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 
 # main() refuses to start only for missing or invalid configuration. Each of these is
-# deliberate; hardening work must not add new ones.
-MAIN_STARTUP_EXITS = 14
+# deliberate. Workspace mode adds an explicit target-mismatch exit;
+# neither is an optional hardening gate on the legacy repository lifecycle.
+MAIN_STARTUP_EXITS = 15
 
 
 def _clean_env(**extra):
@@ -68,7 +69,7 @@ class NeverBlocks(unittest.TestCase):
         exits = [node for node in ast.walk(main) if isinstance(node, ast.Raise) and node.exc is not None
                  and "SystemExit" in ast.unparse(node.exc)]
         self.assertEqual(len(exits), MAIN_STARTUP_EXITS,
-                         "main() gained or lost a startup exit; new code must fail open instead")
+                         "main() gained or lost a startup exit; review target-safety exceptions explicitly")
 
     def test_log_redaction_is_wired_when_main_is_imported(self):
         token = "ghp_" + "Z" * 36

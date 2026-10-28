@@ -26,6 +26,12 @@ def collect(repo: Path, slug: str) -> dict[str, str]:
     root = (repo / "openspec" / "changes" / slug).resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"OpenSpec change missing: {slug}")
+    return collect_directory(root)
+
+
+def collect_directory(root: Path) -> dict[str, str]:
+    """The same artifact inventory before and after controller-owned archival."""
+    root = Path(root).resolve()
     paths = [root / name for name in ("proposal.md", "design.md", "tasks.md")]
     paths += sorted((root / "specs").rglob("spec.md")) if (root / "specs").is_dir() else []
     if len(paths) == 3:
@@ -138,6 +144,14 @@ def render(files: dict[str, str], title: str) -> str:
 
 def fingerprint(files: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def scope_fingerprint(files: dict[str, str]) -> str:
+    """Approval binds requirements/design/task text, not completion checkboxes."""
+    from task_phases import TASK
+    normalized = {name: TASK.sub(lambda m: m[1] + " " + m[3] + m[4], text) if name == "tasks.md" else text
+                  for name, text in files.items()}
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
 
 
 def prepare(data_dir: Path, repo: Path, slug: str, branch: str,

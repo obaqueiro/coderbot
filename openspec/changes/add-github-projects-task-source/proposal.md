@@ -4,7 +4,7 @@ Codebot's backlog is hard-wired to a Google Doc: `src/main.py` imports
 `gdoc_client` directly and calls it wherever it lists, claims, holds, releases or
 completes a task. Teams that already track work in GitHub cannot point codebot at
 that board; they must mirror every item into a Doc. We already have a GitHub
-Projects v2 board (org `getriverly`, columns Backlog / Ready / In progress /
+Projects v2 board (columns Backlog / Ready / In progress /
 In review / Done) and want codebot to work it directly, while existing
 deployments keep using the Doc unchanged.
 

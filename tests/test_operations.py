@@ -13,7 +13,7 @@ class BudgetTests(unittest.TestCase):
         operations.clear()
         try:
             operations.observe({"type": "tool_start", "sourceSessionID": "child",
-                "part": {"id": "nested", "tool": "task"}})
+                "part": {"id": "nested", "tool": "task", "state": {"status": "running"}}})
             operations.observe({"type": "tool_use", "sourceSessionID": "child",
                 "part": {"id": "nested", "tool": "task", "state": {
                     "status": "error", "error": "Nested subagent delegation is disabled"}}})
@@ -29,7 +29,7 @@ class BudgetTests(unittest.TestCase):
             with patch.object(operations.time, "monotonic", side_effect=lambda: now[0]):
                 for id in ("first", "second"):
                     operations.observe({"type": "tool_start", "sourceSessionID": "parent",
-                        "part": {"id": id, "tool": "task", "state": {"metadata": {"sessionId": id}}}})
+                        "part": {"id": id, "tool": "task", "state": {"status": "running", "metadata": {"sessionId": id}}}})
                 now[0] += 590
                 operations.observe({"type": "step_finish", "sourceSessionID": "first"})
                 now[0] += 20
@@ -83,8 +83,8 @@ class BudgetTests(unittest.TestCase):
     def test_tool_state_distinguishes_subagent_and_silent_test(self):
         operations.clear()
         try:
-            operations.observe({"type": "tool_start", "part": {"id": "test", "tool": "bash"}})
-            operations.observe({"type": "tool_start", "part": {"id": "child", "tool": "task"}})
+            operations.observe({"type": "tool_start", "part": {"id": "test", "tool": "bash", "state": {"status": "running"}}})
+            operations.observe({"type": "tool_start", "part": {"id": "child", "tool": "task", "state": {"status": "running"}}})
             entries = {e["id"]: e for e in operations.snapshot()}
             self.assertEqual(entries["child"]["kind"], "subagent")
             self.assertGreater(entries["test"]["remaining"], 800)

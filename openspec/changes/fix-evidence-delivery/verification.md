@@ -17,7 +17,7 @@
 - Explicit delivery notifications use the existing durable message receipt/reconciliation transport even for link-only replies; controller restart and transport-failure regressions confirm completed recording/publication/sync are not repeated.
 - Integration tests cover fresh delivery, current manifest adoption, stale manifest rejection, conversion/upload/access/PR/notification failures, and reuse after restart without duplicate side effects.
 
-No deployment, bot restart, Drive publication, PR mutation or PICA checkout edits were performed. The PICA filtered validator requires its separately scoped follow-up.
+No deployment, bot restart, Drive publication, PR mutation or target checkout edits were performed.
 
 ## PR reply routing
 

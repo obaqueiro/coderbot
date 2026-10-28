@@ -16,13 +16,13 @@ import config
 class DurableTurn(unittest.TestCase):
     def test_separate_reader_sees_sanitized_active_turn_and_completion(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(config, "DATA_DIR", Path(tmp)):
-            state = {"branch": "bot-pica", "state": "IMPLEMENTING"}
+            state = {"branch": "bot-feature", "state": "IMPLEMENTING"}
             activity.begin(state, "ses-parent")
-            activity.observe(state, activity="task: Completar PICA2", now=1000.0)
-            recorded = activity.durable_turn({"branch": "bot-pica"})
+            activity.observe(state, activity="task: Completar API", now=1000.0)
+            recorded = activity.durable_turn({"branch": "bot-feature"})
             self.assertTrue(recorded["active"])
             self.assertEqual(recorded["session_id"], "ses-parent")
-            self.assertEqual(recorded["activity"], "task: Completar PICA2")
+            self.assertEqual(recorded["activity"], "task: Completar API")
             self.assertEqual(recorded["last_activity"], 1000.0)
             activity.finish(state)
             self.assertFalse(activity.durable_turn(state)["active"])
@@ -30,7 +30,7 @@ class DurableTurn(unittest.TestCase):
 
     def test_old_process_is_not_reported_as_active(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(config, "DATA_DIR", Path(tmp)):
-            state = {"branch": "bot-pica", "state": "IMPLEMENTING"}
+            state = {"branch": "bot-feature", "state": "IMPLEMENTING"}
             activity.begin(state, "ses-parent")
             with patch.object(activity.os, "kill", side_effect=ProcessLookupError):
                 result = activity.snapshot(state, {}, 200.0)
@@ -41,15 +41,15 @@ class DurableTurn(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(config, "DATA_DIR", Path(tmp)), \
              patch.object(config, "AGENT", "claude"):
-            state = {"branch": "bot-pica", "state": "IMPLEMENTING"}
+            state = {"branch": "bot-feature", "state": "IMPLEMENTING"}
             agent_runner.set_task_context(state)
             try:
                 def fake_run(_prompt, contract=False):
                     agent_runner._stream_line(json.dumps({
                         "type": "tool_use", "part": {"tool": "task", "state": {"input": {
-                            "description": "Completar proveedor PICA2", "prompt": "PRIVATE PROMPT"}}}}))
+                            "description": "Completar proveedor API", "prompt": "PRIVATE PROMPT"}}}}))
                     self.assertEqual(activity.durable_turn(state)["activity"],
-                                     "task: Completar proveedor PICA2")
+                                     "task: Completar proveedor API")
                     return object()
                 with patch.object(agent_runner.claude_runner, "run", side_effect=fake_run):
                     agent_runner.run("SECRET PROMPT", contract=False)
@@ -87,9 +87,9 @@ class OpenCodeMetadata(unittest.TestCase):
         self.writer.execute("CREATE TABLE part(session_id TEXT,data TEXT,time_updated INTEGER)")
         self.writer.executemany("INSERT INTO session VALUES(?,?,?,?)", [
             ("ses-parent", None, "Implementar feature", 1000),
-            ("ses-child", "ses-parent", "Cerrar proveedor PICA2 (@general subagent)", 3000)])
+            ("ses-child", "ses-parent", "Cerrar proveedor API (@general subagent)", 3000)])
         self.writer.executemany("INSERT INTO todo VALUES(?,?,?,?)", [
-            ("ses-parent", "Completar proveedor PICA2", "in_progress", 0),
+            ("ses-parent", "Completar proveedor API", "in_progress", 0),
             ("ses-parent", "Integrar selector frontend", "pending", 1)])
         self.writer.executemany("INSERT INTO part VALUES(?,?,?)", [
             ("ses-parent", json.dumps({"type": "reasoning", "text": "PRIVATE REASONING"}), 1000),
@@ -98,19 +98,19 @@ class OpenCodeMetadata(unittest.TestCase):
         self.writer.commit()
 
     def test_reads_parent_todos_and_child_without_exposing_reasoning_or_tool_output(self):
-        state = {"branch": "bot-pica", "session_id": "ses-parent"}
+        state = {"branch": "bot-feature", "session_id": "ses-parent"}
         result = activity.snapshot(state, {}, 5.0)
         self.assertEqual(result["todos"], {"in_progress": 1, "pending": 1})
-        self.assertEqual(result["current_task"], "Completar proveedor PICA2")
-        self.assertEqual(result["children"][0]["title"], "Cerrar proveedor PICA2")
+        self.assertEqual(result["current_task"], "Completar proveedor API")
+        self.assertEqual(result["children"][0]["title"], "Cerrar proveedor API")
         self.assertEqual(result["last_activity"], 3.0)
-        self.assertIn("Cerrar proveedor PICA2", result["activity"])
+        self.assertIn("Cerrar proveedor API", result["activity"])
         self.assertNotIn("PRIVATE", str(result))
         self.assertNotIn("SECRET", str(result))
         self.assertFalse((self.root / "agent_activity.sqlite").exists())  # reader is read-only
 
     def test_new_wal_commit_becomes_visible_without_restarting_watcher(self):
-        state = {"branch": "bot-pica", "session_id": "ses-parent"}
+        state = {"branch": "bot-feature", "session_id": "ses-parent"}
         before = activity.snapshot(state, {}, 5.0)
         self.writer.execute("INSERT INTO part VALUES(?,?,?)", ("ses-child", json.dumps({
             "type": "step-finish"}), 9000))
@@ -122,7 +122,7 @@ class OpenCodeMetadata(unittest.TestCase):
     def test_schema_mismatch_gracefully_uses_durable_fallback(self):
         self.writer.execute("DROP TABLE todo")
         self.writer.commit()
-        state = {"branch": "bot-pica", "session_id": "ses-parent", "state": "IMPLEMENTING"}
+        state = {"branch": "bot-feature", "session_id": "ses-parent", "state": "IMPLEMENTING"}
         activity.begin(state, "ses-parent")
         activity.observe(state, activity="tool: test", now=3.0)
         result = activity.snapshot(state, {}, 5.0)

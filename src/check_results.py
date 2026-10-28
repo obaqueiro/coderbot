@@ -56,15 +56,41 @@ def parse_output(output, exit_code, reporter="text"):
             # Retain assertion/error context, exclude artifact paths and timing.
             detail = match[2].split("attachment #", 1)[0].strip()
             failures[test] = detail
+        summary = re.search(r"^\s*(\d+) failed\b", output, re.M)
+        if exit_code and summary and int(summary[1]) != len(failures):
+            recognized = False  # Partial failures cannot establish baseline equivalence.
     # Playwright list output is not a stable identity contract. Use JSON/JUnit via
     # an explicit plan for baseline attribution; zero exit is still a real pass.
     status = "pass" if exit_code == 0 else "fail" if recognized and failures else "unknown"
     result = {"status": status, "failures": failures, "exit_code": exit_code}
+    count = test_count(output, reporter)
+    if count is not None:
+        result["test_count"] = count
     if status == "pass" and _zero_tests(output, reporter):
         # Informational only: the status stays "pass" so nothing downstream changes.
         # final_checks decides (behind CODEBOT_EMPTY_SUITE_FAILS) whether it matters.
         result.update(zero_tests=True, detail="0 tests executed")
     return result
+
+
+def test_count(output, reporter):
+    """Positive execution evidence from a declared test reporter, never exit code alone."""
+    try:
+        pattern = {"unittest": r"^Ran (\d+) tests? in", "node": r"^# tests (\d+)\s*$",
+                   "playwright": r"^\s*(\d+) (?:passed|failed|flaky)\b"}.get(reporter)
+        if pattern:
+            counts = re.findall(pattern, output, re.M)
+            if counts:
+                return sum(map(int, counts)) if reporter == "playwright" else int(counts[-1])
+            return None
+        if reporter == "junit":
+            return sum(not any(child.tag == "skipped" for child in case) for case in ET.fromstring(output).iter("testcase"))
+        if reporter == "json":
+            value = json.loads(output).get("ran")
+            return value if type(value) is int and value >= 0 else None
+    except (ValueError, TypeError, AttributeError, ET.ParseError):
+        pass
+    return None
 
 
 def _zero_tests(output, reporter):

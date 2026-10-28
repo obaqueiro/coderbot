@@ -13,6 +13,10 @@ DATA_DIR="${CODEBOT_DATA_DIR:-/app/data}"
 HEARTBEAT="${DATA_DIR}/heartbeat"
 STALE="${CODEBOT_HEARTBEAT_STALE:-360}"   # ~3x poll interval: report unhealthy for visibility
 HARD="${CODEBOT_HEARTBEAT_HARD:-600}"     # Supervisor deadlines handle legitimate long work.
+if [ "${CODEBOT_SELF_HEAL:-off}" != "off" ]; then
+  HEARTBEAT="$DATA_DIR/supervisor/heartbeat.json"
+  STALE=60
+fi
 
 # No heartbeat yet: the process may still be starting (start-period covers this).
 [ -f "$HEARTBEAT" ] || exit 0

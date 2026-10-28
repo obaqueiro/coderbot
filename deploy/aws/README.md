@@ -57,10 +57,10 @@ Boot-to-running is about a minute once the image cache exists.
 cd deploy/aws
 ./deploy.sh shared --vpc vpc-0123456789            # once; omit --vpc for the default VPC
 ./deploy.sh secrets --env ../../.env --data ../../data
-./deploy.sh agent nccr --subnet subnet-0123456789 --target-repo getriverly/riverly
-./deploy.sh agent nccr2 --subnet subnet-0123456789 --target-repo getriverly/riverly
+./deploy.sh agent agent-a --subnet subnet-0123456789 --target-repo example/project
+./deploy.sh agent agent-b --subnet subnet-0123456789 --target-repo example/project
 ./deploy.sh status                                  # every agent: instance, market, volume, container
-./deploy.sh logs nccr                               # follow the container log over SSM
+./deploy.sh logs agent-a                            # follow the container log over SSM
 ```
 
 `agent` options: `--ref` (branch/tag/commit of coderbot, default `main`),

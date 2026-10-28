@@ -4,6 +4,7 @@ import hashlib
 import config
 from execution_identity import snapshot
 from execution_store import ExecutionStore
+from selfheal_events import runtime_epoch
 
 
 def store():
@@ -13,7 +14,7 @@ def store():
 def key(state, prompt):
     # Same phase invocation can be replayed after notification failure. A different
     # prompt (including feedback) is a new invocation even within the same phase.
-    return hashlib.sha256((state["state"] + "\0" + prompt).encode()).hexdigest()
+    return hashlib.sha256((runtime_epoch() + "\0" + state["state"] + "\0" + prompt).encode()).hexdigest()
 
 
 def replay(state, prompt):

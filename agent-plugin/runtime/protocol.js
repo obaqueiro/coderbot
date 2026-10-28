@@ -18,6 +18,18 @@ export function permissionRequest(event) {
   return { sessionID: p.sessionID, permissionID: p.id, response: 'always' };
 }
 
+export function toolEvent(part, started, completed) {
+  const state = part.state || {};
+  const identity = part.id || `${part.sessionID}:${part.callID}`;
+  if (completed.has(identity)) return null;
+  const done = ['completed', 'error'].includes(state.status);
+  if (done) completed.add(identity);
+  else if (state.status === 'running' && (!started.has(identity) || state.metadata?.sessionId)) {
+    started.add(identity);
+  } else return null;
+  return {type: done ? 'tool_use' : 'tool_start', part: {...part, id: identity}};
+}
+
 export function trustedSessionPolicy({serverUrl, directory, fetch: request = globalThis.fetch}) {
   const prepared = new Set();
   const parents = new Map();

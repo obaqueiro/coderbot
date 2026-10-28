@@ -28,12 +28,12 @@ class AgentActivity(unittest.TestCase):
         agent_runner._begin_turn()
         try:
             event = {"type": "tool_use", "part": {"tool": "task", "state": {
-                "input": {"description": "Implementar sesiones backend PICA2",
+                "input": {"description": "Implementar sesiones backend API",
                           "prompt": "PRIVATE PROMPT"}}}}
             agent_runner._stream_line(json.dumps(event))
             snapshot = agent_runner.turn_snapshot()
             self.assertTrue(snapshot["active"])
-            self.assertIn("Implementar sesiones backend PICA2", snapshot["activity"])
+            self.assertIn("Implementar sesiones backend API", snapshot["activity"])
             self.assertNotIn("PRIVATE PROMPT", str(snapshot))
             previous = snapshot["last_activity"]
             agent_runner._stream_line(json.dumps({"type": "step_finish", "part": {}}))
@@ -57,7 +57,7 @@ class Supervisor(unittest.TestCase):
         self.old_state = main._current_state
         self.addCleanup(setattr, main, "_current_state", self.old_state)
         self.addCleanup(main._work_active.clear)
-        self.state = {"state": "IMPLEMENTING", "item": "Configurar PICA", "slug": "pica",
+        self.state = {"state": "IMPLEMENTING", "item": "Configurar API", "slug": "api",
                       "thread_id": "C123:100.0", "task_language": "Spanish"}
         main._current_state = self.state
 
@@ -138,7 +138,7 @@ class Supervisor(unittest.TestCase):
                 send = api.chat_postMessage.call_args.kwargs
                 self.assertEqual(send["thread_ts"], "100.0")
                 self.assertIn("Fase: IMPLEMENTING", send["text"])
-                self.assertIn("Tarea: Configurar PICA", send["text"])
+                self.assertIn("Tarea: Configurar API", send["text"])
                 self.assertNotIn("no puedo confirmar", send["text"])
                 self.assertEqual(slack_client.poll_command()[2], "ABORT")
                 self.assertFalse(main._status_supervisor_once())
@@ -209,14 +209,14 @@ class Supervisor(unittest.TestCase):
 
     def test_readable_status_includes_plan_and_two_subagents_without_reasoning(self):
         observed = {"active": True, "started_at": 200.0, "last_activity": 540.0,
-                    "activity": "subagent: Cerrar proveedor PICA2", "current_task": "Completar PICA2",
+                    "activity": "subagent: Cerrar proveedor API", "current_task": "Completar API",
                     "todos": {"in_progress": 1, "pending": 4},
-                    "children": [{"title": "Cerrar proveedor PICA2", "at": 540.0},
+                    "children": [{"title": "Cerrar proveedor API", "at": 540.0},
                                  {"title": "Finalizar Playwright", "at": 420.0}]}
         with patch.object(main.activity, "snapshot", return_value=observed):
             body = main._short_status(self.state, observed, 600.0)
-        self.assertIn("Ahora: Completar PICA2", body)
+        self.assertIn("Ahora: Completar API", body)
         self.assertIn("1 en curso, 4 pendientes", body)
-        self.assertIn("Subagentes: Cerrar proveedor PICA2", body)
+        self.assertIn("Subagentes: Cerrar proveedor API", body)
         self.assertIn("Finalizar Playwright", body)
         self.assertNotIn("reasoning", body)

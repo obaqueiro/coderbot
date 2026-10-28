@@ -64,12 +64,12 @@ class Pinning(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][-2:], ["--match-head-commit", SHA])
         finish.assert_called_once()
 
-    def test_old_gh_retries_without_the_flag(self):
+    def test_old_gh_fails_closed_without_unpinned_retry(self):
         email, finish, run = self.merge(self.state(delivered_sha=SHA),
                                         runs=(done(1, "unknown flag: --match-head-commit"), done()))
-        self.assertEqual(run.call_count, 2)
-        self.assertNotIn("--match-head-commit", run.call_args.args[0])
-        finish.assert_called_once()
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("--match-head-commit", run.call_args.args[0])
+        finish.assert_not_called()
 
     def test_rejected_because_head_moved_between_check_and_merge(self):
         state = self.state(delivered_sha=SHA)

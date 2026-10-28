@@ -62,7 +62,7 @@
 - [x] 7.2 Preinstalar dependencias fijadas de plugins/puente/browsers gestionados en imagen y evitar auto-installs repetidos del runtime.
 - [x] 7.3 Separar registry público y scopes privados en preparación/setup sin exponer o sobrescribir credenciales; probar auth privada requerida y paquetes públicos.
 - [x] 7.4 Definir contrato opcional de harness prepare/run/suites/providers/resources/artifacts y adapter legacy compatible.
-- [x] 7.5 Implementar adapter/fixture PICA con agrupación por proveedor, preparación por lockfile/browser/image y outputs únicos; validar flags realmente soportados.
+- [x] 7.5 Validar fixtures genéricas de agrupación por proveedor mediante el contrato declarativo del destino, sin inventarios ni adapters específicos de una aplicación.
 - [x] 7.6 Documentar y probar aislamiento de sesiones/puertos para workers concurrentes; mantener ejecución serial cuando no se garantice aislamiento.
 
 ## 8. Evidencia y entrega recuperable
@@ -98,6 +98,6 @@
 
 - [x] 11.1 Actualizar README, env example, setup y docs de runtime/harness/checks/checkpoints con defaults, migración y diagnósticos observables.
 - [x] 11.2 Preparar staging aislado y verificar principal/subagentes/reanudación, suite final y artifacts con presupuesto acotado sin afectar tarea remota activa.
-- Tarea 11.3 retirada por decisión explícita del usuario: no modificar PICA ni otra aplicación destino. Los adaptadores y fixtures de Coderbot permanecen; no se considera implementado un cambio al harness externo.
+- Tarea 11.3 retirada: no modificar aplicaciones destino ni considerar implementado un cambio al harness externo.
 - [x] 11.4 Ejecutar rollout de imagen/config únicamente de Coderbot tras checkpoint de la tarea activa y backup durable; registrar versión y comparación antes/después.
 - [x] 11.5 Verificar recuperación/rollback conservando trabajo, trust-total y datos aditivos; documentar resultado y tareas de rollout realmente pendientes.

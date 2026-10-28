@@ -11,4 +11,9 @@ def render(state, phase, *, max_chars=16000):
                            "gate": r.get("gate")} for r in state.get("final_check_report", {}).get("checks", [])],
               "next_action": phase, "checkpoint": state.get("execution_checkpoint_id"),
               "review": state.get("internal_review_report"), "repair_round": state.get("final_repair_round", 0)}
+    if state.get("workspace"):
+        values["workspace"] = {"root": state["workspace"]["root"],
+            "repositories": {name: {key: record.get(key) for key in ("branch", "base_sha", "pr_url", "state", "merge")}
+                             for name, record in state["workspace"].get("repositories", {}).items()},
+            "local_edits": [entry["path"] for entry in state["workspace"].get("local_edits", [])]}
     return "Durable task handoff (facts):\n" + json.dumps(values, ensure_ascii=False)[:max_chars]

@@ -53,11 +53,11 @@
 - [x] 7.4 `main.trail()` + hooks in `email()` and the silent transitions; `trail_ref`
       in `RESET_KEYS`.
 - [x] 7.5 Tests for both backends, the façade and the FSM helper; docs.
-- [ ] 7.6 Live: notes on GitHub issue #89; Doc thread after re-consent.
+- [ ] 7.6 Live: notes on a test GitHub issue; Doc thread after re-consent.
 
 ## 6. Verification
 
 - [x] 6.1 `python3 -m unittest discover -s tests -t .` green.
 - [x] 6.2 `openspec validate --strict` on this change.
-- [x] 6.3 Smoke against the real `getriverly` project: validate, list, and a
+- [x] 6.3 Smoke against a configured project: validate, list, and a
       claim → hold → unhold → note_pr → mark_done round trip on a throwaway issue.

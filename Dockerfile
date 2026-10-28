@@ -83,6 +83,7 @@ RUN claude plugin validate \
 
 COPY scripts/entrypoint.sh /entrypoint.sh
 COPY scripts/healthcheck.sh /healthcheck.sh
+COPY scripts/supervisor.py scripts/selfheal.py /opt/coderbot-supervisor/
 RUN chmod +x /entrypoint.sh /healthcheck.sh
 # Liveness from the heartbeat file src/main.py maintains (see healthcheck.sh). Runs as root
 # so a hard-stale heartbeat can signal PID 1 and force a restart.

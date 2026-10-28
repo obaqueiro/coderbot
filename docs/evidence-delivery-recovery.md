@@ -34,7 +34,7 @@ remote reconciliation does not start duplicate capture or upload. `/results/` pa
 Playwright reports are mapped only into the current run's `test-results/` directory;
 traversal, unrelated paths and escaping symlinks are rejected.
 
-## Separate PICA harness correction
+## Harness validation and recording recovery
 
 PR-ready and feedback delivery require a playable MP4 (or the validated Newman
 HTML report). Missing evidence blocks the ready cover and merge wait: it is not a
@@ -51,18 +51,13 @@ final checks before pushing; recording and delivery are retried afterward. Archi
 OpenSpec plans are not restored or rearchived. Exhausted repairs remain blocked and
 request concrete recovery guidance; they never waive evidence or invite merge.
 
-The target's `e2e/validate-results.cjs` currently parses `--grep` but counts the complete
-selected-file inventory. In a separately authorized PICA change, filter inventory
-titles with the same Playwright selection semantics before validating count and
-membership. Preserve the complete unfiltered inventory gate.
+Target harnesses own their selection and validation semantics. Coderbot does not
+encode a target's spec inventory or alter its validator. Zero matches, missing
+cases, skips, failures, retries, report errors and missing/duplicate videos are not
+successful evidence. Codebot does not waive a rejected harness exit. Its diagnostics
+distinguish capture from post-capture validation and retain clips.
 
-Acceptance: four passing `@evidence` demos with four current-run videos succeed;
-grep/invert and inline-option forms select the correct inventory; zero matches,
-missing cases, skips, failures, retries, report errors, missing/duplicate videos and
-an incomplete unfiltered suite fail. Codebot does not waive a rejected harness exit.
-Its diagnostics distinguish capture from post-capture validation and retain clips.
-
-## Deployment and PR #114 recovery
+## Deployment and PR recovery
 
 Exact `merge`, `merge anyway` and bare displayed PR options received during review
 repairs or pushing are retained for the same PR decision and processed at WAIT_MERGE.
@@ -71,7 +66,7 @@ normal merge handler. `/btw merge anyway` remains informational, never authoriza
 If the reviewed implementation changed, normal content checks can require renewed
 review before merge. Sending a decision is not confirmation that GitHub merged it.
 
-1. Review and test the codebot change; separately correct/test the PICA validator.
+1. Review and test the codebot change. Target changes require separate authorization.
 2. Obtain explicit deployment authorization and configure authorized Drive access.
 3. Stop the controller safely. Check separately spawned E2E containers: compose down
    of codebot does not necessarily terminate those projects. Do not delete unrelated

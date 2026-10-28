@@ -8,7 +8,7 @@ const bridgeSkillsDir = path.resolve(__dirname, '../../skills');
 export const CoderbotOpenSpecPlugin = async (input) => {
   const policy = input?.serverUrl ? trustedSessionPolicy(input) : null;
   const limit = Number(process.env.CODEBOT_MAX_SUBAGENTS || 3);
-  const queueTimeout = Number(process.env.CODEBOT_LOCAL_TOOL_TIMEOUT || 45) * 1000;
+  const queueTimeout = Number(process.env.CODEBOT_LOCAL_TOOL_TIMEOUT || 200) * 1000;
   if (!Number.isInteger(limit) || limit < 1 || !Number.isFinite(queueTimeout) || queueTimeout <= 0) {
     throw new Error('Subagent concurrency and queue timeout must be positive');
   }

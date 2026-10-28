@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 1040 1200 225" role="img" aria-labelledby="fsm-title fsm-desc">
+            <title id="fsm-title">Estados registrados de la máquina de estados de Codebot</title><desc id="fsm-desc">Veinticuatro estados: dieciocho fases y seis esperas. Camino principal desde IDLE a aprobación, implementación, verificación, revisión, E2E, archivo, PR y espera de merge. Rutas alternas de review, conflictos, reparación de checks y evidencia, feedback, replanning, recuperación y esperas humanas con retorno contextual.</desc>
+            <style>text{font-family:Arial,Helvetica,sans-serif;fill:#e7edf6;font-size:15px}.small{font-size:12px;fill:#aab9cf}.tiny{font-size:11px;fill:#aab9cf}.title{font-size:17px;font-weight:650}.box{fill:#18243a;stroke:#2b3b55;stroke-width:1.5}.ctl{fill:#152e48;stroke:#77baff;stroke-width:1.5}.human{fill:#332c25;stroke:#ffd080;stroke-width:1.5}.agent{fill:#29233e;stroke:#c4afff;stroke-width:1.5}.pass{fill:#15322e;stroke:#64dfbb;stroke-width:1.5}.fail{fill:#352630;stroke:#ffa6af;stroke-width:1.5}.edge{fill:none;stroke:#86a0c0;stroke-width:2;marker-end:url(#arrow)}.dash{stroke-dasharray:6 5}.zone{fill:none;stroke:#2b3b55;stroke-width:1.5;stroke-dasharray:7 5}.mono{font-family:monospace;font-size:13px}</style><defs><marker id="fsm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#86a0c0"/></marker></defs>
+            <rect class="zone" x="15" y="15" width="1170" height="494" rx="16"/><text x="35" y="45" class="small">CAMINO PRINCIPAL · guardas de calidad, aprobación, evidencia y publicación</text>
+            <g fill="none" stroke="#86a0c0" stroke-width="2" marker-end="url(#fsm-arrow)">
+              <path d="M245 105 H325 M540 105 H625 M840 105 H925"/>
+              <path d="M1033 142 V217 M925 253 H840 M625 253 H540 M325 253 H245"/>
+              <path d="M138 289 V361 M245 397 H325 M540 397 H625 M840 397 H925"/>
+              <path d="M1033 433 V460 H1173 V55 H138 V68"/>
+            </g>
+            <rect class="ctl" x="30" y="68" width="215" height="74" rx="11"/><text x="138" y="99" text-anchor="middle" class="mono">IDLE</text><text x="138" y="123" text-anchor="middle" class="small">Elegir / claim / crear rama</text>
+            <rect class="agent" x="325" y="68" width="215" height="74" rx="11"/><text x="433" y="99" text-anchor="middle" class="mono">EXPLORING</text><text x="433" y="123" text-anchor="middle" class="small">Contexto suficiente</text>
+            <rect class="agent" x="625" y="68" width="215" height="74" rx="11"/><text x="733" y="99" text-anchor="middle" class="mono">PROPOSING</text><text x="733" y="123" text-anchor="middle" class="small">Propuesta enviada</text>
+            <rect class="human" x="925" y="68" width="215" height="74" rx="11"/><text x="1033" y="99" text-anchor="middle" class="mono">WAIT_APPROVAL</text><text x="1033" y="123" text-anchor="middle" class="small">Espera humana</text>
+            <rect class="agent" x="925" y="217" width="215" height="72" rx="11"/><text x="1033" y="247" text-anchor="middle" class="mono">IMPLEMENTING</text><text x="1033" y="270" text-anchor="middle" class="small">Inventario aprobado completo</text>
+            <rect class="pass" x="625" y="217" width="215" height="72" rx="11"/><text x="733" y="247" text-anchor="middle" class="mono">VERIFYING</text><text x="733" y="270" text-anchor="middle" class="small">Contrato + CLI + snapshot</text>
+            <rect class="pass" x="325" y="217" width="215" height="72" rx="11"/><text x="433" y="247" text-anchor="middle" class="mono">INTERNAL_REVIEW</text><text x="433" y="270" text-anchor="middle" class="small">Pass / cero Critical-Important</text>
+            <rect class="pass" x="30" y="217" width="215" height="72" rx="11"/><text x="138" y="247" text-anchor="middle" class="mono">E2E</text><text x="138" y="270" text-anchor="middle" class="small">Controles completos reales</text>
+            <rect class="ctl" x="30" y="361" width="215" height="72" rx="11"/><text x="138" y="392" text-anchor="middle" class="mono">ARCHIVING</text><text x="138" y="416" text-anchor="middle" class="small">Archivo válido y commit</text>
+            <rect class="ctl" x="325" y="361" width="215" height="72" rx="11"/><text x="433" y="392" text-anchor="middle" class="mono">OPEN_PR</text><text x="433" y="416" text-anchor="middle" class="small">Publicación confirmada</text>
+            <rect class="box" x="625" y="361" width="215" height="72" rx="11"/><text x="733" y="392" text-anchor="middle" class="mono">WAIT_REVIEW</text><text x="733" y="416" text-anchor="middle" class="small">Espera de GitHub, no humana</text>
+            <rect class="human" x="925" y="361" width="215" height="72" rx="11"/><text x="1033" y="392" text-anchor="middle" class="mono">WAIT_MERGE</text><text x="1033" y="416" text-anchor="middle" class="small">Cover + evidencia entregables</text>
+            <text x="255" y="95" class="tiny">pick</text><text x="548" y="95" class="tiny">contexto</text><text x="847" y="95" class="tiny">enviar</text><text x="1043" y="186" class="tiny">aprobar</text>
+            <text x="850" y="242" class="tiny">completo</text><text x="549" y="242" class="tiny">pass</text><text x="256" y="242" class="tiny">pass</text><text x="148" y="329" class="tiny">pass</text>
+            <text x="548" y="388" class="tiny">workflow</text><text x="847" y="388" class="tiny">finalizar</text>
+            <text x="370" y="478" class="small">WAIT_MERGE → IDLE: autorización + merge confirmado + cierre; también DONE/ABORT explícitos.</text>
+            <path fill="none" stroke="#86a0c0" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#fsm-arrow)" d="M433 433 V491 H1033 V433"/><text x="495" y="488" class="tiny">sin Code Review → finalize_pr (requiere evidencia si hay harness)</text>
+
+            <rect class="zone" x="15" y="530" width="1170" height="263" rx="16"/><text x="35" y="560" class="small">REVISIÓN, CONFLICTOS Y PUBLICACIÓN · estados de trabajo post-PR</text>
+            <rect class="agent" x="35" y="590" width="245" height="75" rx="11"/><text x="157" y="621" text-anchor="middle" class="mono">ADDRESS_REVIEW</text><text x="157" y="645" text-anchor="middle" class="small">Desde WAIT_REVIEW: threads OCR</text>
+            <rect class="agent" x="330" y="590" width="245" height="75" rx="11"/><text x="452" y="621" text-anchor="middle" class="mono">ADDRESS_PR_THREADS</text><text x="452" y="645" text-anchor="middle" class="small">Desde WAIT_MERGE: threads nuevos</text>
+            <rect class="agent" x="625" y="590" width="245" height="75" rx="11"/><text x="747" y="621" text-anchor="middle" class="mono">RESOLVE_CONFLICTS</text><text x="747" y="645" text-anchor="middle" class="small">Desde esperas PR: merge conflict</text>
+            <rect class="ctl" x="920" y="590" width="245" height="75" rx="11"/><text x="1042" y="621" text-anchor="middle" class="mono">PUSHING</text><text x="1042" y="645" text-anchor="middle" class="small">Checks → push → continuación</text>
+            <g fill="none" stroke="#86a0c0" stroke-width="1.8" marker-end="url(#fsm-arrow)"><path d="M157 665 V705 H1042 V665 M452 665 V705 M747 665 V705"/></g>
+            <text x="35" y="739" class="small">Nuevos commits → PUSHING; sin commits, resolver/reconsultar o volver a la espera de origen.</text><text x="35" y="766" class="small">PUSHING retorna a WAIT_REVIEW o finalización/WAIT_MERGE según push_context.continuation; checks fallidos → REPAIR_CHECKS.</text>
+
+            <rect class="zone" x="15" y="812" width="1170" height="218" rx="16"/><text x="35" y="842" class="small">REPARACIÓN Y CAMBIOS DE ALCANCE · nunca son aprobación implícita</text>
+            <rect class="fail" x="35" y="870" width="210" height="75" rx="11"/><text x="140" y="901" text-anchor="middle" class="mono">REPAIR_CHECKS</text><text x="140" y="925" text-anchor="middle" class="small">Fallos / evidencia incompleta</text>
+            <rect class="pass" x="280" y="870" width="210" height="75" rx="11"/><text x="385" y="901" text-anchor="middle" class="mono">EVIDENCE_REVIEW</text><text x="385" y="925" text-anchor="middle" class="small">Revisar fix de evidencia</text>
+            <rect class="agent" x="525" y="870" width="195" height="75" rx="11"/><text x="622" y="901" text-anchor="middle" class="mono">APPLY_FEEDBACK</text><text x="622" y="925" text-anchor="middle" class="small">Corrección dentro del alcance</text>
+            <rect class="agent" x="755" y="870" width="195" height="75" rx="11"/><text x="852" y="901" text-anchor="middle" class="mono">REPLANNING</text><text x="852" y="925" text-anchor="middle" class="small">Revisar propuesta / alcance</text>
+            <rect class="ctl" x="985" y="870" width="180" height="75" rx="11"/><text x="1075" y="901" text-anchor="middle" class="mono">RECOVERING</text><text x="1075" y="925" text-anchor="middle" class="small">Propiedad y entorno</text>
+            <path fill="none" stroke="#86a0c0" stroke-width="1.8" marker-end="url(#fsm-arrow)" d="M245 907 H280"/>
+            <text x="35" y="977" class="small">REPAIR_CHECKS → VERIFYING o resume; fix de evidencia con código → EVIDENCE_REVIEW → PUSHING.</text>
+            <text x="35" y="1005" class="small">APPLY_FEEDBACK → VERIFYING/PUSHING; REPLANNING → WAIT_APPROVAL; RECOVERING → destino persistido.</text>
+
+            <rect class="zone" x="15" y="1050" width="1170" height="208" rx="16"/><text x="35" y="1080" class="small">ESPERAS GENERALES · return_state / stuck_return y contexto conservado</text>
+            <rect class="human" x="35" y="1110" width="280" height="72" rx="11"/><text x="175" y="1140" text-anchor="middle" class="mono">WAIT_REPLY</text><text x="175" y="1164" text-anchor="middle" class="small">Pregunta / gate agotado / aclaración</text>
+            <rect class="human" x="440" y="1110" width="280" height="72" rx="11"/><text x="580" y="1140" text-anchor="middle" class="mono">WAIT_STUCK</text><text x="580" y="1164" text-anchor="middle" class="small">Escalación / fallo persistente</text>
+            <rect class="human" x="845" y="1110" width="280" height="72" rx="11"/><text x="985" y="1140" text-anchor="middle" class="mono">WAIT_CLEAN</text><text x="985" y="1164" text-anchor="middle" class="small">Checkout previo sucio → IDLE limpio</text>
+            <text x="35" y="1213" class="small">Una fase puede preguntar → WAIT_REPLY → continuación contextual tras respuesta válida y entrega confirmada.</text>
+            <text x="35" y="1240" class="small">WAIT_STUCK: retry / instrucciones → fase guardada. WAIT_CLEAN se reconsulta automáticamente en Slack.</text>
+            <text x="25" y="1296" class="small">Flecha continua: ruta típica. Punteada: ruta condicionada. Los retornos por contexto se explican en texto para no inventar destinos fijos.</text>
+          </svg>

@@ -105,10 +105,27 @@ class ConversationReceiptsTests(unittest.TestCase):
         generate = Mock(return_value=SimpleNamespace(output="Explanation", session_id="chat"))
         deliver = Mock(side_effect=[{"complete": False, "notification_id": "r"},
                                     {"complete": True, "notification_id": "r"}])
-        lateral.process_one(self.store, self.repo, generate, deliver)
-        lateral.process_one(ExecutionStore(self.repo / "execution.sqlite"), self.repo, generate, deliver)
+        with patch.object(lateral.time, "time", return_value=100):
+            lateral.process_one(self.store, self.repo, generate, deliver)
+        with patch.object(lateral.time, "time", return_value=131):
+            lateral.process_one(ExecutionStore(self.repo / "execution.sqlite"), self.repo, generate, deliver)
         self.assertEqual(generate.call_count, 1)
         self.assertEqual(self.store.get("conversation", row["id"])["status"], "complete")
+
+    def test_failed_old_task_delivery_does_not_starve_new_question(self):
+        old = lateral.receive(self.store, self.state, self.repo, "old", "/btw explain")
+        old = lateral.save_classification(self.store, old, self.classification())
+        self.store.update("conversation", old, status="generated", output="Saved explanation")
+        state = {**self.state, "execution_task_id": "new-task", "state": "WAIT_REPLY"}
+        new = lateral.receive(self.store, state, self.repo, "new", "Only frontend, not backend")
+        generate = Mock(return_value=SimpleNamespace(output=json.dumps(self.classification(
+            intent="answer", resolves_pending_question=True)), session_id="classifier"))
+        deliver = Mock(return_value={"complete": False, "notification_id": "r", "error": "invalid old thread"})
+        with patch.object(lateral.time, "time", return_value=100):
+            self.assertTrue(lateral.process_one(self.store, self.repo, generate, deliver))
+            self.assertTrue(lateral.process_one(self.store, self.repo, generate, deliver))
+        self.assertEqual(deliver.call_count, 1)
+        self.assertEqual(self.store.get("conversation", new["id"])["data"]["route"], "flow")
 
     def test_context_is_incorporated_only_after_successful_checkpoint(self):
         row = lateral.receive(self.store, self.state, self.repo, "m", "BDD is optional")

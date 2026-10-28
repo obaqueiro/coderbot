@@ -14,15 +14,21 @@ mkdir -p "$data_dir/transport"
 # files. Delivery runs as bot and must be able to prepare its attachments.
 chown -R bot:bot "$data_dir/transport"
 install -m 0600 -o bot -g bot /dev/null "$data_dir/heartbeat"
+if [ "${CODEBOT_SELF_HEAL:-off}" != "off" ]; then
+  mkdir -p "$data_dir/supervisor"
+  chown bot:bot "$data_dir/supervisor"
+  chmod 0700 "$data_dir/supervisor"
+  install -m 0600 -o bot -g bot /dev/null "$data_dir/supervisor/heartbeat.json"
+fi
 
 # Keep OpenCode credentials and resumable sessions in Codebot's bind-mounted data
 # directory rather than sharing the host user's global OpenCode configuration.
-export XDG_DATA_HOME=/app/data/opencode/data
-export XDG_CONFIG_HOME=/app/data/opencode/config
-export XDG_CACHE_HOME=/app/data/opencode/cache
-export XDG_STATE_HOME=/app/data/opencode/state
+export XDG_DATA_HOME="$data_dir/opencode/data"
+export XDG_CONFIG_HOME="$data_dir/opencode/config"
+export XDG_CACHE_HOME="$data_dir/opencode/cache"
+export XDG_STATE_HOME="$data_dir/opencode/state"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
-chown -R bot:bot /app/data/opencode
+chown -R bot:bot "$data_dir/opencode"
 
 # Let the non-root user talk to the mounted docker socket.
 if [ -S /var/run/docker.sock ]; then
@@ -79,6 +85,18 @@ exec setpriv --reuid=bot --regid=bot --init-groups env HOME=/home/bot bash -c '
   # --replace-all (not a plain set): the key is multi-valued below, and a plain set fails
   # on an existing multi-valued key, which would break every restart of this container.
   git config --global --replace-all url."https://github.com/".insteadOf "git@github.com:"
+  if [ ! -e "${CODEBOT_REPO_PATH}/.git" ]; then
+    # Only immediate child folders are project repositories. Never scan nested
+    # generated worktrees (their .git files can point into another container).
+    while IFS= read -r -d "" marker; do
+      repo="${marker%/.git}"
+      git config --global --add safe.directory "$repo"
+      origin="$(git -C "$repo" config --get remote.origin.url || true)"
+      if [[ "$origin" =~ ^git@([^:]+): ]] && [ "${BASH_REMATCH[1]}" != "github.com" ]; then
+        git config --global --add url."https://github.com/".insteadOf "git@${BASH_REMATCH[1]}:"
+      fi
+    done < <(find "${CODEBOT_REPO_PATH}" -mindepth 2 -maxdepth 2 -name .git -print0)
+  fi
   # The host may point origin at an SSH host alias from its own ~/.ssh/config, e.g.
   # "git@github-work:org/repo.git". The container has neither that config nor the key,
   # and gh refuses a remote whose host it does not recognize ("none of the git remotes
@@ -89,5 +107,5 @@ exec setpriv --reuid=bot --regid=bot --init-groups env HOME=/home/bot bash -c '
     echo "origin uses SSH host alias ${BASH_REMATCH[1]}; rewriting it to https://github.com/" >&2
     git config --global --add url."https://github.com/".insteadOf "git@${BASH_REMATCH[1]}:"
   fi
-  exec python3 -u /app/src/main.py
+  exec python3 -u /opt/coderbot-supervisor/supervisor.py --source /app
 '

@@ -90,3 +90,14 @@ class DiagnosticsTests(unittest.TestCase):
         result = diagnostics.redact(text, {"API_KEY": "supersecret"})
         for secret in ("supersecret", "bearersecret", "token=secret"):
             self.assertNotIn(secret, result)
+
+    def test_long_summary_preserves_cause_instead_of_replacing_it_with_generic_error(self):
+        detail = "zip-browser: unsupported timeout_millis; expected timeout. " + "context " * 100
+        summary = diagnostics.summary(detail=detail)
+        self.assertIn("unsupported timeout_millis", summary)
+        self.assertNotIn("Execution failed; full details", summary)
+        self.assertLessEqual(len(summary), 240)
+
+    def test_structured_summary_extracts_reason_without_dumping_transport_json(self):
+        self.assertEqual(diagnostics.summary(detail='{"reason":"Missing focused browser cases","checks":[]}'),
+                         "Missing focused browser cases")

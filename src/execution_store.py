@@ -35,9 +35,24 @@ class ExecutionStore:
         """Derivable for legacy state even if its new cursor was never saved."""
         if state.get("execution_task_id"):
             return state["execution_task_id"]
+        if state.get("workspace"):
+            raw = json.dumps(["workspace-feature", state["workspace"]["identity"],
+                              state.get("item_id") or state.get("item"), state.get("slug")])
+            return hashlib.sha256(raw.encode()).hexdigest()
         raw = json.dumps([str(Path(repo).resolve()), state.get("branch"),
                           state.get("item_id") or state.get("item"), state.get("base_sha")])
         return hashlib.sha256(raw.encode()).hexdigest()
+
+    def repository_identity(self, state, repo, repository):
+        """Independent operation namespace beneath a stable workspace feature."""
+        raw = json.dumps([self.task_identity(state, repo), repository.identity])
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def record_repository(self, entity, state, workspace, repository, identity, data,
+                          *, status="running"):
+        task_id = self.repository_identity(state, workspace.root, repository)
+        return self.put(entity, task_id=task_id, identity=identity, status=status,
+                        parent_id=self.task_identity(state, workspace.root), data=data)
 
     def reconcile(self, state, repo):
         task_id = self.task_identity(state, repo)

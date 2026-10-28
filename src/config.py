@@ -159,10 +159,15 @@ ACTIVITY_TRAIL = (os.environ.get("CODEBOT_ACTIVITY_TRAIL") or "on").strip().lowe
 # May be a comma-separated list: mail is SENT to the first address; mail FROM any of
 # them is trusted as the user (replies, approvals, ABORT/STATUS/DONE commands).
 USER_EMAIL = os.environ.get("CODEBOT_USER_EMAIL", "")
-# Target git checkout the agent works on. Required in the container (compose and
-# entrypoint enforce it; main() validates it's a git repo). The sentinel default
+# Target directory the agent works on. Required in the container (compose and
+# entrypoint enforce it). The sentinel default
 # keeps host-side imports (setup_oauth.py) working without env vars.
 REPO_PATH = Path(os.environ.get("CODEBOT_REPO_PATH") or "/unset-CODEBOT_REPO_PATH")
+# Worktrees have a .git file rather than a directory. Unconfigured host-side
+# imports retain repo behavior; startup still rejects an unset target path.
+TARGET_MODE = ("repo" if not os.environ.get("CODEBOT_REPO_PATH") or
+               (REPO_PATH / ".git").exists() else "workspace")
+WORKSPACE_MANIFEST = os.environ.get("CODEBOT_WORKSPACE_MANIFEST") or None
 # Human-readable project name used in prompts; defaults to the repo dir name.
 PROJECT_NAME = os.environ.get("CODEBOT_PROJECT_NAME") or REPO_PATH.name
 
@@ -221,7 +226,7 @@ AGENT_TIMEOUT_SECONDS = int(os.environ.get(
     "CODEBOT_AGENT_TIMEOUT", os.environ.get("CODEBOT_CLAUDE_TIMEOUT", "1800")))
 E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "900"))
 UTILITY_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_UTILITY_TIMEOUT", "30"))
-LOCAL_TOOL_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_LOCAL_TOOL_TIMEOUT", "45"))
+LOCAL_TOOL_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_LOCAL_TOOL_TIMEOUT", "200"))
 SUBAGENT_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBAGENT_TIMEOUT", "600"))
 PROVIDER_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_PROVIDER_TIMEOUT", "180"))
 # Short calls (git/gh) must never hang the tick loop; a timeout surfaces as a tick

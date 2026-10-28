@@ -22,6 +22,8 @@ class AgentTransportTests(unittest.TestCase):
                 agent_runner._opencode("work")
         self.assertEqual(error.exception.stdout, output)
         self.assertEqual(error.exception.stderr, "stderr")
+        self.assertEqual(error.exception.request, "work")
+        self.assertIn("ContentFilterError", error.exception.provider_detail)
 
     def test_content_filter_finish_is_rejected_even_with_zero_exit(self):
         output = json.dumps({"type": "step_finish", "sessionID": "ses_one",

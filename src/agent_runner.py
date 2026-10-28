@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 from contextvars import ContextVar
+from contextlib import contextmanager
 
 import claude_runner
 import activity
@@ -39,6 +40,7 @@ _task_language: ContextVar[str | None] = ContextVar("task_language", default=Non
 _task_context: ContextVar[dict | None] = ContextVar("task_context", default=None)
 _utility: ContextVar[bool] = ContextVar("utility", default=False)
 _lateral: ContextVar[bool] = ContextVar("lateral", default=False)
+_routing: ContextVar[bool] = ContextVar("routing", default=False)
 _lateral_session: ContextVar = ContextVar("lateral_session", default=None)
 _invocation: ContextVar[dict | None] = ContextVar("invocation", default=None)
 _turn_lock = threading.Lock()
@@ -226,6 +228,29 @@ def _after_kick(prompt: str) -> str:
     return _KICK_RECOVERY_CONTEXT + "\n" + prompt if state.get("kick_pending") else prompt
 
 
+@contextmanager
+def routing():
+    """Use a lightweight routing policy without changing concurrent coding turns."""
+    token = _routing.set(True)
+    try:
+        yield
+    finally:
+        _routing.reset(token)
+
+
+def _opencode_effort():
+    # Only lower an already configured reasoning policy; preserve other providers' defaults.
+    if not _routing.get():
+        return config.OPENCODE_EFFORT
+    return config.OPENCODE_ROLE_EFFORTS.get("routing", "low" if config.OPENCODE_EFFORT else "")
+
+
+def _invocation_timeout():
+    # Routing includes service startup; give it one minute, not a coding-turn budget.
+    return max(60, config.UTILITY_TIMEOUT_SECONDS) if _routing.get() else (
+        config.UTILITY_TIMEOUT_SECONDS if _utility.get() else config.AGENT_TIMEOUT_SECONDS)
+
+
 def _opencode_environment() -> dict[str, str]:
     env = secret_store.environment()  # the process env plus this task's credentials
     env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "1"
@@ -286,9 +311,11 @@ def _opencode_environment() -> dict[str, str]:
         agents.setdefault(role, {})["model"] = model
     for role, effort in config.OPENCODE_ROLE_EFFORTS.items():
         agents.setdefault(role, {}).setdefault("options", {})["reasoningEffort"] = effort
-    if config.OPENCODE_EFFORT:
-        if config.OPENCODE_EFFORT not in ("none", "minimal", "low", "medium", "high", "xhigh"):
-            raise RuntimeError("OPENCODE_EFFORT must be none, minimal, low, medium, high or xhigh")
+    effort = _opencode_effort()
+    if effort:
+        if effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
+            name = "CODEBOT_OPENCODE_ROLE_EFFORTS.routing" if _routing.get() else "OPENCODE_EFFORT"
+            raise RuntimeError(name + " must be none, minimal, low, medium, high or xhigh")
         provider_id, separator, model_id = config.OPENCODE_MODEL.partition("/")
         if not separator or not provider_id or not model_id:
             raise RuntimeError("OPENCODE_MODEL must be provider/model when setting OPENCODE_EFFORT")
@@ -302,9 +329,9 @@ def _opencode_environment() -> dict[str, str]:
         for key in ("options", "variants"):
             if not isinstance(current.setdefault(key, {}), dict):
                 raise RuntimeError(f"OPENCODE_CONFIG_CONTENT model {key} must contain a JSON object")
-        current["options"]["reasoningEffort"] = config.OPENCODE_EFFORT
+        current["options"]["reasoningEffort"] = effort
         # Explicit selection also overrides a variant retained by a resumed session.
-        current["variants"]["coderbot-effort"] = {"reasoningEffort": config.OPENCODE_EFFORT}
+        current["variants"]["coderbot-effort"] = {"reasoningEffort": effort}
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
     if _utility.get():
         inline["plugin"] = []
@@ -418,6 +445,7 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     """subprocess.run(capture_output=True, text=True, timeout=...) equivalent that hands
     every stdout line to on_line as it arrives. Raises subprocess.TimeoutExpired (with
     the partial output) after killing the process, as subprocess.run would."""
+    effective_timeout = operations.remaining(timeout)
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, stdin=subprocess.PIPE if input_text is not None else None,
                             text=True, start_new_session=True)
@@ -438,7 +466,7 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
         except ProcessLookupError:
             pass
 
-    timer = threading.Timer(operations.remaining(timeout), _kill_on_timeout)
+    timer = threading.Timer(effective_timeout, _kill_on_timeout)
     timer.daemon = True
     timer.start()
     stop_watch = threading.Event()
@@ -482,11 +510,17 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
             log.warning("agent interrupted: %s", detail)
             raise subprocess.TimeoutExpired(cmd, entry["timeout"], output=stdout,
                                             stderr=stderr + "\n" + detail)
-        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
+        elapsed = time.monotonic() - started
+        error = subprocess.TimeoutExpired(cmd, effective_timeout, output=stdout,
+            stderr=stderr + f"\nEffective execution limit {effective_timeout:.2f}s; elapsed {elapsed:.2f}s.")
+        error.elapsed = elapsed
+        raise error
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
+    effort = _opencode_effort()
+    timeout = _invocation_timeout()
     directory = config.DATA_DIR / "conversation_runtime" if _lateral.get() else config.REPO_PATH
     if _lateral.get():
         directory.mkdir(parents=True, exist_ok=True)
@@ -494,7 +528,7 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
            "--auto", "--format", "json"]
     if _lateral.get():
         cmd.remove("--auto")  # Never let auto-approval override lateral denials.
-    if config.OPENCODE_EFFORT:
+    if effort:
         cmd.extend(["--variant", "coderbot-effort"])
     if session_id:
         cmd.extend(["--session", session_id])
@@ -503,19 +537,19 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     cmd.append(prompt)
     log.info("opencode %s model=%s effort=%s (prompt %d chars)",
              "resume" if session_id else "run", config.OPENCODE_MODEL,
-             config.OPENCODE_EFFORT or "default", len(prompt))
+             effort or "default", len(prompt))
     if config.OPENCODE_TRANSPORT == "http":
         bridge = Path(config.BRIDGE_PLUGIN_DIR) / "runtime" / "run.js"
         proc = _run_streaming(["node", str(bridge)], cwd=directory,
-            env=_opencode_environment(), timeout=config.AGENT_TIMEOUT_SECONDS,
+            env=_opencode_environment(), timeout=timeout,
             input_text=json.dumps({"directory": str(directory), "model": config.OPENCODE_MODEL,
-                "sessionID": session_id, "variant": "coderbot-effort" if config.OPENCODE_EFFORT else None,
+                "sessionID": session_id, "variant": "coderbot-effort" if effort else None,
                 "agent": "conversation" if _lateral.get() else "utility" if _utility.get() else "build",
                 "utility": _utility.get(), "conversation": _lateral.get(),
                 "prompt": prompt}))
     else:
         proc = _run_streaming(cmd, cwd=directory, env=_opencode_environment(),
-                              timeout=config.AGENT_TIMEOUT_SECONDS)
+                              timeout=timeout)
 
     output, errors, observed_session = [], [], None
     content_filtered = False
@@ -541,7 +575,8 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
             content_filtered = True
 
     if content_filtered:
-        raise AgentContentFilterError("The response was blocked by the provider's content filter", proc)
+        raise AgentContentFilterError("The response was blocked by the provider's content filter", proc,
+            request=prompt, partial_response="\n".join(output), provider_detail="\n".join(errors))
     if proc.returncode != 0 or errors:
         detail = "\n".join(errors) or proc.stderr or proc.stdout
         if errors and any("fetch failed" in error.casefold() for error in errors):
@@ -563,13 +598,13 @@ def converse(prompt: str, session_id: str | None = None, *, on_session=None):
               (_task_context, _task_context.set(None)), (_invocation, _invocation.set(None)),
               (_lateral_session, _lateral_session.set(on_session))]
     try:
-        with operations.budget(config.UTILITY_TIMEOUT_SECONDS):
+        with operations.budget(_invocation_timeout()):
             if config.AGENT == "claude":
                 args = ["--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                         "--setting-sources", "", "--disable-slash-commands"]
                 if session_id:
                     args.extend(["--resume", session_id])
-                result = claude_runner._invoke(args, prompt)
+                result = claude_runner._invoke(args, prompt, **({"effort": "low"} if _routing.get() else {}))
                 if on_session:
                     on_session(result.session_id)
                 return result
@@ -635,6 +670,10 @@ def run(prompt: str, contract: bool = True):
                 parallel_conversation.incorporated(phase_checkpoint.store(), input_rows, result.session_id)
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         return result
+    except AgentContentFilterError as error:
+        if not error.request:
+            error.request = prompt
+        raise
     finally:
         if context and before is not None:
             try:
@@ -705,6 +744,10 @@ def resume(session_id: str, prompt: str):
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
             context.setdefault("phase_sessions", {})[context["state"]] = result.session_id
         return result
+    except AgentContentFilterError as error:
+        if not error.request:
+            error.request = prompt
+        raise
     finally:
         if context and before is not None:
             try:

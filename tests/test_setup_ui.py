@@ -17,6 +17,51 @@ except ImportError:
 
 @unittest.skipIf(SetupApp is None, "host Textual dependency not installed")
 class SetupMenu(unittest.IsolatedAsyncioTestCase):
+    async def test_self_healing_enabled_disabled_and_saved_without_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            original = "# keep\nUNKNOWN=untouched\n"
+            path.write_text(original)
+            app = SetupApp(EnvFile(path))
+            with patch("scripts.setup.subprocess.run") as process:
+                async with app.run_test(size=(120, 80)) as pilot:
+                    await pilot.click("#section-Self-healing")
+                    await pilot.pause()
+                    self.assertEqual(app.query_one("#setting-CODEBOT_SELF_HEAL", Select).value, "off")
+                    self.assertIn("recreate", str(app.query_one("#description", Static).render()))
+                    for mode in ("auto", "off"):
+                        app.query_one("#setting-CODEBOT_SELF_HEAL", Select).value = mode
+                        await pilot.pause()
+                        await pilot.click("#save")
+                        await pilot.pause()
+                        self.assertIsNone(app.page)
+                        self.assertIn("Self-healing", app.completed)
+                        self.assertEqual(EnvFile(path).values["CODEBOT_SELF_HEAL"], mode)
+                        await pilot.click("#section-Self-healing")
+                        await pilot.pause()
+                        self.assertEqual(app.query_one("#setting-CODEBOT_SELF_HEAL", Select).value, mode)
+            process.assert_not_called()
+            self.assertEqual(path.read_text(), original + "CODEBOT_SELF_HEAL=off\n")
+
+    async def test_existing_self_healing_modes_are_preserved_and_discardable(self):
+        for mode in ("observe", "propose", "auto"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / ".env"
+                original = f"CODEBOT_SELF_HEAL={mode}\n"
+                path.write_text(original)
+                app = SetupApp(EnvFile(path))
+                async with app.run_test(size=(120, 80)) as pilot:
+                    await pilot.click("#section-Self-healing")
+                    await pilot.pause()
+                    self.assertEqual(app.query_one("#setting-CODEBOT_SELF_HEAL", Select).value, mode)
+                    app.query_one("#setting-CODEBOT_SELF_HEAL", Select).value = "off"
+                    await pilot.pause()
+                    await pilot.click("#discard")
+                    await pilot.pause()
+                    self.assertIsNone(app.page)
+                    self.assertEqual(path.read_text(), original)
+                    self.assertEqual(list(path.parent.glob(".env.bak.*")), [])
+
     async def test_caveman_yes_no_persists_exact_boolean(self):
         for agent in ("claude", "opencode"):
             with self.subTest(agent=agent), tempfile.TemporaryDirectory() as tmp:

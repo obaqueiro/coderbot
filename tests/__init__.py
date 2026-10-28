@@ -15,7 +15,9 @@ if str(SRC) not in sys.path:
 # that reaches a data-dir write (state.json, the agent log, ...) can poison the real
 # data/ of a live deployment sharing this checkout. Individual modules still override
 # config.STATE_PATH; this is the backstop for everything else.
-os.environ.setdefault("CODEBOT_DATA_DIR", tempfile.mkdtemp(prefix="codebot-test-data-"))
+os.environ["CODEBOT_DATA_DIR"] = tempfile.mkdtemp(prefix="codebot-test-data-")
+for variable in ("CODEBOT_SUPERVISOR_DIR", "CODEBOT_WORKER_BOOT", "CODEBOT_RUNTIME_EPOCH"):
+    os.environ.pop(variable, None)
 
 # Several legacy test modules import main under patch.dict(sys.modules, ...).
 # Keep Markdown and its extension base classes loaded before those temporary module

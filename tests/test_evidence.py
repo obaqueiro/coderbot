@@ -94,7 +94,7 @@ class EvidenceTests(unittest.TestCase):
 
         self.assertEqual(record.call_args.args[0], ["dynamic-page-title.spec.ts"])
 
-    def test_playwright_recorder_uses_target_video_environment_variable(self):
+    def test_playwright_recorder_uses_generic_video_environment_variable(self):
         with tempfile.TemporaryDirectory() as tmp:
             e2e_dir = Path(tmp)
             with patch.object(evidence, "E2E_DIR", e2e_dir), \
@@ -106,8 +106,29 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(commands, [
             ["./run.sh", "dynamic-page-title.spec.ts", "--grep", "@evidence"],
             ["./run.sh", "dynamic-page-title.spec.ts"]])
-        self.assertEqual(run.call_args.kwargs["env"]["PICA_E2E_VIDEO"], "on")
         self.assertEqual(run.call_args.kwargs["env"]["PW_VIDEO"], "on")
+
+    def test_recording_preserves_target_environment_without_application_defaults(self):
+        with patch.dict(evidence.os.environ, {"TARGET_SETTING": "custom"}, clear=True), \
+             patch("evidence.operations.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            evidence._run_recording(["a.spec.ts"], [])
+        self.assertEqual(run.call_args.kwargs["env"], {"TARGET_SETTING": "custom", "PW_VIDEO": "on"})
+
+    def test_external_artifacts_are_reused_through_an_explicit_manifest(self):
+        import artifact_manifest
+        root = Path(self.scratch.name)
+        video = root / "custom-results/demo.webm"
+        video.parent.mkdir()
+        video.write_bytes(b"video")
+        manifest = root / "custom-results/artifacts.json"
+        artifact_manifest.write(manifest, run_id="run", snapshot="fixture", status="pass",
+                                artifacts=[{"path": str(video)}])
+        with patch.dict(evidence.os.environ, {"CODEBOT_ARTIFACT_MANIFEST": str(manifest)}), \
+             patch("evidence.detect_branch_specs", return_value=[]), \
+             patch("evidence.valid_media", return_value=True), \
+             patch("evidence._run_recording") as run:
+            self.assertEqual(evidence.record_evidence(["a.spec.ts"], "playwright"), [video.resolve()])
+        run.assert_not_called()
 
     def test_evidence_clip_stops_after_demo_run(self):
         with tempfile.TemporaryDirectory() as tmp:

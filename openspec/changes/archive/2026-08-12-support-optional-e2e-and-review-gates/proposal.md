@@ -2,8 +2,8 @@
 
 Codebot's lifecycle hard-requires two things from the target repo: an `e2e/run.sh`
 Playwright harness (`do_e2e`/`evidence.py`) and a "Code Review" GitHub Action
-(`code_review_check`/`do_open_pr`'s wait loop). `processing-interface-claude-analytics`,
-the next repo we want to point codebot at, has neither — it has no `e2e/` directory
+(`code_review_check`/`do_open_pr`'s wait loop). A target repository may have neither
+— no `e2e/` directory
 and no code-review workflow in `.github/workflows/`. As written, `do_e2e` calls
 `subprocess.run(["./run.sh"], cwd=E2E_DIR, ...)` unconditionally; against this repo
 that raises `FileNotFoundError` (no such directory) and crashes the orchestrator

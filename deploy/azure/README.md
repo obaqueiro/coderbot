@@ -68,10 +68,10 @@ ephemeral resource disk at `/mnt`, so the persistent one cannot go there):
 cd deploy/azure
 ./deploy.sh shared --location eastus
 ./deploy.sh secrets --env ../../.env --data ../../data
-./deploy.sh agent nccr --target-repo getriverly/riverly
-./deploy.sh agent nccr2 --target-repo getriverly/riverly
+./deploy.sh agent agent-a --target-repo example/project
+./deploy.sh agent agent-b --target-repo example/project
 ./deploy.sh status                       # every agent: size, power state, disk, container
-./deploy.sh logs nccr                    # the container log, over the Azure control plane
+./deploy.sh logs agent-a                 # the container log, over the Azure control plane
 ```
 
 `agent` options: `--location`, `--size` (default `Standard_D2pds_v6`), `--ref`

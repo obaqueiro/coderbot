@@ -29,7 +29,8 @@ class VerificationLedgerTests(unittest.TestCase):
         with patch.object(final_checks.check_plan, "discover", return_value=plan), \
              patch.object(final_checks.checks, "execute_plan", return_value=[{"status": "pass"}]) as execute, \
              patch.object(final_checks, "snapshot", return_value="head"):
-            result = final_checks.run(state, Path("/repo"), type("Store", (), {"task_identity": lambda *args: "task"})())
+            result = final_checks.run(state, Path("/repo"), type("Store", (), {
+                "task_identity": lambda *args: "task", "list": lambda *args, **kwargs: []})())
         self.assertEqual([c.id for c in execute.call_args.args[0]], ["unit:backend"])
         self.assertIn("waived", handoffs.concise_verification(state))
         self.assertEqual(result["status"], "pass")

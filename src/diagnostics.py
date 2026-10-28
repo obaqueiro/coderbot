@@ -25,26 +25,68 @@ def redact(text, environ=None):
                if re.search(r"TOKEN|PASSWORD|SECRET|API_KEY|CREDENTIAL", key, re.I)
                and isinstance(value, str) and len(value) >= minimum and not value.isdigit()}
     for value in sorted(secrets, key=len, reverse=True):
-        text = text.replace(value, redaction.PLACEHOLDER)
+        for form in {value, json.dumps(value, ensure_ascii=True)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}:
+            text = text.replace(form, redaction.PLACEHOLDER)
     return redaction.redact(text)
+
+
+def safe(value):
+    """Redact string values before JSON escaping or presentation truncation."""
+    if isinstance(value, dict):
+        return {redact(k): safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [safe(v) for v in value]
+    return redact(value) if isinstance(value, str) else value
+
+
+def failure_context(store, state, repo, detail=""):
+    """Facts only, including legacy checkpoint evidence; never infer a green suite."""
+    import check_plan
+    context = {"cause": state.get("reported_check_plan_error") or summary(detail=detail or state.get("stuck_error", "")),
+               "recovery": {"recorded_attempts": state.get("check_plan_repair_round"),
+                            "revision": state.get("check_plan_repair_revision"),
+                            "workspace_rounds": state.get("workspace", {}).get("verification_rounds", {})},
+               "verification": state.get("final_check_report", {})}
+    rejected = state.get("rejected_check_plan")
+    source = "recorded rejected plan"
+    if not rejected and state.get("reported_check_plan_error"):
+        for row in store.list("checkpoint", store.task_identity(state, repo)):
+            output = row["data"].get("output", "")
+            if row["data"].get("phase") == "VERIFYING" and check_plan.reported_error(output):
+                rejected = check_plan.reported_payload(output)
+                source = "historical checkpoint " + row["id"] + "; not a new repair attempt"
+                break
+    if rejected:
+        context.update(rejected_check_plan=rejected, evidence_source=source)
+        validation = check_plan.reported_error("CHECK_PLAN: " + rejected.removeprefix("CHECK_PLAN: "))
+        if validation:
+            context["cause"] = validation
+        context["impact"] = "Invalid check metadata, not a failed product test. No malformed plan was executed."
+    if state.get("provider_block"):
+        context["provider_block"] = state["provider_block"]
+    return safe(context)
 
 
 def report(store, state, repo, directory, phase, *, error=None, detail="", identity=None):
     trace = "".join(traceback.format_exception(error)) if error is not None else ""
+    context = failure_context(store, state, repo, detail)
+    attempt = state.get("execution_attempt_id") or state.get("check_plan_repair_round") or "-"
     fields = {"task": state.get("item"), "phase": phase,
-              "attempt": state.get("execution_attempt_id"), "detail": detail,
+              "attempt": attempt, "detail": detail,
               "traceback": trace}
     if error is not None:
-        for key in ("cmd", "returncode", "stdout", "stderr", "output"):
+        for key in ("cmd", "returncode", "stdout", "stderr", "output", "request", "partial_response", "provider_detail"):
             value = getattr(error, key, None)
             if isinstance(value, bytes):
                 value = value.decode("utf-8", errors="replace")
             if value is not None:
                 fields[key] = value
+    fields = safe(fields)
     # Keep the incident identity independent of its presentation format.
     text = redact(f"Task: {state.get('item', '-')}\nPhase: {phase}\n"
-                  f"Attempt: {state.get('execution_attempt_id') or '-'}\n\n{detail}")
-    for key in ("cmd", "returncode", "stdout", "stderr", "output"):
+                  f"Attempt: {attempt}\n\n{detail}")
+    text += "\n\nRecorded context:\n" + json.dumps(context, ensure_ascii=False, sort_keys=True)
+    for key in ("cmd", "returncode", "stdout", "stderr", "output", "request", "partial_response", "provider_detail"):
         if key in fields:
             text += "\n\n" + key + ":\n" + redact(fields[key])
     if trace:
@@ -62,10 +104,19 @@ def report(store, state, repo, directory, phase, *, error=None, detail="", ident
                     f"- Time: {timestamp}\n"
                     f"- Task: {state.get('item', '-')}\n"
                     f"- Phase: {phase}\n"
-                    f"- Attempt: {state.get('execution_attempt_id') or '-'}\n")
+                    f"- Attempt: {attempt}\n")
         if detail:
             document += "\n## Details\n\n" + str(detail) + "\n"
-        for key in ("cmd", "returncode", "stdout", "stderr", "output"):
+        document += "\n## Cause and recorded recovery\n\n" + _code_block(json.dumps(
+            {k: v for k, v in context.items() if k not in ("rejected_check_plan", "verification", "provider_block")},
+            ensure_ascii=False, indent=2))
+        for name, heading in (("rejected_check_plan", "Rejected CHECK_PLAN"),
+                              ("verification", "Recorded verification"), ("provider_block", "Provider-blocked attempt")):
+            if context.get(name):
+                value = context[name]
+                document += "\n## " + heading + "\n\n" + _code_block(
+                    json.dumps(value, ensure_ascii=False, indent=2) if isinstance(value, dict) else value)
+        for key in ("cmd", "returncode", "stdout", "stderr", "output", "request", "partial_response", "provider_detail"):
             if key in fields:
                 document += f"\n## {key}\n\n" + _code_block(fields[key])
         if trace:
@@ -83,13 +134,19 @@ def _code_block(value):
 
 
 def summary(error=None, detail=""):
-    value = str(error) if error else detail
+    value = redact(str(error) if error else detail)
+    try:
+        structured = json.loads(value)
+        if isinstance(structured, dict):
+            value = next((structured[k] for k in ("reason", "message", "error", "detail")
+                          if isinstance(structured.get(k), str) and structured[k].strip()),
+                         "Structured failure details recorded; no concise cause was supplied.")
+    except (ValueError, TypeError):
+        pass
     lines = [line.strip() for line in value.splitlines() if line.strip()]
     if not lines:
         return "Outcome unavailable; diagnostic report recorded."
     final = next((line for line in lines if not line.startswith(("Task:", "State:", "PR:"))), lines[-1])
     if "Traceback" in value:
         final = lines[-1]
-    if len(final) > 240 or final.startswith(("{", "[")):
-        return "Execution failed; full details are in the diagnostic report."
-    return redact(final)
+    return final if len(final) <= 240 else final[:237] + "..."

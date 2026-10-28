@@ -275,6 +275,17 @@ class HumanHandoffs(unittest.TestCase):
         self.assertIn("No artifact available", handoffs.evidence_index([], None))
         self.assertIn("Demo video", handoffs.evidence_index([], "https://drive.example/video"))
 
+    def test_focused_handoff_does_not_hide_unknown_historical_audits(self):
+        state = {"final_check_report": {"status": "pass", "verification_scope": "focused_e2e",
+            "checks": [{"check": "zip", "status": "pass", "gate": {"status": "pass"}}],
+            "audit_checks": [{"status": "unknown", "required": False, "report": "old-audit.log"}]}}
+        detail = handoffs.verification(state)
+        self.assertIn("Final zip: pass", detail)
+        self.assertIn("Historical full E2E audit: unknown", detail)
+        self.assertIn("not current verification", detail)
+        self.assertIn("old-audit.log", detail)
+        self.assertIn("not reported as green", handoffs.concise_verification(state))
+
     def test_feedback_recap_uses_queued_request_only_after_push(self):
         with tempfile.TemporaryDirectory() as tmp:
             evidence = Path(tmp) / "report.html"

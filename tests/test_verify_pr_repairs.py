@@ -29,13 +29,13 @@ class VerifyPrRepairTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             repo = Path(root)
             subprocess.run(['git', 'init', '-q', root], check=True)
-            for area in ('backend', 'e2e', 'PICAv1/backend'):
+            for area in ('backend', 'e2e', 'legacy/backend'):
                 (repo / area).mkdir(parents=True)
                 (repo / area / 'requirements.txt').write_text('fixture==1')
             inputs = dependency_inputs(Check('unit', ['python', 'test'], cwd='backend'), repo)
             before = dependency_snapshot(repo, inputs)
             (repo / 'e2e/requirements.txt').write_text('fixture==2')
-            (repo / 'PICAv1/backend/requirements.txt').write_text('fixture==3')
+            (repo / 'legacy/backend/requirements.txt').write_text('fixture==3')
             self.assertEqual(before, dependency_snapshot(repo, inputs))
             (repo / 'backend/requirements.txt').write_text('fixture==2')
             self.assertNotEqual(before, dependency_snapshot(repo, inputs))
@@ -43,7 +43,7 @@ class VerifyPrRepairTests(unittest.TestCase):
     def test_recovery_and_review_receive_current_scope(self):
         import recovery
         import handoff_context
-        state = {'slug': 'feature', 'verification_guidance': 'Exclude PICAv1/** and preserve it'}
+        state = {'slug': 'feature', 'verification_guidance': 'Exclude legacy/** and preserve it'}
         self.assertIn(state['verification_guidance'], main._internal_review_prompt(state))
         self.assertIn(state['verification_guidance'], recovery.prompt({'data': {'reason': 'dirty'}}, [], state))
         self.assertIn(state['verification_guidance'], handoff_context.render(state, 'INTERNAL_REVIEW'))
@@ -136,8 +136,8 @@ class VerifyPrRepairTests(unittest.TestCase):
                  'dependency_inputs': ['backend/requirements.txt']}]}))
             (repo / 'backend').mkdir()
             (repo / 'backend/source.py').write_text('active')
-            (repo / 'PICAv1/backend/tests').mkdir(parents=True)
-            legacy = repo / 'PICAv1/backend/tests/test_broken.py'
+            (repo / 'legacy/backend/tests').mkdir(parents=True)
+            legacy = repo / 'legacy/backend/tests/test_broken.py'
             legacy.write_text('raise RuntimeError("historical")')
             plan = discover(repo)
             self.assertEqual([c.id for c in plan], ['active'])

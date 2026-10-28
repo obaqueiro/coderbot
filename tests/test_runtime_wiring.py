@@ -18,6 +18,46 @@ main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
 class RuntimeValidationTests(unittest.TestCase):
+    def test_empty_wait_inbox_is_quiet_and_still_polled(self):
+        state = {"state": "WAIT_STUCK", "item": "task", "thread_id": "C:1"}
+        before = dict(state)
+        with patch.object(main.gmail_client, "poll_reply", return_value=None) as poll, \
+             patch.object(main.log, "debug") as debug:
+            for _ in range(3):
+                main.handle_wait(state)
+        self.assertEqual(poll.call_count, 3)
+        poll.assert_called_with("C:1")
+        debug.assert_not_called()
+        self.assertEqual(state, before)
+
+    def test_received_reply_is_still_logged_and_queued(self):
+        state = {"state": "WAIT_STUCK", "item": "task", "thread_id": "C:1"}
+        with patch.object(main.gmail_client, "poll_reply", return_value=("message", "retry")), \
+             patch.object(main, "_note_contact"), patch.object(main, "_credential_action", return_value=None), \
+             patch.object(main, "_queue_conversation", return_value=True) as queue, \
+             self.assertLogs(main.log, level="INFO") as logs:
+            main.handle_wait(state)
+        self.assertIn("reply received in WAIT_STUCK: 'retry'", "\n".join(logs.output))
+        queue.assert_called_once_with(state, "message", "retry")
+
+    def test_waiting_tick_is_quiet_without_changing_two_second_wait(self):
+        state = {"state": "WAIT_STUCK", "item": "task", "thread_id": "C:1"}
+        with patch.object(main, "load_state", return_value=state), patch.object(main, "save_state"), \
+             patch.object(main, "_ensure_task_language"), patch.object(main, "_announce_state"), \
+             patch.object(main, "_credential_tick"), patch.object(main, "check_commands", return_value=False), \
+             patch.object(main, "_dispatch_conversation", return_value=False), \
+             patch.object(main, "_dispatch_feedback", return_value=False), patch.object(main, "_receive_feedback"), \
+             patch.object(main, "_maybe_ping"), patch.object(main.task_records, "apply_contacts"), \
+             patch.object(main.gmail_client, "retry_deliveries"), \
+             patch.object(main.gmail_client, "poll_reply", return_value=None), \
+             patch.object(main.gmail_client, "wait", side_effect=SystemExit("stop")) as wait, \
+             patch.object(main.config, "TARGET_MODE", "repo"), patch.object(main.config, "POLL_INTERVAL_SECONDS", 120), \
+             patch.object(main.log, "debug") as debug:
+            with self.assertRaisesRegex(SystemExit, "stop"):
+                main._run_loop()
+        wait.assert_called_once_with(2)
+        debug.assert_not_called()
+
     def test_exhausted_network_retry_logs_pause_instead_of_another_retry(self):
         state = {"state": "EXPLORING", "item": "task", "task_language": "English"}
         with patch.object(main, "load_state", return_value=state), \

@@ -32,7 +32,7 @@ class DriveClientTests(unittest.TestCase):
         self.files.list.return_value.execute.return_value = {"files": []}
         self.files.get.return_value.execute.return_value = {"parents": ["folder-42", "folder-new", "folder-old", "f1"]}
         self.service.permissions.return_value.list.return_value.execute.return_value = {
-            "permissions": [{"type": "domain", "domain": "aloi.tech", "role": "reader"}]}
+            "permissions": [{"type": "domain", "domain": "example.com", "role": "reader"}]}
         patches = [
             patch.object(drive_client, "_drive_service", return_value=self.service),
             patch.object(config, "DRIVE_FOLDER_ID", ""),

@@ -6,7 +6,7 @@ import prompts
 
 def unresolved(report):
     return [item for item in report.get("checks", [])
-            if item.get("status") not in ("pass", "skipped") or item.get("gate", {}).get("status") != "pass"]
+            if item.get("gate", {}).get("status") != "pass"]
 
 
 def prompt(state, context):
@@ -20,9 +20,11 @@ def prompt(state, context):
             "used by the controller check; prove the import works there. Installing into "
             "another interpreter does not repair this check. Do not ask the user to SSH, "
             "edit the bot, install packages or approve tools.\n"
-            "The default response to EVERY failure is IMPLEMENT A FIX, not ask the user "
-            "what to do. Repair code/tests/runner defects, including inherited defects "
-            "that block the requested checks, within the approved intent. "
+            "Repair approved behavior and operational prerequisites, not arbitrary inherited product debt. "
+            "Use extensive cheap unit/functional tests, then focused E2E for changed behavior. "
+            "An unfiltered full E2E audit is not required for this feature gate and must not be rerun. "
+            "Respect an already recorded scope exclusion; do not ask the same question again or implement "
+            "unrelated functionality just to make the full suite green. Keep the audit's failures explicit. "
             "Preserve implementation, unrelated work and Git history. Commit intended "
             "tracked repairs locally on the task branch; never push, merge a PR, rewrite "
             "scope/approval or disable checks/rules. Do not fix an unrelated historical "
@@ -38,8 +40,8 @@ def prompt(state, context):
             "runtime prerequisite; do not modify the "
             "immutable base or fabricate comparison results.\n"
             "Run minimal focused diagnostics/probes to prove the repair. Do NOT rerun "
-            "full suites or baseline suites: after your turn the controller reruns "
-            "unresolved checks and reuses valid unaffected checks. A previous no-change "
+            "full suites or baseline suites: after your turn the controller runs cheap and selected focused "
+            "checks within its audit budget and reuses valid unaffected checks. A previous no-change "
             "attempt is not progress: change the diagnosis/repair approach or ask one "
              "concrete human decision with 2-4 options and consequences. Never just "
              "recommend ignoring errors or repeating the same check.\n"

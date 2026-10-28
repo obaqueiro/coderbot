@@ -108,16 +108,23 @@ def decision(state, phase, question=None):
         binary = True
     elif name in ("content blocked", "texto bloqueado"):
         target = stage
-        title = "How should we handle the provider-blocked message?"
-        options = [_option("Provide reformulated text; do not resend the blocked text (Recommended)",
-                           "Use this reformulated message:", details=True),
-                   _option("Keep waiting without retrying the blocked message", "", wait=True)]
+        user = state.get("provider_block", {}).get("source") == "user reply"
+        spanish = state.get("task_language", "").casefold() == "spanish"
+        title = ("¿Cómo seguimos con el intento bloqueado por el proveedor?" if spanish else
+                 "How should we continue after this provider-blocked attempt?")
+        label = (("Enviar una versión revisada del mensaje citado; incluye el texto" if user else
+                  "Indicar cómo continuar con la solicitud interna citada; incluye instrucciones") if spanish else
+                 ("Send revised wording for the quoted user message; include the text" if user else
+                  "Provide recovery instructions for the quoted bot request; include details"))
+        options = [_option(label, "Recovery instructions:", details=True),
+                   _option("Mantener la pausa; conservar trabajo y evidencias" if spanish else
+                           "Keep paused; preserve work and evidence", "", wait=True)]
     elif name.startswith("stuck in") or name == "service unavailable" or (name == "clarification needed" and stage == "WAIT_STUCK"):
         target = "WAIT_STUCK"
         title = "How should I recover this stopped step?"
-        options = [_option("Provide recovery instructions (Recommended)", "Recovery instructions:", details=True),
-                   _option("Retry the same step; this does not prove it passed", "retry"),
-                   _option("Keep waiting and preserve the work", "", wait=True)]
+        options = [_option("Retry the same step with existing gates; reuse valid evidence, do not mark it complete", "retry"),
+                    _option("Provide specific recovery instructions; include what to change", "Recovery instructions:", details=True),
+                    _option("Keep waiting and preserve the work", "", wait=True)]
     elif "stuck" in name:
         title = "How should I continue the blocked step?"
         options = [_option("Continue with specific repair or investigation guidance (Recommended)",
@@ -140,16 +147,73 @@ def decision(state, phase, question=None):
                 "wait_state": target, "provided_choices": False, "agent_question": True}
     else:
         return None
-    return {"question": title, "options": options, "binary": binary, "wait_state": target}
+    return {"question": title, "options": options, "binary": binary, "wait_state": target,
+            "language": state.get("task_language", "English") if name in ("content blocked", "texto bloqueado") else "English"}
 
 
 def render_decision(value):
-    lines = ["Decision needed: " + value["question"]]
+    spanish = value.get("language", "").casefold() == "spanish"
+    lines = [("Decisión necesaria: " if spanish else "Decision needed: ") + value["question"]]
     lines += [f"{n}. {option['label']}" for n, option in enumerate(value["options"], 1)]
-    lines.append("Reply Yes/No or 1/2; you may also describe requested changes." if value["binary"] else
+    lines.append("Responde con el número de opción y los detalles solicitados, o escribe otra alternativa." if spanish else
+                 "Reply Yes/No or 1/2; you may also describe requested changes." if value["binary"] else
                  "Reply with the option number; include details if requested. You may also write your own answer."
                  if value["options"] else "Reply in full text with the requested information.")
     return "\n".join(lines)
+
+
+def stopped_notice(context):
+    """Make cause, impact and available evidence readable before asking for action."""
+    import diagnostics
+    lines = ["Cause: " + diagnostics.summary(detail=context["cause"]),
+             "Impact: " + context.get("impact", "This step stopped; its outcome is not established.")]
+    attempts = context.get("recovery", {}).get("recorded_attempts")
+    if attempts is not None:
+        lines.append(f"Recovery: {attempts} recorded check-plan repair attempts; this count alone does not prove fresh provider calls.")
+    else:
+        lines.append("Recovery: automatic work paused; no completed repair count is available.")
+    final = context.get("verification") or {}
+    checks = final.get("checks", [])
+    accepted = [c.get("check", "check") for c in checks if c.get("gate", {}).get("status") == "pass"]
+    lines.append("Recorded verification: stage " + str(final.get("stage", "unavailable")) +
+                 "; " + str(len(accepted)) + "/" + str(len(checks)) + " check gates accepted" +
+                 (" (" + ", ".join(accepted[:4]) + ")" if accepted else "") +
+                 ". This is recorded evidence, not a claim that all checks passed.")
+    lines.append("Work and evidence are preserved. Resuming retains verification gates; it does not authorize completion, push or merge.")
+    return "\n".join(lines)
+
+
+def provider_notice(block, language="English"):
+    """Quote the submitted text, not an invented filter trigger or withheld response."""
+    spanish = language.casefold() == "spanish"
+    user = block["source"] == "user reply"
+    lines = ["El proveedor bloqueó este intento; detuve los reintentos automáticos y conservé el trabajo y las evidencias." if spanish else
+             "The provider blocked this attempt; automatic retries stopped and work and evidence are preserved."]
+    lines.append(("Origen: respuesta tuya. Cambia el texto citado si quieres enviarlo de nuevo." if user else
+                  "Origen: solicitud interna del bot durante " + block["phase"] + "; no es un mensaje tuyo que debas reformular.") if spanish else
+                 ("Source: your reply. Revise the quoted text if you want to send it again." if user else
+                  "Source: bot-generated request during " + block["phase"] + "; this is not your message to rephrase."))
+    lines.append("El proveedor no identificó el fragmento causante; el texto enviado no prueba qué activó el filtro." if spanish else
+                 "The provider did not identify the triggering passage; submitted text alone does not establish what triggered the filter.")
+    for key, label, limit in (("user_text", "Tu mensaje" if spanish else "Your message", None),
+                              ("request", "Solicitud enviada al proveedor" if spanish else "Request submitted to provider", 1800),
+                              ("partial_response", "Respuesta parcial disponible (no completada)" if spanish else "Available partial response (not completed)", 600)):
+        text = block.get(key)
+        if not text:
+            continue
+        clipped = limit is not None and len(text) > limit
+        excerpt = (text[:300] + "\n[…]\n" + text[-(limit - 300):]) if clipped else text
+        lines.append(label + (" (extracto; texto completo redactado adjunto):" if spanish else " (excerpt; complete redacted text attached):")
+                     if clipped else label + ":")
+        # A quote remains visible even when its text is JSON, unlike a raw payload.
+        lines.append("\n".join("> " + line for line in excerpt.splitlines()))
+    if not block.get("request") and not block.get("user_text"):
+        lines.append("El texto enviado no está disponible en este incidente; no voy a inventarlo." if spanish else
+                     "Submitted text is unavailable for this incident; I will not invent it.")
+    if not block.get("partial_response"):
+        lines.append("No hay texto de respuesta bloqueada disponible para citar." if spanish else
+                     "No blocked response text is available to quote.")
+    return "\n\n".join(lines)
 
 
 def remember_decision(state, phase, question=None):
@@ -253,6 +317,10 @@ def verification(state: dict) -> str:
             lines.append(f"  Skipped ({check.get('skipped', 'missing credential')}); not reported as passed.")
         if check.get("zero_tests"):
             lines.append("  Executed 0 tests; this is not evidence of working behaviour.")
+    for audit in final.get("audit_checks", []):
+        lines.append(f"- Historical full E2E audit: {audit.get('status', 'unavailable')}; "
+                     "not required for the focused feature gate, not current verification. "
+                     + str(audit.get("report") or audit.get("reason", "")))
     if gate.get("preexisting"):
         lines.append("- Confirmed pre-existing failures: " + "; ".join(gate["preexisting"]))
     lines.append("- Internal review: passed" if review.get("status") == "pass"
@@ -291,5 +359,7 @@ def concise_verification(state):
         "not applicable" if not state.get("has_e2e_harness") else
         "passed" if state.get("e2e_passed") else "outcome unavailable")
     return (f"Verification: {accepted}/{len(checks)} final checks accepted; "
-            f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
-            "Detailed outcomes and exceptions are in the verification report.")
+             f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
+             + ("Historical full E2E audits are separate, non-required, and not reported as green. "
+                if final.get("audit_checks") else "")
+             + "Detailed outcomes and exceptions are in the verification report.")

@@ -3,8 +3,8 @@
 `do_pick` (main.py) already runs before any e2e- or review-specific code, on
 the freshly checked-out `main`. `do_e2e` and `do_open_pr` are the two places
 that currently assume harness/workflow presence unconditionally. See
-proposal.md - Why for the concrete failure mode against
-`processing-interface-claude-analytics`, and for why gating should degrade to
+proposal.md - Why for the failure mode against a target without a harness,
+and for why gating should degrade to
 "fix it via the backlog" rather than "skip forever" and why not every target
 repo has a frontend to drive with Playwright.
 

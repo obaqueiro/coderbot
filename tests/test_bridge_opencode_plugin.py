@@ -77,6 +77,31 @@ await start('next');
 await hook['tool.execute.after']({callID:'next'});
 """)
 
+    def test_queue_timeout_defaults_to_200_seconds_and_preserves_overrides(self):
+        self.run_script(r"""
+import assert from 'node:assert/strict';
+import {CoderbotOpenSpecPlugin} from './agent-plugin/.opencode/plugins/coderbot-openspec.js';
+process.env.CODEBOT_MAX_SUBAGENTS = '1';
+for (const [override, seconds] of [[undefined, 200], ['75', 75]]) {
+  if (override === undefined) delete process.env.CODEBOT_LOCAL_TOOL_TIMEOUT;
+  else process.env.CODEBOT_LOCAL_TOOL_TIMEOUT = override;
+  const hook = await CoderbotOpenSpecPlugin({serverUrl:'http://localhost', directory:'/scratch',
+    fetch:async () => ({ok:true, json:async () => ({id:'root'})})});
+  await hook['tool.execute.before']({tool:'task', callID:'first', sessionID:'root'}, {});
+  const original = globalThis.setTimeout;
+  let observed;
+  globalThis.setTimeout = (fn, ms) => {observed = ms; return original(fn, 0);};
+  try {
+    await assert.rejects(hook['tool.execute.before']({tool:'task', callID:'queued', sessionID:'root'}, {}),
+      /Subagent queue timeout/);
+  } finally {
+    globalThis.setTimeout = original;
+    await hook['tool.execute.after']({callID:'first'});
+  }
+  assert.equal(observed, seconds * 1000);
+}
+""")
+
     def test_invalid_concurrency_is_rejected(self):
         self.run_script(r"""
 import assert from 'node:assert/strict';

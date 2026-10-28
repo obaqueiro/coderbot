@@ -88,6 +88,10 @@ def observe(event):
     kind = event.get("type")
     part = event.get("part") or {}
     session = event.get("sourceSessionID") or event.get("sessionID")
+    # Pending argument generation/queueing is not tool execution. The aggregate
+    # agent deadline still bounds it; do not start or refresh a tool watchdog.
+    if kind == "tool_start" and (part.get("state") or {}).get("status") != "running":
+        return
     progress = kind in ("tool_start", "tool_use", "step_finish", "text", "reasoning")
     if progress and session:
         with _lock:
@@ -154,20 +158,26 @@ def resources(names):
     with _lock:
         locks = [_resource_locks.setdefault(name, threading.Lock()) for name in sorted(set(names))]
     acquired = []
+    waiting = begin("resource_wait", "exclusive check resource", 3600) if locks else None
     try:
         for lock in locks:
-            if not lock.acquire(timeout=remaining(900)):
+            if not lock.acquire(timeout=remaining(3600)):
                 raise TimeoutError("Exclusive execution resource unavailable")
             acquired.append(lock)
+        if waiting:
+            finish(waiting)
+            waiting = None
         yield
     finally:
+        if waiting:
+            finish(waiting)
         for lock in reversed(acquired):
             lock.release()
 
 
 def run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cleanup=None,
         exclusive=()):
-    with budget(timeout), resources(exclusive):
+    with resources(exclusive), budget(timeout):
         return _run(argv, cwd=cwd, env=env, timeout=timeout, input=input, kind=kind, cleanup=cleanup)
 
 

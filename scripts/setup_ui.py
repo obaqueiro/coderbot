@@ -10,7 +10,8 @@ from scripts.setup import (PRIMARY_PAGES, authorize_google, authenticate_opencod
                            fetch_jira_projects, fetch_jira_statuses, fetch_github_projects,
                            fields_for, fetch_slack_channels, sync_to_vm, test_all, test_section)
 from scripts.setup_catalog import (BY_KEY, GITHUB_TOKEN_URL, JIRA_API_TOKEN_URL, JIRA_STATUS_KEYS,
-                                   SLACK_APP_SETTINGS_URL, effective, normalize_value,
+                                   SLACK_APP_SETTINGS_URL, SELF_HEAL_OPTIONS, SELF_HEAL_SETUP_HELP,
+                                   effective, normalize_value,
                                     validate_value)
 from scripts.setup_env import EnvFile
 
@@ -209,6 +210,7 @@ class SetupApp(App[bool]):
         self.query_one("#message", Static).update("")
         description = ("All configuration keys are searchable, including settings for inactive integrations."
                        if page == "Advanced" else
+                       SELF_HEAL_SETUP_HELP if page == "Self-healing" else
                        "Test this section, then Save and Close to persist it. Discard returns to the menu.")
         self.query_one("#description", Static).update(description)
         form = self.query_one("#fields", VerticalScroll)
@@ -265,6 +267,10 @@ class SetupApp(App[bool]):
                                       value=value if value in joined_ids else Select.NULL,
                                       prompt="Choose a joined public channel",
                                       id=f"setting-{setting.key}"))
+            elif setting.key == "CODEBOT_SELF_HEAL":
+                widgets.append(Select(SELF_HEAL_OPTIONS,
+                                      value=value if value in setting.choices else "off",
+                                      allow_blank=False, id=f"setting-{setting.key}"))
             elif setting.kind == "exact_bool":
                 widgets.append(Select([("YES", "true"), ("NO", "false")],
                                       value="true" if value == "true" else "false",
@@ -448,6 +454,7 @@ class SetupApp(App[bool]):
             "Conversation": {"Backlog", "Evidence"},
             "Evidence": {"Backlog", "Conversation"},
             "Agent": set(),
+            "Self-healing": set(),
             "Advanced": set(PRIMARY_PAGES),
         }
         self.completed.difference_update(dependents[section])

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 1060" role="img" aria-labelledby="seq-title seq-desc">
+            <title id="seq-title">Secuencia de datos y procesos desde backlog hasta merge</title><desc id="seq-desc">El controlador obtiene una tarea, guarda claim y contexto, pide propuesta al agente y aprobación a la persona. Tras implementar y verificar, publica PR, atiende reviews, genera evidencia y la entrega. La persona autoriza merge y el controlador comprueba y actualiza el backlog.</desc>
+            <style>text{font-family:Arial,Helvetica,sans-serif;fill:#e7edf6;font-size:15px}.small{font-size:12px;fill:#aab9cf}.tiny{font-size:11px;fill:#aab9cf}.title{font-size:17px;font-weight:650}.box{fill:#18243a;stroke:#2b3b55;stroke-width:1.5}.ctl{fill:#152e48;stroke:#77baff;stroke-width:1.5}.human{fill:#332c25;stroke:#ffd080;stroke-width:1.5}.agent{fill:#29233e;stroke:#c4afff;stroke-width:1.5}.pass{fill:#15322e;stroke:#64dfbb;stroke-width:1.5}.fail{fill:#352630;stroke:#ffa6af;stroke-width:1.5}.edge{fill:none;stroke:#86a0c0;stroke-width:2;marker-end:url(#arrow)}.dash{stroke-dasharray:6 5}.zone{fill:none;stroke:#2b3b55;stroke-width:1.5;stroke-dasharray:7 5}.mono{font-family:monospace;font-size:13px}</style><defs><marker id="seq-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#86a0c0"/></marker></defs>
+            <g stroke="#394e6a" stroke-dasharray="5 6"><path d="M105 90 V1015 M285 90 V1015 M490 90 V1015 M710 90 V1015 M930 90 V1015 M1090 90 V1015"/></g>
+            <rect class="box" x="25" y="25" width="160" height="60" rx="10"/><text x="105" y="50" text-anchor="middle" class="title">Backlog</text><text x="105" y="71" text-anchor="middle" class="small">Ticket / issue / doc</text>
+            <rect class="human" x="205" y="25" width="160" height="60" rx="10"/><text x="285" y="50" text-anchor="middle" class="title">Persona / hilo</text><text x="285" y="71" text-anchor="middle" class="small">Slack / Email</text>
+            <rect class="ctl" x="395" y="25" width="190" height="60" rx="10"/><text x="490" y="50" text-anchor="middle" class="title">Controlador</text><text x="490" y="71" text-anchor="middle" class="small">FSM + ledger + estado</text>
+            <rect class="agent" x="620" y="25" width="180" height="60" rx="10"/><text x="710" y="50" text-anchor="middle" class="title">Agente</text><text x="710" y="71" text-anchor="middle" class="small">Workspace + OpenSpec</text>
+            <rect class="pass" x="830" y="25" width="200" height="60" rx="10"/><text x="930" y="50" text-anchor="middle" class="title">Checks / evidencia</text><text x="930" y="71" text-anchor="middle" class="small">Procesos + outbox</text>
+            <rect class="box" x="1045" y="25" width="90" height="60" rx="10"/><text x="1090" y="50" text-anchor="middle">Externos</text><text x="1090" y="71" text-anchor="middle" class="tiny">GitHub / Drive</text>
+            <g fill="none" stroke="#86a0c0" stroke-width="1.8" marker-end="url(#seq-arrow)">
+              <path d="M490 126 H105"/><path stroke-dasharray="5 4" d="M105 164 H490"/>
+              <path d="M490 199 H105"/><path d="M490 232 H510 V250 H490"/>
+              <path d="M490 285 H710"/><path stroke-dasharray="5 4" d="M710 321 H490"/>
+              <path d="M490 357 H285"/><path stroke-dasharray="5 4" d="M285 395 H490"/>
+              <path d="M490 438 H710"/><path stroke-dasharray="5 4" d="M710 476 H490"/>
+              <path d="M490 514 H930"/><path stroke-dasharray="5 4" d="M930 551 H490"/>
+              <path d="M490 603 H1090"/><path stroke-dasharray="5 4" d="M1090 643 H490"/>
+              <path d="M490 688 H930"/><path stroke-dasharray="5 4" d="M930 732 H490"/>
+              <path d="M490 782 H1090"/><path stroke-dasharray="5 4" d="M1090 820 H490"/>
+              <path d="M490 859 H285"/><path stroke-dasharray="5 4" d="M285 902 H490"/>
+              <path d="M490 950 H1090"/><path d="M490 995 H105"/>
+            </g>
+            <g class="small">
+              <text x="130" y="117">1. Listar candidatos elegibles</text><text x="130" y="155">Ticket + detalles + imágenes + ID</text>
+              <text x="130" y="190">2. Claim de instancia / estado activo</text><text x="525" y="241">Rama + base_sha + task_id persistidos</text>
+              <text x="515" y="275">3. Explorar → proponer</text><text x="515" y="311">OpenSpec: propuesta / diseño / specs / tasks</text>
+              <text x="297" y="347">4. Propuesta + decisión visible</text><text x="297" y="385">Aprobación explícita o cambios de propuesta</text>
+              <text x="515" y="428">5. Implementar + verificar + revisar</text><text x="515" y="466">Commits + contratos + checks focalizados</text>
+              <text x="515" y="504">6. Plan completo + identidad de contenido/entorno</text><text x="515" y="541">Exit, JSON, logs, resultados por run</text>
+              <text x="515" y="593">7. Archivar OpenSpec, push y abrir/actualizar PR</text><text x="515" y="633">URL / head confirmados + review/threads, si aplica</text>
+              <text x="515" y="678">8. Capturar demos actuales y validar inventario/vídeos</text><text x="515" y="722">Manifiesto + hash + MP4 reproducible (o Newman HTML)</text>
+              <text x="515" y="772">9. Drive: upload + acceso; GitHub: sync del enlace</text><text x="515" y="810">Archivo/verificación remota + lectura del body PR</text>
+              <text x="297" y="849">10. Cover de revisión + vídeo / reporte real</text><text x="297" y="892">Decisión de merge en el mismo hilo, sin ambigüedad</text>
+              <text x="515" y="939">11. Comprobar snapshot, estado, conflictos y threads → merge</text><text x="130" y="984">12. Marcar Done, liberar claim y volver a IDLE</text>
+            </g>
+            <rect class="zone" x="385" y="413" width="650" height="156" rx="10"/><text x="401" y="566" class="tiny">BUCLE: si falla, diagnosticar / implementar fix / reverificar antes de publicar.</text>
+            <rect class="zone" x="385" y="660" width="650" height="96" rx="10"/><text x="401" y="750" class="tiny">BUCLE: run incompleto → grabación completa; falta implementación → reparación + revisión + checks.</text>
+            <text x="26" y="1041" class="small">Cada confirmación relevante queda en estado de ejecución, ledger, manifiestos o recibos antes de reutilizarse.</text>
+          </svg>

@@ -1,12 +1,12 @@
 ## Context
 
-See proposal.md. Recording scans both raw and HTML copies, finalization caches all return values as completed, Drive returns links even when sharing fails, and feedback investigation sends answer text without attachments. The deployed PICA harness accepts grep arguments but validates the unfiltered inventory. Its fix is a separate repo-local change; codebot must not silently waive its exit status.
+See proposal.md. Recording scans both raw and HTML copies, finalization caches all return values as completed, Drive returns links even when sharing fails, and feedback investigation sends answer text without attachments. Target harnesses may reject filtered recordings; codebot must not silently waive their exit status.
 
 ## Goals / Non-Goals
 
 **Goals:** Share one controller-owned delivery service across finalization, feedback updates and explicit delivery requests; retain durable provenance and step-specific recovery.
 
-**Non-Goals:** Change product behavior, bypass final checks, auto-merge, deploy automatically, publish PR #114 during tests, or mutate another repo from this change.
+**Non-Goals:** Change product behavior, bypass final checks, auto-merge, deploy automatically, publish a live PR during tests, or mutate another repo from this change.
 
 ## Decisions
 
@@ -26,8 +26,8 @@ See proposal.md. Recording scans both raw and HTML copies, finalization caches a
 - Sharing policies differ → explicit modes, blocked access outcome and targeted clarification; no automatic public escalation.
 - LLM classification can omit mixed requirements → structured validation, preserved original request and regression coverage.
 - External side effects cannot be transactional with SQLite → reconcile by artifact hash, file id, PR section and existing message receipt before retry.
-- PICA harness fix is outside this change → document the exact filtered-inventory contract and keep codebot failure reporting strict until a separate PICA change is applied.
+- Target harness behavior is outside this change → keep codebot failure reporting strict without encoding application-specific validator contracts.
 
 ## Migration Plan
 
-Run regression tests locally, review changes, then deploy only on explicit authorization. Reconcile legacy empty/stale checkpoints lazily using validators, retaining their audit trail. Configure authorized sharing before live delivery. Separately fix/test the PICA validator in its intended branch. For PR #114, explicitly authorize recovery, verify the current head, regenerate if provenance is insufficient, upload, verify access and PR section, and notify without merging. Rollback preserves source media and durable upload identities; new structured data must remain readable or ignored safely by legacy callers.
+Run regression tests locally, review changes, then deploy only on explicit authorization. Reconcile legacy empty/stale checkpoints lazily using validators, retaining their audit trail. Configure authorized sharing before live delivery. For an existing PR, explicitly authorize recovery, verify the current head, regenerate if provenance is insufficient, upload, verify access and PR section, and notify without merging. Rollback preserves source media and durable upload identities; new structured data must remain readable or ignored safely by legacy callers.

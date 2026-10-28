@@ -1,6 +1,7 @@
 """Live progress is channel-neutral, bounded and never replaces user messages."""
 import json
 import logging
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +38,32 @@ class ProgressCapture(unittest.TestCase):
             agent_runner._stream_line(json.dumps({"type": "tool_use", "part": {
                 "tool": "task", "state": {"input": {"prompt": "PRIVATE PROMPT"}, "output": "PRIVATE OUTPUT"}}}))
             self.assertNotIn("PRIVATE", str(progress.snapshot(self.state)))
+
+    def test_controller_checks_publish_safe_progress_from_parallel_context(self):
+        import checks
+        from check_plan import Check
+        from execution_store import ExecutionStore
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ExecutionStore(root / "data/execution.sqlite")
+            check = Check("unit", ["sh", "-c", "echo PRIVATE_COMMAND"])
+            with patch.object(checks, "tool_versions", return_value={}), \
+                 patch.object(checks, "check_environment", return_value={}), \
+                 patch.object(checks.operations, "run", return_value=subprocess.CompletedProcess(
+                     check.argv, 0, "PRIVATE_OUTPUT", "")):
+                checks.execute_plan([check], root, store, "task")
+                first = progress.snapshot(self.state)
+                self.assertIn("check started: unit", str(first))
+                self.assertIn("check finished: unit status=pass", str(first))
+                checks.execute_plan([check], root, store, "task")
+                snapshot = progress.snapshot(self.state)
+            self.assertEqual(len(snapshot["log_lines"]), 3)
+            self.assertIn("check reused: unit status=pass", str(snapshot))
+            self.assertNotIn("PRIVATE", str(snapshot))
+            self.assertNotIn(str(root), str(snapshot))
+            rendered = slack._render_progress("Task", snapshot)
+            self.assertIn("check finished: unit", rendered)
+            self.assertIn("```", rendered)
 
     def test_redacts_credentials_before_truncation_and_escapes_fences(self):
         with patch.dict("os.environ", {"EXAMPLE_API_KEY": "super-private-value"}):

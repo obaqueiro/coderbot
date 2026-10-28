@@ -12,6 +12,8 @@ import secret_store
 import handoffs
 import turn_control
 import operations
+import check_plan
+import prompts
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ or read raw JSON to discover what you are asking. Attach logs/specs/full technic
 reports as supporting material, not as a replacement for the conversation.
 """
 
-SENTINEL_CONTRACT = f"""
+SENTINEL_CONTRACT = prompts.MINIMAL_CHANGE_POLICY + prompts.TESTING_POLICY + f"""
 You are running headlessly with no interactive user. If at any point you need
 the user to answer a question or make a decision, do NOT ask interactively.
 Instead, END your response with a line starting exactly with `{SENTINEL}`
@@ -47,6 +49,10 @@ followed by exactly one self-contained question. Put each numbered option on its
 own following line, then stop working and wait for that answer. Do not repeat the
 question in your preceding summary or ask another decision in the same turn.
 Otherwise finish the work and summarize what you did.
+Controller configuration, duplicate check registrations and bounded timeout increases
+are operational repairs, not human decisions. Emit CHECK_PLAN with explicit timeout
+values when needed; never ask the user to edit the controller for them. Keep ATTACH
+and CHECK_PLAN contracts separate from the final question.
 Make the question self-contained: explain the decision, available options and
 important consequences in plain language. Do not emit only 'answer the attached
 question' or put the actionable request solely in an attachment.
@@ -72,7 +78,7 @@ def sentinel_preamble(output: str) -> str:
     lines = output.splitlines()
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].startswith(SENTINEL):
-            return "\n".join(lines[:i]).strip()
+            return check_plan.visible_text("\n".join(lines[:i])).strip()
     return ""
 
 
@@ -86,7 +92,7 @@ def sentinel_question(output: str) -> str | None:
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].startswith(SENTINEL):
             tail = "\n".join([lines[i][len(SENTINEL):], *lines[i + 1:]])
-            return tail.strip()
+            return check_plan.visible_text(tail).strip()
     return None
 
 
@@ -202,15 +208,16 @@ def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
 
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
-def _invoke(args: list[str], prompt: str) -> ClaudeResult:
+def _invoke(args: list[str], prompt: str, *, effort=None) -> ClaudeResult:
     global _fallback_until
-    proc, model = _invoke_with_model(args, prompt, _active_model())
+    options = {"effort": effort} if effort is not None else {}
+    proc, model = _invoke_with_model(args, prompt, _active_model(), **options)
     if (proc.returncode != 0 and _is_usage_exhausted(proc) and _fallback_model()
             and model != _fallback_model()):
         log.warning("model %s is out of usage credits; falling back to %s for %ds",
                     model, _fallback_model(), config.CLAUDE_FALLBACK_COOLDOWN_SECONDS)
         _fallback_until = time.monotonic() + config.CLAUDE_FALLBACK_COOLDOWN_SECONDS
-        proc, model = _invoke_with_model(args, prompt, _fallback_model())
+        proc, model = _invoke_with_model(args, prompt, _fallback_model(), **options)
     if (proc.returncode != 0 and _is_usage_exhausted(proc)
             and model == _fallback_model()):
         # The fallback itself is exhausted; stop pinning it so the next cycle starts
@@ -226,9 +233,10 @@ def _invoke(args: list[str], prompt: str) -> ClaudeResult:
 
 
 def _invoke_with_model(args: list[str], prompt: str,
-                       model: str) -> tuple[subprocess.CompletedProcess, str]:
+                       model: str, *, effort=None) -> tuple[subprocess.CompletedProcess, str]:
+    effort = effort if effort is not None else config.CLAUDE_EFFORT
     cmd = ["claude", *args, "-p", prompt, "--model", model,
-           "--effort", config.CLAUDE_EFFORT,
+           "--effort", effort,
            "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
            "--plugin-dir", str(config.OPENSPEC_SKILLS_DIR),
@@ -240,7 +248,7 @@ def _invoke_with_model(args: list[str], prompt: str,
     elif config.USE_CAVEMAN:
         cmd.extend(["--plugin-dir", str(config.CAVEMAN_PLUGIN_DIR)])
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
-             " ".join(args) or "run", model, config.CLAUDE_EFFORT,
+             " ".join(args) or "run", model, effort,
              len(prompt), _config_report())
     proc = _run(cmd)
     if proc.returncode != 0 and _is_config_corrupt(proc.stderr):
