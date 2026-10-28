@@ -35,12 +35,27 @@ def invalidate_environment(store, repo, check_ids):
 
 def execute_plan(plan, repo, store, task_id, *, workers=3, audit_task=None):
     plan = check_plan.normalize(plan, repo)
+    # The same command declared under several ids (or scopes, kinds, inputs) runs once;
+    # every id gets that run's result. Tests are the most expensive thing coderbot does.
+    runs = check_plan.merge_runs(plan, repo)
+    for merged, members in runs:
+        if len(members) > 1:
+            log.info("running %s once for %d declared checks: %s", merged.id, len(members),
+                     ", ".join(m.id for m in members))
     # Each process takes sorted exclusive resources before launch. Preserve result
     # order for deterministic reporting, independently of completion order.
     with ThreadPoolExecutor(max_workers=workers) as pool:
         kwargs = {"audit_task": audit_task} if audit_task else {}
-        futures = [pool.submit(copy_context().run, execute, check, repo, store, task_id, **kwargs) for check in plan]
-        return [future.result() for future in futures]
+        futures = [pool.submit(copy_context().run, execute, merged, repo, store, task_id, **kwargs)
+                   for merged, _ in runs]
+        results = {id(merged): future.result() for (merged, _), future in zip(runs, futures)}
+    by_check = {}
+    for merged, members in runs:
+        for member in members:
+            result = results[id(merged)]
+            by_check[member.id] = result if member.id == merged.id else {
+                **result, "check": member.id, "same_run_as": merged.id}
+    return [by_check[check.id] for check in plan]
 
 
 def check_environment():
@@ -88,8 +103,11 @@ def execute(check, repo, store, task_id, *, reuse=True, audit_task=None):
         key_path=store.path.parent / "identity.key")
     from check_baseline import dependency_snapshot, dependency_inputs
     dependencies = dependency_snapshot(repo, dependency_inputs(check, repo))
-    identity = digest({"content": content, "environment": environment, "check": contract, "timeout": check.timeout,
-                       "dependencies": dependencies, "version": 3})
+    # Identity is what ran and what it ran on: not the check's id, timeout, scope or kind,
+    # so a re-declared identical command reuses its result instead of running again.
+    identity = digest({"content": content, "environment": environment,
+                       "check": json.loads(check_plan.run_key(check, repo)),
+                       "dependencies": dependencies, "version": 4})
     previous = store.reusable_check(task_id, identity) if reuse and not preparation_error else None
     if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown", "skipped"):
         log.info("check reused: %s status=%s report=%s", check.id,
@@ -97,6 +115,7 @@ def execute(check, repo, store, task_id, *, reuse=True, audit_task=None):
                  extra={"public_progress": f"check reused: {check.id} status={previous['data']['result']['status']}"})
         return {**previous["data"]["result"], "check": check.id, "reused": True}
     if (previous and previous["data"]["result"].get("reason") == "execution_timeout"
+            and previous["data"]["result"].get("timeout", 3600) >= 3600
             and check_plan.is_harness(check, repo) and check.timeout >= 3600):
         # A timed-out attempt at the ceiling is not a pass and not permission to
         # run the same unchanged suite forever. Changed source/environment can retry.
@@ -148,6 +167,7 @@ def execute(check, repo, store, task_id, *, reuse=True, audit_task=None):
         result = {"status": "infrastructure", "failures": {}, "exit_code": None}
         if isinstance(error, subprocess.TimeoutExpired):
             result["reason"] = "execution_timeout"
+            result["timeout"] = check.timeout  # escalation compares against what actually ran
     except BaseException:
         store.put("check_run", task_id=task_id, id=run_id, identity=identity,
                   status="interrupted", data={"check": check.id})

@@ -83,3 +83,46 @@ class CheckExecutionPolicyTests(unittest.TestCase):
         for value in (float("inf"), float("nan"), True, "1800", -1):
             with self.assertRaises(ValueError):
                 check_plan.Check("invalid", ["echo"], timeout=value)
+
+
+class DuplicateRuns(unittest.TestCase):
+    """Running tests is the most expensive thing coderbot does: never twice for one command."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.store = ExecutionStore(self.root / "data/execution.sqlite")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_plan(self, plan, run):
+        with patch.object(checks, "tool_versions", return_value={}), \
+             patch.object(checks, "check_environment", return_value={}), \
+             patch.object(checks.operations, "run", side_effect=run) as launched:
+            return checks.execute_plan(plan, self.root, self.store, "task"), launched
+
+    def test_one_command_declared_under_several_ids_runs_once(self):
+        argv = ["bash", "e2e/run.sh", "greet.spec.ts"]
+        plan = [check_plan.Check("e2e", argv, scope="full"),
+                check_plan.Check("focused-e2e", argv, scope="focused", kind="e2e", inputs=["src"]),
+                check_plan.Check("e2e-greeting", argv, timeout=2400, inputs=["e2e/tests"])]
+        results, launched = self.run_plan(plan, lambda *a, **k: subprocess.CompletedProcess(argv, 0, "ok", ""))
+        self.assertEqual(launched.call_count, 1)
+        self.assertEqual([r["check"] for r in results], ["e2e", "focused-e2e", "e2e-greeting"])
+        self.assertEqual({r["status"] for r in results}, {results[0]["status"]})
+        self.assertEqual(results[1]["same_run_as"], "e2e")
+
+    def test_a_redeclared_command_reuses_the_earlier_result(self):
+        argv = ["python3", "-m", "unittest"]
+        done = lambda *a, **k: subprocess.CompletedProcess(argv, 0, "OK", "")
+        self.run_plan([check_plan.Check("unit", argv, timeout=300)], done)
+        results, launched = self.run_plan([check_plan.Check("unit-again", argv, timeout=900, scope="focused")], done)
+        self.assertEqual(launched.call_count, 0)
+        self.assertTrue(results[0]["reused"])
+
+    def test_different_commands_still_run_separately(self):
+        plan = [check_plan.Check("a", ["python3", "-m", "unittest", "tests.a"]),
+                check_plan.Check("b", ["python3", "-m", "unittest", "tests.b"])]
+        _, launched = self.run_plan(plan, lambda argv, **k: subprocess.CompletedProcess(argv, 0, "OK", ""))
+        self.assertEqual(launched.call_count, 2)

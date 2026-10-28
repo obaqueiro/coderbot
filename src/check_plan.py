@@ -126,6 +126,34 @@ def execution_key(check, repo):
     return json.dumps(value, sort_keys=True)
 
 
+def run_key(check, repo):
+    """What actually executes: canonical argv, cwd, credentials, preparation and the
+    reporter that parses it. Two checks with the same run key produce the same result, so
+    it runs once, whatever their ids, scopes, kinds, timeouts or declared inputs."""
+    value = json.loads(execution_key(check, repo))
+    for key in ("inputs", "scope", "kind", "optional", "dependency_inputs"):
+        value.pop(key, None)
+    return json.dumps(value, sort_keys=True)
+
+
+def merge_runs(checks, repo):
+    """Group a plan by run key: [(merged check to execute, [member checks])]."""
+    groups = {}
+    for check in checks:
+        groups.setdefault(run_key(check, repo), []).append(check)
+    merged = []
+    for members in groups.values():
+        first = members[0]
+        inputs = list(dict.fromkeys(item for member in members for item in member.inputs))
+        merged.append((replace(first, inputs=["*"] if "*" in inputs else inputs,
+                               timeout=max(member.timeout for member in members),
+                               resources=sorted({r for member in members for r in member.resources}),
+                               kind="e2e" if any(m.kind == "e2e" for m in members) else first.kind,
+                               scope="focused" if any(m.scope == "focused" for m in members) else first.scope),
+                       members))
+    return merged
+
+
 def is_shell_syntax(check):
     """Recognize noninteractive no-exec options, not arguments passed to a script."""
     argv = check.argv
@@ -220,11 +248,15 @@ def normalize(checks, repo):
         previous = unique.get(key)
         resources = set(check.resources) | (set(previous.resources) if previous else set())
         timeout = max(check.timeout, previous.timeout if previous else 0)
+        inputs = check.inputs
         if is_e2e(check, repo):
             resources.add("harness:" + str(Path(repo).resolve()))
             timeout = min(3600, max(1800, timeout))
+            # An end-to-end run depends on the whole application, whatever inputs the agent
+            # declared; one content identity lets a re-declared run reuse its result.
+            inputs = ["*"]
         unique[key] = replace(check, id=previous.id if previous else check.id,
-                              timeout=timeout, resources=sorted(resources))
+                              timeout=timeout, resources=sorted(resources), inputs=inputs)
     return list(unique.values())
 
 
