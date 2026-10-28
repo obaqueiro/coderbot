@@ -786,3 +786,19 @@ class StuckOpenPrReply(unittest.TestCase):
     def test_pr_title_keys_are_reset_with_the_task(self):
         self.assertIn("pr_title", main.RESET_KEYS)
         self.assertIn("pr_title_guidance", main.RESET_KEYS)
+
+
+class ExplorationFields(unittest.TestCase):
+    def test_exploration_records_classification_and_pr_title_without_extra_calls(self):
+        from types import SimpleNamespace
+        state = {"item": "Permitir exportar CSV"}
+        main._record_exploration(state, SimpleNamespace(data={
+            "status": "done", "summary": "s", "classification": "architectural",
+            "pr_title": "Codebot[2] Exportar el informe mensual a CSV"}))
+        self.assertEqual(state["classification"], "architectural")
+        self.assertEqual(state["pr_title"], "Exportar el informe mensual a CSV")
+        guided = {"pr_title_guidance": "short"}
+        main._record_exploration(guided, SimpleNamespace(data={"pr_title": "x", "classification": "huge"}))
+        self.assertNotIn("pr_title", guided)
+        self.assertNotIn("classification", guided)
+        main._record_exploration({}, SimpleNamespace(output="prose only"))

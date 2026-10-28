@@ -1040,9 +1040,18 @@ def do_explore(state: dict) -> None:
         images=render_images(state.get("item_images", []))))
     if handle_result(state, result, "EXPLORING"):
         return
-    _undo_premature_work(state, "EXPLORING")
-    state["state"] = "PROPOSING"
-    announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
+    _continue_exploring(state, result)
+
+
+def _record_exploration(state: dict, result) -> None:
+    """Keep what the exploration decided: brainstorming's scale (drives planning) and a
+    PR title, so OPEN_PR needs no separate title call. Absent fields change nothing."""
+    data = getattr(result, "data", None) or {}
+    if data.get("classification") in ("spike", "bounded", "architectural"):
+        state["classification"] = data["classification"]
+    title = _clamp_pr_title(data.get("pr_title"), PR_TITLE_TARGET) if data.get("pr_title") else ""
+    if title and not state.get("pr_title_guidance"):
+        state["pr_title"] = title
 
 
 def _undo_premature_work(state: dict, phase: str) -> str:
@@ -4628,7 +4637,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
@@ -5466,6 +5475,7 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
 # do_* function's own success tail so a phase completed through a question detour ends
 # up in exactly the same place as one completed directly.
 def _continue_exploring(state: dict, result) -> None:
+    _record_exploration(state, result)
     _undo_premature_work(state, "EXPLORING")
     state["state"] = "PROPOSING"
     announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
