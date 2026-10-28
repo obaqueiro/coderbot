@@ -72,7 +72,9 @@ class Runtime(unittest.TestCase):
         self.assertTrue(hook.endswith("|| true"))
         self.assertEqual(args[args.index("--disallowedTools") + 1:], ["Task", "Agent"])
         self.assertIn("Write", tool_policy.claude_args("EXPLORING"))
-        self.assertNotIn("--disallowedTools", tool_policy.claude_args("INTERNAL_REVIEW"))
+        # The review session is itself the fresh reviewer: no nested reviewer subagents.
+        self.assertIn("Task", tool_policy.claude_args("INTERNAL_REVIEW"))
+        self.assertNotIn("--disallowedTools", tool_policy.claude_args("PROPOSING"))
         with patch.object(config, "EXECUTION", "subagent"):
             self.assertNotIn("--disallowedTools", tool_policy.claude_args("IMPLEMENTING"))
         with patch.object(config, "TOOL_POLICY", False):

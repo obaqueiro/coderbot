@@ -1493,11 +1493,29 @@ def _verify_prompt(state: dict) -> str:
             + prompts.render(prompts.VERIFY, slug=state["slug"], base=state.get("base_sha") or config.BASE_BRANCH))
 
 
+def _review_guide(state: dict) -> str:
+    """Superpowers' own reviewer template (requesting-code-review/code-reviewer.md),
+    filled in by the controller; a built-in checklist if it is missing (never blocks)."""
+    template = config.SUPERPOWERS_PLUGIN_DIR / "skills/requesting-code-review/code-reviewer.md"
+    try:
+        text = template.read_text()
+    except OSError:
+        log.info("reviewer template unavailable at %s; using the built-in checklist", template)
+        return prompts.REVIEW_GUIDE_FALLBACK
+    values = {"[DESCRIPTION]": f"{state.get('item', '')}\n{state.get('implementation_summary', '')}".strip(),
+              "[PLAN_OR_REQUIREMENTS]": state.get("archive_path") or f"openspec/changes/{state.get('slug')}/",
+              "[BASE_SHA]": state.get("base_sha", "the branch base"), "[HEAD_SHA]": "HEAD"}
+    for placeholder, value in values.items():
+        text = text.replace(placeholder, value)
+    return "Review guide (Superpowers code reviewer):\n" + text.strip()
+
+
 def _internal_review_prompt(state: dict) -> str:
     return (_gate_feedback(state, "review_gate_round")
             + (prompts.fenced_authoritative("verification scope", state["verification_guidance"]) + "\n"
                if state.get("verification_guidance") else "")
-            + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
+            + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"], base=state.get("base_sha", "HEAD~1"),
+                             review_guide=_review_guide(state)))
 
 
 def _verification_blocked(state: dict, kind: str, detail: str) -> None:

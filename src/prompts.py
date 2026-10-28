@@ -212,16 +212,20 @@ Fix the cause first; do not repeat the same run and report.
 """ + fenced("your previous report", "$report") + "\n"
 
 
-INTERNAL_REVIEW = """Task: review OpenSpec change $slug before the PR, with requesting-code-review.
+INTERNAL_REVIEW = """Task: you are the fresh reviewer of OpenSpec change $slug before its PR (requesting-code-review). Review it yourself in this session; do not dispatch another reviewer.
+
+$review_guide
 
 Steps:
-1. Dispatch one fresh reviewer subagent over the branch diff, giving it the OpenSpec change as the requirements.
+1. Review `git diff $base...HEAD` against openspec/changes/$slug/ (or its archive): spec compliance first, then code quality.
 2. Fix every Critical and Important finding, run the tests that cover the fixes, and commit.
 3. Re-review only the fix commits.
 
 Done when: no Critical or Important finding is open. Fill review: critical and important = findings still open (0 when all fixed), minor, tests as "<command>: <result>", findings as one line each.
 """
 
+# Used when the pinned Superpowers reviewer template is unavailable.
+REVIEW_GUIDE_FALLBACK = """Review checklist: does the change do what the OpenSpec requirements and scenarios say, and nothing they exclude? Are errors, edge cases and security handled? Are there tests for each changed behaviour, and do they test real behaviour? Is the code as simple as it can be and consistent with the codebase? Classify each finding as Critical (bug, data loss, security), Important (missing requirement, poor error handling, missing test) or Minor (style, small improvement)."""
 
 FIX_E2E = """The end-to-end suite failed; its output is below. Task: fix it with systematic-debugging.
 

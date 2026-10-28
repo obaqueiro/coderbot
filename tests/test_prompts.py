@@ -77,7 +77,8 @@ class Cards(unittest.TestCase):
     def test_placeholders_render_completely(self):
         values = dict(project="p", branch="b", item="i", detail="d", images="", slug="s", e2e_note="",
                       e2e_report_note="", base="abc", feedback="f", output="o", error="e", guidance="g",
-                      threads="t", paths="x", outbox_dir="/o", base_branch="main")
+                      threads="t", paths="x", outbox_dir="/o", base_branch="main",
+                      review_guide="guide")
         for name, card in CARDS.items():
             with self.subTest(card=name):
                 self.assertNotRegex(prompts.render(card, **values), r"\$[a-z_]+")
@@ -142,3 +143,23 @@ class Results(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewGuide(unittest.TestCase):
+    def test_superpowers_template_is_filled_or_falls_back(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = Path(tmp) / "skills/requesting-code-review"
+            skill.mkdir(parents=True)
+            (skill / "code-reviewer.md").write_text("Review [DESCRIPTION] against [PLAN_OR_REQUIREMENTS] "
+                                                    "between [BASE_SHA] and [HEAD_SHA].")
+            state = {"item": "Export CSV", "slug": "export-csv", "base_sha": "abc123"}
+            with patch.object(main.config, "SUPERPOWERS_PLUGIN_DIR", Path(tmp)):
+                guide = main._review_guide(state)
+            self.assertIn("Review Export CSV against openspec/changes/export-csv/ between abc123 and HEAD.", guide)
+            with patch.object(main.config, "SUPERPOWERS_PLUGIN_DIR", Path(tmp) / "missing"):
+                self.assertEqual(main._review_guide(state), prompts.REVIEW_GUIDE_FALLBACK)
+        rendered = main._internal_review_prompt({"slug": "s", "base_sha": "abc", "item": "x"})
+        self.assertNotRegex(rendered, r"\$[a-z_]+")
+        self.assertIn("do not dispatch another reviewer", rendered)
