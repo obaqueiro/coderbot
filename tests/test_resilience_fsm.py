@@ -802,3 +802,27 @@ class ExplorationFields(unittest.TestCase):
         self.assertNotIn("pr_title", guided)
         self.assertNotIn("classification", guided)
         main._record_exploration({}, SimpleNamespace(output="prose only"))
+
+
+class LoopGuard(unittest.TestCase):
+    def test_same_transition_on_same_repository_state_stops_the_task(self):
+        state = {"item": "t", "state": "REPAIR_CHECKS"}
+        with patch.object(main, "_tracked_snapshot", return_value=("abc", "")), \
+             patch.object(main, "_enter_stuck") as stuck:
+            for _ in range(main.LOOP_REPEATS - 1):
+                state["state"] = "REPAIR_CHECKS"
+                main._loop_guard(state, "VERIFYING")
+            stuck.assert_not_called()
+            main._loop_guard(state, "VERIFYING")
+        stuck.assert_called_once()
+        self.assertIn("Loop detected", stuck.call_args.args[2])
+
+    def test_progress_waits_and_self_transitions_are_not_loops(self):
+        state = {"item": "t", "state": "VERIFYING"}
+        heads = iter(range(100))
+        with patch.object(main, "_tracked_snapshot", side_effect=lambda: (str(next(heads)), "")), \
+             patch.object(main, "_enter_stuck") as stuck:
+            for _ in range(10):
+                main._loop_guard(state, "IMPLEMENTING")
+                main._loop_guard({"item": "t", "state": "WAIT_REPLY"}, "IMPLEMENTING")
+        stuck.assert_not_called()

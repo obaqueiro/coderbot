@@ -2168,7 +2168,7 @@ def _resume_archiving(state: dict, reason: str) -> None:
     state.pop("pr_url", None)
     state.pop("pr_summary", None)
     state["archive_error"] = reason
-    state["archive_round"] = 0
+    # The archive budget is per task: resetting it here let OPEN_PR and ARCHIVING bounce forever.
     state["state"] = "ARCHIVING"
 
 
@@ -2785,7 +2785,9 @@ def _finish_address_review(state: dict, result, head_before: str | None) -> None
         _enter_review_wait(state, expect_new_run=False)
         return
     ocr = [t for t in remaining if _is_ocr_thread(t)]
-    if ocr:
+    # A resolution-only lap is a review round too; uncounted, it re-entered itself forever.
+    state["review_round"] = state.get("review_round", 0) + 1
+    if ocr and state["review_round"] < config.REVIEW_MAX_ROUNDS:
         log.info("%d OCR thread(s) still unresolved after the round; re-addressing", len(ocr))
         state["review_threads"] = ocr
         state["state"] = "ADDRESS_REVIEW"
@@ -2885,9 +2887,7 @@ def _check_pr_conflicts(state: dict, pr_state, mergeable) -> bool:
     if pr_state != "OPEN":
         return False  # merged/closed/unknown: nothing to resolve here
     if mergeable != "CONFLICTING":
-        if mergeable == "MERGEABLE":
-            state.pop("conflict_rounds", None)  # healthy again; reset the attempt cap
-        return False
+        return False  # the conflict budget is per task, not per burst
     _enter_conflict_resolution(state)
     return True
 
@@ -4057,8 +4057,7 @@ def handle_merge_wait(state: dict) -> None:
     if threads is None:
         log.warning("could not fetch review threads; checking the inbox only this tick")
     elif not threads:
-        state.pop("pr_thread_round", None)
-        state.pop("pr_thread_notified", None)
+        state.pop("pr_thread_notified", None)  # the round budget is per task, not per burst
     elif state.get("pr_thread_notified"):
         log.debug("%d unresolved review thread(s) still open; already notified the user",
                   len(threads))
@@ -4698,7 +4697,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
@@ -4810,6 +4809,29 @@ def _content_filter_stop(state: dict, failed_state: str, *, error=None, user_tex
     log.warning("provider content filter blocked %s; waiting with recorded request evidence", failed_state)
     label = "texto bloqueado" if state.get("task_language", "").casefold() == "spanish" else "content blocked"
     email(state, label, body, files, localized=True)
+
+
+LOOP_REPEATS = 4  # above every per-phase cap, so it only catches loops the caps miss
+
+
+def _loop_guard(state: dict, prev: str) -> None:
+    """Stop a task that keeps making the same transition on the same repository state."""
+    if not state.get("item") or prev in WAITS or state["state"] in WAITS or state["state"] == prev:
+        return
+    try:
+        head, status = _tracked_snapshot()
+    except Exception:  # noqa: BLE001 - the guard never fails a tick
+        return
+    signature = hashlib.sha256(f"{prev}>{state['state']}>{head}>{status}".encode()).hexdigest()[:16]
+    seen = state.setdefault("loop_seen", {})
+    seen[signature] = seen.get(signature, 0) + 1
+    if len(seen) > 50:
+        for key in list(seen)[:-50]:
+            seen.pop(key)
+    if seen[signature] >= LOOP_REPEATS:
+        seen.pop(signature)
+        _enter_stuck(state, prev, f"Loop detected: {prev} -> {state['state']} repeated {LOOP_REPEATS} times "
+                     "without any change to the repository. Stopping instead of repeating it again.")
 
 
 def _work_preserving_phase(state: dict) -> str:
@@ -6364,6 +6386,7 @@ def _run_loop() -> None:
             if state["state"] != prev:
                 log.info("state transition: %s -> %s", prev, state["state"])
                 state["last_transition"] = time.time()
+            _loop_guard(state, prev)
             _maybe_ping(state)
             save_state(state)
             if state["state"] != prev:

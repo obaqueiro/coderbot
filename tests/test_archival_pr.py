@@ -737,7 +737,8 @@ class NativePullRequestTests(unittest.TestCase):
         git.assert_not_called()
         process.assert_not_called()
         self.assertEqual(state["state"], "ARCHIVING")
-        self.assertEqual(state["archive_round"], 0)
+        # The archive budget is per task; OPEN_PR no longer grants a fresh one.
+        self.assertNotIn("archive_round", state)
         self.assertNotIn("pr_url", state)
 
     def test_open_pr_with_active_change_still_present_returns_to_archiving(self):
