@@ -311,7 +311,7 @@ class Repairs:
             incident.get("phase"), code, file + ":" + function]).encode()).hexdigest()
         path = self.home / "incidents" / (fingerprint + ".json")
         previous = read_json(path, {})
-        if previous.get("status") in {"recovered", "promoting", "observing", "human_required"}:
+        if previous.get("status") in {"recovered", "promoting", "observing", "human_required", "rolled_back"}:
             raise RepairError("Incident already handled or awaiting recovery")
         used = previous.get("attempts", 0)
         today = time.strftime("%Y-%m-%d", time.gmtime())

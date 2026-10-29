@@ -379,6 +379,7 @@ class Supervisor:
                     try:
                         self.agent(folder, record)
                         self.stop()  # Drain detached repair tools before validating their output.
+                        record.update(self.result(folder))
                         self.active_until = time.monotonic() + 2460  # regression, suite, baseline
                         changed = self.repairs.validate(folder, cancelled=self.paused)
                         self.stop()
@@ -395,7 +396,8 @@ class Supervisor:
                         record["binding"] = state_binding(state)
                 if self.mode == "propose":
                     atomic_json(record_path, {**record, "status": "human_required", "candidate": str(folder)})
-                    self.repairs.event("repair_proposed", record, detail="Validated candidate awaits manual review", candidate=str(folder))
+                    self.repairs.event("repair_proposed", record, detail="Validated candidate awaits manual review\n"
+                                       + self.summary(record, folder), candidate=str(folder))
                     return
                 if self.paused():
                     raise RepairCancelled("Operator paused the repair")
@@ -406,7 +408,11 @@ class Supervisor:
                           "epoch": new_epoch, "phase": incident["phase"], "task_id": incident.get("task_id"),
                           "target": os.environ.get("CODEBOT_REPO_PATH")}
                 atomic_json(self.repairs.home / "recovery.json", ticket)
-                atomic_json(record_path, {**record, "status": "observing", "epoch": new_epoch})
+                atomic_json(record_path, {**record, "status": "observing", "epoch": new_epoch, "folder": str(folder)})
+                rollback = f"python3 {Path(__file__).resolve()} --control rollback {record['id']}"
+                self.repairs.event("repair_promoted", record, files=changed,
+                                   detail=self.summary(record, folder) + "\nRoll back: " + rollback)
+                self.notify()
             self.start()
             deadline = time.monotonic() + OBSERVATION_SECONDS
             while time.monotonic() < deadline:
@@ -414,6 +420,9 @@ class Supervisor:
                 self.heartbeat()
                 if self.paused():
                     raise RepairCancelled("Operator paused the repair")
+                if (read_json(self.repairs.home / "rollback.json", {}) or {}).get("incident") == record["id"]:
+                    (self.repairs.home / "rollback.json").unlink(missing_ok=True)
+                    raise RepairError("Operator requested a rollback")
                 if self.worker.poll() is not None:
                     raise RepairError("Repaired worker exited during observation")
                 events = [worker_event(path) for path in (self.repairs.home / "events").glob("*.json")]
@@ -436,19 +445,19 @@ class Supervisor:
         except StopRequested:
             restart = False
             self.stop()
-            self.repairs.rollback()
+            self.restore(incident)
             raise
         except RepairCancelled as error:
             restart = False
             self.stop()
-            self.repairs.rollback()
+            self.restore(incident)
             if record_path:
                 atomic_json(record_path, {**record, "status": "human_required", "error": str(error)})
             self.repairs.event("repair_paused", incident, detail=str(error))
         except Exception as error:
             try:
                 self.stop()
-                self.repairs.rollback()
+                restart = self.restore(incident)
             except BaseException:
                 restart = False
                 raise
@@ -461,6 +470,60 @@ class Supervisor:
             if restart and not self.paused() and self.worker is None:
                 self.start()  # Original code + preserved WAIT_STUCK on failed/proposed repair.
 
+    def result(self, folder):
+        """The agent's RepairResult; a declined repair stops here (no retry)."""
+        result = read_json(folder / "candidate/.repair-result.json", {})
+        result = result if isinstance(result, dict) else {}
+        if result.get("status") in {"not_reproducible", "out_of_scope", "needs_human"}:
+            raise RepairError(f"Repair agent failed to fix it ({result['status']}): "
+                              + redact(str(result.get("summary", "")))[:500])
+        return {"root_cause": redact(str(result.get("root_cause") or "not reported"))[:500]}
+
+    def summary(self, record, folder):
+        stat = (read_json(folder / "validated.json", {}) or {}).get("stat") or {}
+        return (f"Root cause: {record.get('root_cause') or 'not reported'}\n"
+                "Diff: " + "; ".join(f"{name} +{added} -{removed}" for name, (added, removed) in stat.items()))
+
+    def restore(self, incident):
+        """Roll back a promotion. A rollback that would overwrite someone's edit pauses the
+        worker and alerts instead of raising (raising crash-looped the supervisor)."""
+        try:
+            self.repairs.rollback()
+            return True
+        except RepairError as error:
+            if (read_json(self.repairs.home / "promotion.json", {}) or {}).get("status") != "conflict":
+                raise
+            self.conflict(incident, redact(str(error)))
+            return False
+
+    def conflict(self, incident, detail):
+        atomic_json(self.repairs.home / "control.json", {"action": "pause"})
+        self.repairs.event("repair_conflict", incident, detail=detail + "\nThe worker stays stopped: fix the files "
+                           "listed in data/supervisor/promotion.json, then run --control resolve.")
+        self.notify()
+
+    def operator_rollback(self):
+        """`--control rollback <id>`: undo the latest committed promotion."""
+        path = self.repairs.home / "rollback.json"
+        request = read_json(path)
+        transaction = read_json(self.repairs.home / "promotion.json", {}) or {}
+        if not isinstance(request, dict) or transaction.get("status") == "observing":
+            return  # an observing promotion consumes its own request
+        path.unlink(missing_ok=True)
+        record = read_json(Path(transaction.get("folder", "/nonexistent")) / "record.json", {}) or {}
+        incident = {**record, "id": request.get("incident")}
+        if transaction.get("status") != "committed" or record.get("id") != request.get("incident"):
+            self.repairs.event("rollback_refused", incident, detail="Only the latest committed promotion can be rolled back")
+            self.notify()
+            return
+        self.stop()
+        atomic_json(self.repairs.home / "promotion.json", {**transaction, "status": "observing"})
+        if self.restore(incident):
+            record_path = self.repairs.home / "incidents" / (record["id"] + ".json")
+            atomic_json(record_path, {**(read_json(record_path, {}) or record), "status": "rolled_back"})
+            self.repairs.event("repair_rolled_back", incident, files=transaction.get("files", []))
+            self.notify()
+
     def run(self):
         if sys.platform == "linux":
             import ctypes
@@ -469,13 +532,8 @@ class Supervisor:
         with exclusive(self.source / ".codebot-supervisor.lock"), exclusive(self.repairs.home / "supervisor.lock"):
             transaction = read_json(self.repairs.home / "promotion.json", {})
             if transaction.get("status") == "conflict":
-                # Raising here crash-looped the container silently. Keep the supervisor up,
-                # the worker stopped, and tell the operator.
-                self.repairs.event("worker_unavailable", {"id": self.boot},
-                                   detail="Prior rollback conflict requires operator intervention "
-                                          "(see data/supervisor/promotion.json)")
-                self.notify()
-                atomic_json(self.repairs.home / "control.json", {"action": "pause"})
+                if not self.paused():
+                    self.conflict({"id": self.boot}, "A prior rollback conflict is unresolved")
             else:
                 self.repairs.rollback()  # Resolve interrupted promotion before starting any worker.
             heartbeat_stop = threading.Event()
@@ -496,6 +554,7 @@ class Supervisor:
                         self.runbooks.run(act=self.mode == "auto")  # stale locks, corrupt config, disk
                         self.next_sweep = time.monotonic() + 600
                     self.breaker_tick()
+                    self.operator_rollback()
                     control = read_json(self.repairs.home / "control.json", {})
                     if control.get("action") in ("pause", "cooldown"):
                         self.stop()
@@ -555,10 +614,21 @@ def main():
     parser.add_argument("--source", default="/app")
     parser.add_argument("--data", default=os.environ.get("CODEBOT_DATA_DIR", "/app/data"))
     parser.add_argument("--mode", choices=("off", "observe", "propose", "auto"), default=os.environ.get("CODEBOT_SELF_HEAL", "off"))
-    parser.add_argument("--control", choices=("pause", "resume"))
+    parser.add_argument("--control", choices=("pause", "resume", "resolve", "rollback"))
+    parser.add_argument("incident", nargs="?", help="incident id for --control rollback")
     args = parser.parse_args()
+    home = Path(args.data) / "supervisor"
+    if args.control == "rollback":
+        if not args.incident:
+            parser.error("--control rollback needs the incident id from the promotion message")
+        atomic_json(home / "rollback.json", {"incident": args.incident, "created": time.time()})
+        return
+    if args.control == "resolve":  # the operator fixed a rollback conflict by hand
+        transaction = read_json(home / "promotion.json", {}) or {}
+        if transaction.get("status") == "conflict":
+            atomic_json(home / "promotion.json", {**transaction, "status": "resolved"})
     if args.control:
-        atomic_json(Path(args.data) / "supervisor/control.json", {"action": args.control})
+        atomic_json(home / "control.json", {"action": "resume" if args.control == "resolve" else args.control})
         return
     if args.mode == "off":
         os.execv(sys.executable, [sys.executable, "-u", str(Path(args.source) / "src/main.py")])
