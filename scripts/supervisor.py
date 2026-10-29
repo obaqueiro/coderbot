@@ -411,8 +411,8 @@ class Supervisor:
         folder = record_path = record = None
         restart = True
         try:
-            # Quiesce before snapshot; no worker may edit its own candidate baseline.
-            self.stop()
+            # S7: the worker keeps running (its task is parked in WAIT_STUCK); it is
+            # stopped only to drain repair tools and to promote.
             with exclusive(self.data / "state.lock"):
                 state = read_json(self.data / "state.json", {"state": "IDLE"})
                 if (incident.get("task_id") != state.get("execution_task_id") or
@@ -421,47 +421,50 @@ class Supervisor:
                     raise RepairError("Task, decision or runtime changed since the incident")
                 folder, record_path, record = self.repairs.admit(incident)
                 record["binding"] = state_binding(state)
-                self.notify()
-                while True:
-                    try:
-                        self.agent(folder, record)
-                        self.stop()  # Drain detached repair tools before validating their output.
-                        self.live_unchanged(folder)
-                        record.update(self.result(folder))
-                        self.active_until = time.monotonic() + 2460  # regression, suite, baseline
-                        changed = self.repairs.validate(folder, cancelled=self.paused)
-                        self.stop()
-                        self.live_unchanged(folder)
-                        break
-                    except RepairCancelled:
+            self.notify()
+            while True:
+                try:
+                    self.agent(folder, record)
+                    self.stop()  # Drain detached repair tools before validating their output.
+                    self.live_unchanged(folder)
+                    if not self.paused():
+                        self.start()  # the parked task keeps answering while the candidate is validated
+                    record.update(self.result(folder))
+                    self.active_until = time.monotonic() + 2460  # regression, suite, baseline
+                    changed = self.repairs.validate(folder, cancelled=self.paused)
+                    self.stop()
+                    self.live_unchanged(folder)
+                    break
+                except RepairCancelled:
+                    raise
+                except RepairError as error:
+                    if record["attempts"] >= self.repairs.attempts or "agent failed" in str(error).lower():
                         raise
-                    except RepairError as error:
-                        if record["attempts"] >= self.repairs.attempts or "agent failed" in str(error).lower():
-                            raise
-                        atomic_json(record_path, {**record, "status": "retryable", "validation_error": redact(str(error))})
-                        incident = {**incident, "diagnostic": str(incident.get("diagnostic", ""))
-                                    + "\nPrevious candidate rejected: " + redact(str(error))}
-                        folder, record_path, record = self.repairs.admit(incident)
-                        record["binding"] = state_binding(state)
-                if self.mode == "propose":
-                    atomic_json(record_path, {**record, "status": "human_required", "candidate": str(folder)})
-                    self.repairs.event("repair_proposed", record, detail="Validated candidate awaits manual review\n"
-                                       + self.summary(record, folder), candidate=str(folder))
-                    return
-                if self.paused():
-                    raise RepairCancelled("Operator paused the repair")
+                    atomic_json(record_path, {**record, "status": "retryable", "validation_error": redact(str(error))})
+                    incident = {**incident, "diagnostic": str(incident.get("diagnostic", ""))
+                                + "\nPrevious candidate rejected: " + redact(str(error))}
+                    folder, record_path, record = self.repairs.admit(incident)
+                    record["binding"] = state_binding(state)
+            if self.mode == "propose":
+                atomic_json(record_path, {**record, "status": "human_required", "candidate": str(folder)})
+                self.repairs.event("repair_proposed", record, detail="Validated candidate awaits manual review\n"
+                                   + self.summary(record, folder), candidate=str(folder))
+                return
+            if self.paused():
+                raise RepairCancelled("Operator paused the repair")
+            with exclusive(self.data / "state.lock"):
                 if state_binding(read_json(self.data / "state.json", {"state": "IDLE"})) != record["binding"]:
                     raise RepairError("Task decision changed before promotion")
                 new_epoch = self.repairs.promote(folder, changed)
-                ticket = {"version": 1, "incident": record["id"], "binding": record["binding"],
-                          "epoch": new_epoch, "phase": incident["phase"], "task_id": incident.get("task_id"),
-                          "target": os.environ.get("CODEBOT_REPO_PATH")}
-                atomic_json(self.repairs.home / "recovery.json", ticket)
-                atomic_json(record_path, {**record, "status": "observing", "epoch": new_epoch, "folder": str(folder)})
-                rollback = f"python3 {Path(__file__).resolve()} --control rollback {record['id']}"
-                self.repairs.event("repair_promoted", record, files=changed,
-                                   detail=self.summary(record, folder) + "\nRoll back: " + rollback)
-                self.notify()
+            ticket = {"version": 1, "incident": record["id"], "binding": record["binding"],
+                      "epoch": new_epoch, "phase": incident["phase"], "task_id": incident.get("task_id"),
+                      "target": os.environ.get("CODEBOT_REPO_PATH")}
+            atomic_json(self.repairs.home / "recovery.json", ticket)
+            atomic_json(record_path, {**record, "status": "observing", "epoch": new_epoch, "folder": str(folder)})
+            rollback = f"python3 {Path(__file__).resolve()} --control rollback {record['id']}"
+            self.repairs.event("repair_promoted", record, files=changed,
+                               detail=self.summary(record, folder) + "\nRoll back: " + rollback)
+            self.notify()
             self.start()
             deadline = time.monotonic() + OBSERVATION_SECONDS
             while time.monotonic() < deadline:

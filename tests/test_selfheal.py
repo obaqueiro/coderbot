@@ -309,10 +309,15 @@ class SelfHealingTests(unittest.TestCase):
     def test_propose_does_not_promote_or_resume_task(self):
         supervisor = Supervisor(self.source, self.data, "propose")
         original = inventory(self.source)
-        with patch.object(supervisor, "agent", side_effect=self.fake_agent), patch.object(supervisor, "start") as start, \
-             patch.object(supervisor, "stop"), patch.object(supervisor, "notify"):
+        def stop():
+            supervisor.worker = None
+        with patch.object(supervisor, "agent", side_effect=self.fake_agent), \
+             patch.object(supervisor, "start", side_effect=lambda: setattr(supervisor, "worker", Mock())) as start, \
+             patch.object(supervisor, "stop", side_effect=stop), patch.object(supervisor, "notify"):
             supervisor.handle(self.incident)
-        start.assert_called_once()
+        # S7: up again while the candidate is validated, and after the proposal on the old code.
+        self.assertEqual(start.call_count, 2)
+        self.assertIsNotNone(supervisor.worker)
         self.assertEqual(inventory(self.source), original)
         self.assertFalse((self.repairs.home / "promotion.json").exists())
 
