@@ -53,12 +53,12 @@ MARKERS = {"attachments": "ATTACH:", "e2e_specs": "E2E_SPEC:", "checks": "CHECK_
            "verification": "QUALITY_GATE:", "review": "INTERNAL_REVIEW:", "question": "NEED_USER_INPUT:"}
 
 PROTOCOL = """End every turn with the result object (JSON):
-- status: done | done_with_concerns | needs_input (one question for the user) | needs_approval | blocked (cannot proceed; say why).
-- summary: what you did and found, for the human, in the task language. Plain prose.
-- question: {"text": ..., "options": [2-4 short choices, recommended first]} only with needs_input/needs_approval.
-- attachments: absolute paths of evidence files you saved under the outbox.
-- checks: focused checks for coderbot to run, each {"id", "argv": [...], "cwd", "scope": "focused", "inputs": [...]}; add "kind": "e2e" and "reporter" for E2E.
-- Fill the phase's extra field when the card asks for it (verification, review, threads, classification, pr_title)."""
+- status: done | done_with_concerns | needs_input | needs_approval | blocked (say why).
+- summary: what you did and found, for the user, in the task language.
+- question: {"text", "options": 2-4, recommended first}, only with needs_input/needs_approval.
+- attachments: absolute paths of evidence files you saved in the outbox.
+- checks: focused checks: {"id", "argv", "cwd", "scope": "focused", "inputs"}; E2E adds "kind": "e2e", "reporter".
+- The card's extra field when it asks (verification, review, threads, classification, pr_title)."""
 
 
 SKILLS = {"EXPLORING": "brainstorming", "PROPOSING": "openspec-propose", "REPLANNING": "openspec-update-change",

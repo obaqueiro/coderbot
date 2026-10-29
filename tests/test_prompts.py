@@ -32,8 +32,9 @@ def card_text(card):
 
 class SystemPrompt(unittest.TestCase):
     def test_is_small_and_states_role_then_explicit_behaviours(self):
-        system = prompts.system_prompt("/data/outbox")
-        self.assertLess(len(system), 3200)
+        with patch.object(prompts.config, "ENVIRONMENT_NOTES", ""):  # project notes are the user's
+            system = prompts.system_prompt("/data/outbox")
+        self.assertLessEqual(len(system), 2000)
         self.assertTrue(system.startswith("You are a principal engineer"))
         for rule in ("smallest correct change", "Report only commands you ran", "foreground",
                      "Never commit evidence", "/data/outbox/", "Stop when"):

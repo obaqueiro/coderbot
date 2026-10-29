@@ -141,7 +141,7 @@ class StagedChecksTests(unittest.TestCase):
 
     def test_testing_policy_is_stated_once_in_the_system_prompt(self):
         text = claude_runner.SENTINEL_CONTRACT
-        self.assertIn("Run focused tests yourself; coderbot runs the final checks", text)
+        self.assertIn("Run focused tests; coderbot runs final checks", text)
         self.assertIn("Never run an unfiltered end-to-end suite", text)
         for card in (prompts.VERIFY, prompts.RESOLVE_CONFLICTS):
             self.assertNotIn("full suite if the conflicts touched shared code", card)
