@@ -20,6 +20,21 @@ FIXTURE = ROOT / "tests/supervisor_walk"
 BUG = "def parse(value):\n    return value[0]\n"
 
 
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        if Path("/proc").is_dir():
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        else:
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout
+    except (OSError, IndexError):
+        return False  # gone between the checks
+    return bool(state.strip()) and not state.strip().startswith("Z")  # a zombie has exited
+
+
 class SupervisorWalk(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -44,19 +59,26 @@ class SupervisorWalk(unittest.TestCase):
         (self.data / "state.json").write_text(json.dumps(
             {"execution_task_id": "task", "item": "Fix", "state": "EXPLORING", "thread_id": "thread"}))
         self.original = inventory(self.source)
-        self.process = None
+        self.process = self.log = None
+        self.addCleanup(self.shutdown)
 
-    def supervise(self, mode, **env):
+    def supervise(self, mode, *, stall=False, **env):
+        """Start scripts/supervisor.py (a second call is a restart on the same source/data).
+        stall=True runs it through tests/supervisor_walk/stall_promotion.py."""
+        self.assertTrue(self.process is None or self.process.poll() is not None, "supervisor already running")
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("CODEBOT_", "WALK_")) and key != "CLAUDE_CONFIG_PATH"}
         environment.update(PATH=f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}", HOME=str(self.data / "home"),
                            CODEBOT_AGENT="claude", PYTHONDONTWRITEBYTECODE="1", **env)
-        self.log = (self.data / "supervisor.log").open("w")
+        if stall:
+            environment["CODEBOT_DATA_DIR"] = str(self.data)
+        if self.log:
+            self.log.close()
+        self.log = (self.data / "supervisor.log").open("a")
         self.process = subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts/supervisor.py"), "--source", str(self.source),
-             "--data", str(self.data), "--mode", mode], env=environment, stdout=self.log, stderr=subprocess.STDOUT,
-            start_new_session=True)
-        self.addCleanup(self.shutdown)
+            [sys.executable, *([str(FIXTURE / "stall_promotion.py")] if stall else []), str(ROOT / "scripts/supervisor.py"),
+             "--source", str(self.source), "--data", str(self.data), "--mode", mode],
+            env=environment, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
 
     def shutdown(self):
         if self.process and self.process.poll() is None:
@@ -66,10 +88,51 @@ class SupervisorWalk(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait()
-        self.log.close()
-        for pid in (self.data / "workers").glob("*") if (self.data / "workers").exists() else ():
-            with self.assertRaises(ProcessLookupError, msg="orphan worker " + pid.name):
-                os.kill(int(pid.name), 0)
+        if self.log:
+            self.log.close()
+        self.assertEqual(self.orphans(), [], "orphan worker/agent processes")
+
+    def pids(self):
+        """Every worker and repair-agent process the walk ever started."""
+        workers = (self.data / "workers").glob("*") if (self.data / "workers").exists() else ()
+        agents = [self.bin / name for name in ("agent.pid", "agent-child.pid") if (self.bin / name).exists()]
+        return [int(path.name) for path in workers] + [int(path.read_text()) for path in agents]
+
+    def orphans(self, timeout=10):
+        """The walk's processes still alive after a bounded wait (a killed process may need a
+        moment to exit and be reaped; zombies count as gone)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            living = [pid for pid in self.pids() if alive(pid)]
+            if not living or time.monotonic() >= deadline:
+                return living
+            time.sleep(0.1)
+
+    def crash(self):
+        """kill -9 of the supervisor and, as when its container dies, of everything it ran."""
+        os.killpg(self.process.pid, signal.SIGKILL)
+        self.process.wait()
+        for pid in self.pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.assertEqual(self.orphans(), [])
+
+    def healthy(self):
+        """The supervisor heartbeat is fresh; in the image also the container healthcheck."""
+        self.assertLess(time.time() - read_json(self.data / "supervisor/heartbeat.json")["time"], 30)
+        if sys.platform == "linux":  # GNU stat
+            result = subprocess.run(["bash", str(ROOT / "scripts/healthcheck.sh")], capture_output=True, text=True,
+                                    env={**os.environ, "CODEBOT_DATA_DIR": str(self.data), "CODEBOT_SELF_HEAL": "auto"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def workers(self):
+        return len(list((self.data / "workers").glob("*"))) if (self.data / "workers").exists() else 0
+
+    def incident(self):
+        [record] = [read_json(path) for path in (self.data / "supervisor/incidents").glob("*.json")]
+        return record
 
     def notified(self):
         try:
@@ -175,6 +238,117 @@ class SupervisorWalk(unittest.TestCase):
         [alert] = [event for event in self.notified() if event["kind"] == "worker_unavailable"]
         self.assertIn("GH_TOKEN is missing", alert["detail"])
 
+
+    # ---- S10: crashes, stops and drift around a repair
+    def test_kill_9_mid_promotion_restores_the_old_source_at_restart(self):
+        self.supervise("auto", stall=True)
+        self.until(lambda: (self.data / "stalled").exists())  # src/bug.py copied, the regression test not yet
+        self.assertNotEqual(inventory(self.source), self.original)
+        self.assertEqual(read_json(self.data / "supervisor/promotion.json")["status"], "promoting")
+        self.crash()
+        self.supervise("observe")
+        self.until(lambda: "repair_rolled_back" in self.kinds())
+        self.assertEqual(inventory(self.source), self.original)  # byte-identical old, never mixed
+        self.assertEqual(read_json(self.data / "supervisor/promotion.json")["status"], "rolled_back")
+        self.assertFalse((self.data / "supervisor/recovery.json").exists())
+        self.assertEqual(self.incident()["status"], "rolled_back")  # the journal no longer says snapshotted
+        workers = self.workers()
+        self.until(lambda: "incident_detected" in self.kinds())  # the old code runs again and reports the bug
+        self.assertGreaterEqual(self.workers(), workers)
+        self.assertEqual(self.state()["state"], "WAIT_STUCK")
+        self.healthy()
+
+    def test_kill_9_after_a_committed_promotion_keeps_the_new_source(self):
+        self.supervise("auto")
+        self.until(lambda: "repair_recovered" in self.kinds())
+        [folder] = (self.data / "supervisor/repairs").glob("*/*")
+        repaired = read_json(folder / "validated.json")["inventory"]
+        self.assertEqual(inventory(self.source), repaired)
+        self.crash()
+        workers = self.workers()
+        self.supervise("observe")
+        self.until(lambda: self.workers() > workers)
+        self.assertEqual(inventory(self.source), repaired)  # byte-identical new, never mixed
+        self.assertEqual(read_json(self.data / "supervisor/promotion.json")["status"], "committed")
+        self.assertEqual(self.incident()["status"], "recovered")
+        self.assertNotIn("repair_rolled_back", self.kinds())
+        self.healthy()
+
+    def test_pause_during_the_repair_promotes_nothing_and_resume_restarts_the_worker(self):
+        (self.bin / "agent-mode").write_text("hang")
+        self.supervise("auto")
+        self.until(lambda: (self.bin / "agent-child.pid").exists())
+        subprocess.run([sys.executable, str(ROOT / "scripts/supervisor.py"), "--data", str(self.data),
+                        "--control", "pause"], check=True, timeout=30)
+        self.until(lambda: "repair_paused" in self.kinds())
+        self.assertEqual(self.orphans(), [])  # agent, its child and the worker are all gone
+        self.assertEqual(inventory(self.source), self.original)
+        self.assertFalse((self.data / "supervisor/promotion.json").exists())
+        self.assertEqual(self.incident()["status"], "human_required")
+        self.healthy()  # paused, not dead
+        workers = self.workers()
+        subprocess.run([sys.executable, str(ROOT / "scripts/supervisor.py"), "--data", str(self.data),
+                        "--control", "resume"], check=True, timeout=30)
+        self.until(lambda: self.workers() > workers)  # the worker resumes on the old code
+        self.assertEqual(self.state()["state"], "WAIT_STUCK")
+        self.assertEqual(inventory(self.source), self.original)
+        self.assertEqual(len(self.agent_calls()), 1)
+
+    def test_stop_during_the_repair_exits_cleanly_and_the_worker_resumes_after_restart(self):
+        (self.bin / "agent-mode").write_text("hang")
+        self.supervise("auto")
+        self.until(lambda: (self.bin / "agent-child.pid").exists())
+        self.process.send_signal(signal.SIGTERM)
+        self.assertEqual(self.process.wait(timeout=60), 0)
+        self.assertEqual(self.orphans(), [])
+        self.assertEqual(inventory(self.source), self.original)
+        self.assertFalse((self.data / "supervisor/promotion.json").exists())
+        workers = self.workers()
+        self.supervise("observe")
+        self.until(lambda: self.workers() > workers)
+        self.until(lambda: "incident_detected" in self.kinds())  # the interrupted incident is reported, not lost
+        self.assertEqual(self.state()["state"], "WAIT_STUCK")
+        self.assertEqual(inventory(self.source), self.original)
+        self.healthy()
+
+    def test_hung_repair_agent_is_time_bounded_and_leaves_no_process(self):
+        (self.bin / "agent-mode").write_text("hang")
+        self.supervise("auto", CODEBOT_REPAIR_AGENT_TIMEOUT="5")
+        workers = self.until(lambda: (self.bin / "agent-child.pid").exists() and self.workers())
+        [failed] = self.until(lambda: [e for e in self.notified() if e["kind"] == "repair_failed"], 60)
+        self.assertIn("no result within 5 s", failed["detail"])
+        self.assertNotIn("Repair this Coderbot", failed["detail"])  # never the agent's argv or prompt
+        agent = [int((self.bin / name).read_text()) for name in ("agent.pid", "agent-child.pid")]
+        self.until(lambda: not any(alive(pid) for pid in agent), 15)
+        self.until(lambda: self.workers() > workers)  # the old code runs again
+        self.assertEqual(len(self.agent_calls()), 1)  # a timed-out agent is not retried
+        self.assertEqual(inventory(self.source), self.original)
+        self.assertFalse((self.data / "supervisor/promotion.json").exists())
+        self.assertEqual(self.incident()["status"], "human_required")
+        self.healthy()
+
+    def test_live_tree_edit_during_the_repair_is_restored_and_paused_without_promotion(self):
+        (self.bin / "agent-mode").write_text("wait")
+        self.supervise("auto")
+        self.until(lambda: (self.bin / "agent.pid").exists())
+        (self.source / "src/bug.py").write_text("LIVE_EDIT = True\n")  # someone edits the live tree
+        (self.source / "src/extra.py").write_text("NEW = 1\n")
+        (self.bin / "go").touch()
+        [paused] = self.until(lambda: [e for e in self.notified() if e["kind"] == "repair_paused"])
+        self.assertIn("src/bug.py", paused["detail"])
+        self.assertEqual(read_json(self.data / "supervisor/control.json")["action"], "pause")
+        self.assertEqual(inventory(self.source), self.original)  # restored from the snapshot
+        [folder] = (self.data / "supervisor/repairs").glob("*/*")
+        self.assertEqual((folder / "drift/src/bug.py").read_text(), "LIVE_EDIT = True\n")  # the edit is kept
+        self.assertEqual((folder / "drift/src/extra.py").read_text(), "NEW = 1\n")
+        self.assertFalse((self.data / "supervisor/promotion.json").exists())
+        self.assertNotIn("repair_promoted", self.kinds())
+        self.assertEqual(self.incident()["status"], "human_required")
+        workers = self.workers()
+        time.sleep(2)
+        self.assertEqual(self.workers(), workers)  # held stopped while paused
+        self.assertEqual(self.orphans(), [])
+        self.healthy()
 
 if __name__ == "__main__":
     unittest.main()

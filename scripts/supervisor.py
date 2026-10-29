@@ -24,10 +24,18 @@ class StopRequested(BaseException):
     pass
 
 
+# While a worker is being spawned a stop is deferred: raised between Popen's fork and the
+# assignment to Supervisor.worker it left a worker nobody tracked, so stop() never killed it.
+SPAWNING = {"active": False, "stop": False}
+
+
 def stop_signal(signum, frame):
     # A second signal must not interrupt rollback/process cleanup.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if SPAWNING["active"]:
+        SPAWNING["stop"] = True
+        return
     raise StopRequested()
 
 
@@ -113,6 +121,13 @@ def _agent_timeout():
         return 1800
 
 
+def _repair_timeout():
+    try:
+        return int((os.environ.get("CODEBOT_REPAIR_AGENT_TIMEOUT") or "").strip() or 600)
+    except ValueError:
+        return 600
+
+
 # A promoted patch is judged by real task progress. The window must outlast one agent
 # turn: at 15 minutes a correct patch was rolled back in the middle of a 30-minute turn.
 OBSERVATION_SECONDS = max(900, _agent_timeout() + 900)
@@ -171,9 +186,15 @@ class Supervisor:
         env = {**os.environ, "CODEBOT_SUPERVISOR_DIR": str(self.repairs.home),
                "CODEBOT_WORKER_BOOT": self.boot, "CODEBOT_RUNTIME_EPOCH": epoch(self.source),
                "CODEBOT_DATA_DIR": str(self.data)}
-        self.worker = subprocess.Popen([sys.executable, "-u", "-c", BOOTSTRAP, str(self.source / "src/main.py")],
-            cwd=self.source, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, errors="replace", start_new_session=True)
+        SPAWNING["active"] = True
+        try:
+            self.worker = subprocess.Popen([sys.executable, "-u", "-c", BOOTSTRAP, str(self.source / "src/main.py")],
+                cwd=self.source, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, errors="replace", start_new_session=True)
+        finally:
+            SPAWNING["active"] = False
+        if SPAWNING["stop"]:
+            raise StopRequested()  # the worker is tracked now: the caller's stop() reaps it
         def logs(process):
             for line in process.stdout:
                 line = redact(line)
@@ -352,8 +373,13 @@ class Supervisor:
                     "--disallowedTools", "Task", "Agent", "--", prompt]
         else:
             raise RepairError("Unsupported repair coding CLI")
-        self.active_until = time.monotonic() + 660
-        code, output = run_process(argv, candidate, env, 600, folder / "agent.log", cancelled=self.paused)
+        timeout = _repair_timeout()
+        self.active_until = time.monotonic() + timeout + 60
+        try:
+            code, output = run_process(argv, candidate, env, timeout, folder / "agent.log", cancelled=self.paused)
+        except subprocess.TimeoutExpired:
+            # Never str() the TimeoutExpired: it carries the argv (prompt, settings) into the alert.
+            raise RepairError(f"Repair agent failed: no result within {timeout} s; see private agent log") from None
         if code:
             raise RepairError("Repair agent failed; see private agent log")
 
@@ -400,10 +426,12 @@ class Supervisor:
                     try:
                         self.agent(folder, record)
                         self.stop()  # Drain detached repair tools before validating their output.
+                        self.live_unchanged(folder)
                         record.update(self.result(folder))
                         self.active_until = time.monotonic() + 2460  # regression, suite, baseline
                         changed = self.repairs.validate(folder, cancelled=self.paused)
                         self.stop()
+                        self.live_unchanged(folder)
                         break
                     except RepairCancelled:
                         raise
@@ -491,6 +519,29 @@ class Supervisor:
             if restart and not self.paused() and self.worker is None:
                 self.start()  # Original code + preserved WAIT_STUCK on failed/proposed repair.
 
+    def live_unchanged(self, folder):
+        """After the agent and after the tests the live tree must still be the snapshot. On
+        drift (an agent escaping its candidate, an edit while the repair ran) restore the
+        snapshot, keep the drifted files aside and pause: nothing is promoted."""
+        drifted = self.repairs.restore_drift(folder)
+        if drifted:
+            atomic_json(self.repairs.home / "control.json", {"action": "pause"})
+            raise RepairCancelled("Live source changed during the repair: restored " + ", ".join(drifted[:10])
+                                  + f" from the snapshot (the changed files are kept in {Path(folder) / 'drift'}). "
+                                  "The worker stays paused; review them, then run --control resume.")
+
+    def reconcile(self, transaction):
+        """A promotion interrupted by a supervisor crash was just rolled back at boot: close
+        its incident record (it said promoting/observing forever) and tell the operator."""
+        record = read_json(Path(transaction.get("folder", "/nonexistent")) / "record.json", {}) or {}
+        incident = {**record, "id": record.get("id") or self.boot}
+        path = self.repairs.home / "incidents" / f"{record.get('id')}.json"
+        if re.fullmatch(r"[0-9a-f]{64}", str(record.get("id"))) and path.is_file():
+            atomic_json(path, {**(read_json(path, {}) or record), "status": "rolled_back",
+                               "error": "Supervisor restarted during the promotion"})
+        self.repairs.event("repair_rolled_back", incident, files=transaction.get("files", []),
+                           detail="The supervisor restarted during a promotion; the previous source was restored.")
+
     def result(self, folder):
         """The agent's RepairResult; a declined repair stops here (no retry)."""
         result = read_json(folder / "candidate/.repair-result.json", {})
@@ -557,7 +608,10 @@ class Supervisor:
                 if not self.paused():
                     self.conflict({"id": self.boot}, "A prior rollback conflict is unresolved")
             else:
-                self.restore({"id": self.boot})  # Resolve interrupted promotion before starting any worker.
+                interrupted = isinstance(transaction, dict) and transaction.get("status") in ("promoting", "observing")
+                # Resolve an interrupted promotion before starting any worker.
+                if self.restore({"id": self.boot}) and interrupted:
+                    self.reconcile(transaction)
             heartbeat_stop = threading.Event()
             def pulse():
                 while not heartbeat_stop.wait(5):

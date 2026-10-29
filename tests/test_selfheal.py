@@ -437,6 +437,72 @@ class SelfHealingTests(unittest.TestCase):
                                      safe_test_environment(self.root / "lifecycle"), 20, self.root / "lifecycle.log")
         self.assertEqual(result, 0, output)
 
+    def test_live_tree_drift_during_repair_is_restored_kept_aside_and_paused(self):
+        supervisor = Supervisor(self.source, self.data, "auto")
+        original = inventory(self.source)
+        def escaping_agent(folder, record):
+            self.fake_agent(folder, record)
+            (self.source / "src/bug.py").write_text("ESCAPED = True\n")  # wrote the live tree, not the candidate
+            (self.source / "src/new.py").write_text("NEW = True\n")
+        with patch.object(supervisor, "agent", side_effect=escaping_agent), patch.object(supervisor, "stop"), \
+             patch.object(supervisor, "start") as start, patch.object(supervisor, "notify"):
+            supervisor.handle(self.incident)
+        start.assert_not_called()
+        self.assertEqual(inventory(self.source), original)
+        self.assertEqual(read_json(self.repairs.home / "control.json"), {"action": "pause"})
+        self.assertFalse((self.repairs.home / "promotion.json").exists())
+        [folder] = (self.repairs.home / "repairs").glob("*/*")
+        self.assertEqual((folder / "drift/src/bug.py").read_text(), "ESCAPED = True\n")
+        self.assertEqual((folder / "drift/src/new.py").read_text(), "NEW = True\n")
+        [event] = [read_json(p) for p in (self.repairs.home / "notifications").glob("*.json")
+                   if read_json(p)["kind"] == "repair_paused"]
+        self.assertIn("src/bug.py, src/new.py", event["detail"])
+
+    def test_repair_agent_timeout_alert_carries_neither_argv_nor_prompt(self):
+        supervisor = Supervisor(self.source, self.data, "auto")
+        folder = self.repairs.home / "repairs/x/1"
+        (folder / "candidate").mkdir(parents=True)
+        with patch.dict(os.environ, {"CODEBOT_AGENT": "claude", "CODEBOT_REPAIR_AGENT_TIMEOUT": "7"}), \
+             patch("scripts.supervisor.run_process", side_effect=lambda argv, *a, **k: (_ for _ in ()).throw(
+                 subprocess.TimeoutExpired(argv, 7))) as run:
+            with self.assertRaises(RepairError) as raised:
+                supervisor.agent(folder, self.incident)
+        self.assertEqual(run.call_args.args[3], 7)
+        self.assertEqual(str(raised.exception), "Repair agent failed: no result within 7 s; see private agent log")
+
+    def test_boot_rollback_of_an_interrupted_promotion_closes_its_incident_record(self):
+        folder, path, record = self.candidate()
+        changed = self.repairs.validate(folder)
+        self.repairs.promote(folder, changed)
+        atomic_json(path, {**record, "status": "observing"})  # then the supervisor was killed
+        supervisor = Supervisor(self.source, self.data, "observe")
+        with patch("scripts.supervisor.sys.platform", "darwin"), patch("scripts.supervisor.time.sleep", side_effect=StopRequested), \
+             patch.object(supervisor, "stop"), patch.object(supervisor, "start"), patch.object(supervisor, "notify"), \
+             patch.object(supervisor.runbooks, "run"), patch.object(supervisor, "restart_allowed", return_value=True):
+            atomic_json(self.repairs.home / "control.json", {"action": "pause"})  # keep the loop to one pass
+            with self.assertRaises(StopRequested):
+                supervisor.run()
+        self.assertEqual(inventory(self.source), inventory(folder / "before"))
+        self.assertEqual(read_json(path)["status"], "rolled_back")
+        kinds = [read_json(p)["kind"] for p in (self.repairs.home / "notifications").glob("*.json")]
+        self.assertIn("repair_rolled_back", kinds)
+
+    def test_stop_signal_while_spawning_the_worker_is_deferred_until_it_is_tracked(self):
+        import scripts.supervisor as module
+        supervisor = Supervisor(self.source, self.data, "observe")
+        process = Mock(stdout=[])
+        def spawn(*args, **kwargs):
+            module.stop_signal(signal.SIGTERM, None)  # SIGTERM between fork and assignment
+            return process
+        handlers = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGTERM, handlers[0])
+        self.addCleanup(signal.signal, signal.SIGINT, handlers[1])
+        self.addCleanup(module.SPAWNING.update, active=False, stop=False)
+        with patch("scripts.supervisor.subprocess.Popen", side_effect=spawn):
+            with self.assertRaises(StopRequested):
+                supervisor.start()
+        self.assertIs(supervisor.worker, process)  # so the caller's stop() kills and reaps it
+
     def test_paused_supervisor_does_not_start_worker_on_boot(self):
         supervisor = Supervisor(self.source, self.data, "observe")
         atomic_json(self.repairs.home / "control.json", {"action": "pause"})

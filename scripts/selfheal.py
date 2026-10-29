@@ -408,6 +408,25 @@ class Repairs:
         atomic_json(path, {"failures": sorted(failures), "created": time.time()})
         return failures
 
+    def restore_drift(self, folder):
+        """Live files that differ from the repair's snapshot, restored from it; each drifted
+        live file is first copied to <folder>/drift so no edit is lost. Returns their names."""
+        folder = Path(folder)
+        before = read_json(folder / "record.json")["snapshot"]
+        current = inventory(self.source)
+        drifted = sorted(name for name in set(before) | set(current) if before.get(name) != current.get(name))
+        for name in drifted:
+            live = self.source / name
+            if live.is_file():
+                (folder / "drift" / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(live, folder / "drift" / name)
+            if name in before:
+                self._replace(folder / "before" / name, live, expected=before[name])
+            else:
+                live.unlink(missing_ok=True)
+                sync_directory(live.parent)
+        return drifted
+
     def promote(self, folder, changed):
         folder = Path(folder)
         before, candidate = folder / "before", folder / "candidate"
