@@ -15,6 +15,7 @@ from pathlib import Path
 import markdown
 
 import config
+import errors
 from command_text import parse_command
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,12 @@ _RECONCILE_SECONDS = 60
 _RECONCILE_OVERLAP_SECONDS = 300
 _PROGRESS_INTERVAL_SECONDS = 30
 _progress_lock = threading.RLock()
+# A root is posted right after its nonce is saved, so a week of history covers any crash
+# between the post and its registration; the page cap only stops a runaway scan.
+_ROOT_SEARCH_SECONDS = 7 * 86400
+_ROOT_SEARCH_PAGES = 200
+# Replies that carry content; other subtypes (joins, edits, deletions) are not replies.
+_REPLY_SUBTYPES = {None, "file_share", "thread_broadcast"}
 
 
 @contextmanager
@@ -99,7 +106,7 @@ def validate() -> None:
 
 def _accept_event(payload: dict) -> bool:
     event = payload.get("event") or {}
-    if (event.get("type") != "message" or event.get("subtype") or event.get("bot_id")
+    if (event.get("type") != "message" or event.get("subtype") not in _REPLY_SUBTYPES or event.get("bot_id")
             or not event.get("user") or event.get("user") == _bot_user
             or event.get("channel") != config.SLACK_CHANNEL_ID):
         return False
@@ -136,11 +143,20 @@ def _accept_event(payload: dict) -> bool:
         inserted = db.execute(
             "INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text) VALUES(?,?,?,?,?)",
             (_thread_id(channel, event["ts"]), channel, root, event["ts"],
-             event.get("text") or "")).rowcount
+             _event_text(event))).rowcount
     if inserted:
         log.info("Slack reply received in thread %s", _thread_id(channel, root))
         _wake.set()
     return True
+
+
+def _event_text(event: dict) -> str:
+    """The reply's text plus a line per attached file, so a reply that is only a
+    screenshot or document is not dropped as empty."""
+    files = [f"[attached file: {f.get('name') or f.get('title') or 'file'}"
+             + (f" ({f['permalink']})" if f.get("permalink") else "") + "]"
+             for f in event.get("files") or [] if isinstance(f, dict)]
+    return "\n".join(part for part in [event.get("text") or "", *files] if part)
 
 
 def _socket_request(client, request) -> None:
@@ -193,9 +209,10 @@ def open_thread(state: dict) -> str:
     marker = f"[codebot-task:{nonce}]"
     # A crash may have occurred after Slack accepted the post but before its ID
     # reached state.json or SQLite. Search our own roots before posting again.
-    cursor = None
-    for _page in range(5):
-        args = {"channel": channel, "limit": 100}
+    # Bounded by time, not pages: a busy channel must not leave the task unable to start.
+    cursor, oldest = None, f"{time.time() - _ROOT_SEARCH_SECONDS:.6f}"
+    for _page in range(_ROOT_SEARCH_PAGES):
+        args = {"channel": channel, "limit": 200, "oldest": oldest}
         if cursor:
             args["cursor"] = cursor
         page = web().conversations_history(**args)
@@ -210,7 +227,8 @@ def open_thread(state: dict) -> str:
             break
     else:
         # A truncated history is ambiguous; never risk a duplicate root.
-        raise RuntimeError(f"cannot reconcile Slack task root {marker} in channel history")
+        raise errors.Transient(f"cannot reconcile Slack task root {marker} in channel history",
+                               code="slack_history_truncated", resource="slack")
     if not root_ts:
         title = state.get("item", "(unnamed task)")
         link = state.get("item_url")

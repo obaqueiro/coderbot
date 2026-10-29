@@ -5,6 +5,7 @@ import logging
 import mimetypes
 import re
 from html import escape
+from html.parser import HTMLParser
 from email.message import EmailMessage
 from email.utils import parseaddr
 from pathlib import Path
@@ -64,13 +65,53 @@ def _strip_quoted(body: str) -> str:
 
 
 def _extract_body(payload: dict) -> str:
-    if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
+    """The text/plain body; for an HTML-only reply, its HTML as text."""
+    return _part(payload, "text/plain") or _html_text(_part(payload, "text/html"))
+
+
+def _part(payload: dict, mime: str) -> str:
+    if payload.get("mimeType") == mime and payload.get("body", {}).get("data"):
         return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", "replace")
     for part in payload.get("parts", []) or []:
-        text = _extract_body(part)
+        text = _part(part, mime)
         if text:
             return text
     return ""
+
+
+class _HtmlText(HTMLParser):
+    """Visible text with line breaks; drops scripts/styles and quoted history."""
+    _BREAKS = {"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4"}
+    _VOID = {"br", "img", "hr", "input", "meta", "link", "wbr", "area", "base", "col",
+             "embed", "source", "track"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self._skip = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        quoted = tag == "blockquote" or "gmail_quote" in (dict(attrs).get("class") or "")
+        if self._skip or tag in ("script", "style") or quoted:
+            self._skip += tag not in self._VOID
+        elif tag in self._BREAKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if self._skip and tag not in self._VOID:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
+def _html_text(html: str) -> str:
+    if not html:
+        return ""
+    parser = _HtmlText()
+    parser.feed(html)
+    parser.close()
+    return re.sub(r"\n\s*\n+", "\n\n", "".join(parser.parts)).strip()
 
 
 def send(subject: str, body: str, thread_id: str | None = None,

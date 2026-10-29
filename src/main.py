@@ -2561,15 +2561,21 @@ def _gh_quiet(*args: str) -> subprocess.CompletedProcess | None:
 
 def _bot_comments(endpoint: str) -> list[dict]:
     """github-actions[bot] comments from a PR comments endpoint ([] on any failure)."""
-    proc = _gh_quiet("api", f"{endpoint}?per_page=100")
+    proc = _gh_quiet("api", "--paginate", f"{endpoint}?per_page=100")
     if proc is None or proc.returncode != 0:
         log.warning("gh api %s failed: %s", endpoint, proc.stderr[-300:] if proc else "")
         return []
+    # --paginate prints one JSON array per page, back to back.
+    items, decoder, text, at = [], json.JSONDecoder(), proc.stdout.strip(), 0
     try:
-        items = json.loads(proc.stdout)
+        while at < len(text):
+            page, at = decoder.raw_decode(text, at)
+            items += page if isinstance(page, list) else []
+            while at < len(text) and text[at].isspace():
+                at += 1
     except json.JSONDecodeError:
         return []
-    return [c for c in items if c.get("user", {}).get("login") == "github-actions[bot]"]
+    return [c for c in items if isinstance(c, dict) and c.get("user", {}).get("login") == "github-actions[bot]"]
 
 
 def review_summary(state: dict) -> str:
@@ -3055,7 +3061,9 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
             pageInfo { hasNextPage endCursor }
             nodes {
               id isResolved isOutdated path line
-              comments(first: 100) { nodes { author { login __typename } body databaseId createdAt } } } } } } }"""
+              opener: comments(first: 1) { nodes { ...c } }
+              comments(last: 100) { totalCount nodes { ...c } } } } } } }
+    fragment c on PullRequestReviewComment { author { login __typename } body databaseId createdAt }"""
     threads: list[dict] = []
     cursor = None
     while True:
@@ -3080,13 +3088,18 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
         for node in conn.get("nodes") or []:
             if node.get("isResolved"):
                 continue
+            # A long thread keeps its opener (the reply target) and its latest 100
+            # comments, where the follow-ups that need an answer are.
+            recent = (node.get("comments") or {}).get("nodes") or []
+            opener = [c for c in ((node.get("opener") or {}).get("nodes") or [])
+                      if c and c.get("databaseId") not in {r.get("databaseId") for r in recent if r}]
             comments = [{
                 "author": (c.get("author") or {}).get("login", "?"),
                 "author_type": (c.get("author") or {}).get("__typename", ""),
                 "body": c.get("body", ""),
                 "comment_id": c.get("databaseId"),
                 "created_at": c.get("createdAt"),
-            } for c in ((node.get("comments") or {}).get("nodes") or []) if c]
+            } for c in opener + recent if c]
             first = comments[0] if comments else {}
             threads.append({
                 "id": node.get("id"),
@@ -3100,6 +3113,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
                 "author_type": first.get("author_type", ""),
                 "body": first.get("body", ""),
                 "comments": comments,
+                "comment_count": (node.get("comments") or {}).get("totalCount") or len(comments),
                 "bot_login": bot_login,
             })
         page = conn.get("pageInfo") or {}
@@ -3170,7 +3184,11 @@ def thread_has_new_comments(thread: dict, seen: dict) -> bool:
     n_seen = seen.get(thread.get("id"))
     if n_seen is None:
         return True
-    return len(thread.get("comments") or []) > n_seen
+    return _comment_count(thread) > n_seen
+
+
+def _comment_count(thread: dict) -> int:
+    return thread.get("comment_count") or len(thread.get("comments") or [])
 
 
 def _is_ocr_thread(thread: dict) -> bool:
@@ -3219,7 +3237,7 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
                 # A human's thread that got an answer but no code change stays open:
                 # closing it over the reviewer's head is their call, not the bot's. It is
                 # not picked up again until the reviewer posts something new.
-                seen[thread_id] = len(thread.get("comments") or []) + 1
+                seen[thread_id] = _comment_count(thread) + 1
                 log.info("answered human thread %s without resolving it (%s)",
                          thread_id, reason[:100])
                 continue
