@@ -6,8 +6,12 @@ El archivo opcional `e2e/codebot-harness.json` declara `version: 1`, `checks`
 cwd, recursos exclusivos, reporter y entradas relevantes. Nunca agregar flags
 que el run.sh existente no soporte. Sin contrato se usa `./run.sh`.
 
-Los outputs se declaran mediante `CODEBOT_ARTIFACT_MANIFEST`, un JSON por ejecución:
-`version`, `run_id`, `snapshot`, `status`, `artifacts` (kind, path, test_id, hash).
+El contrato solo se carga cuando existe `e2e/run.sh`.
+
+Los outputs se declaran mediante `CODEBOT_ARTIFACT_MANIFEST` (leído del entorno del
+controlador; coderbot no lo fija por ejecución), un JSON por ejecución: `version`,
+`run_id`, `snapshot`, `status`, `artifacts` (cada uno con `path`, `hash` y `size`,
+más los campos que aporte el productor, p. ej. `kind` o `test_id`).
 Preparación separada verifica dependencias y browsers por fingerprint; los probes
 deben fallar si una instalación está incompleta.
 
@@ -35,8 +39,8 @@ compartido mantiene ejecución serial sin inferir puertos, nombres de archivos o
 proveedores. Checks en otras rutas, incluidas aplicaciones anidadas, se declaran
 en `.codebot/checks.json`; no se detectan directorios propios de una aplicación.
 
-La grabación exporta `PW_VIDEO=on` para harnesses que lo consuman y conserva el
-entorno configurado. La detección legacy se limita a `e2e/test-results/`; artifacts
+La ejecución E2E de los checks finales y la grabación separada exportan
+`PW_VIDEO=on` para harnesses que lo consuman y conservan el entorno configurado. La detección legacy se limita a `e2e/test-results/`; artifacts
 externos se entregan con `CODEBOT_ARTIFACT_MANIFEST` y procedencia verificable.
 
 Para habilitar workers de Playwright, cada worker debe recibir un workspace y

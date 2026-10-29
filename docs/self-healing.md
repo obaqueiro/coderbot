@@ -31,101 +31,143 @@ host's conversation history. OpenCode repairs copy stored provider authenticatio
 and the selected provider's JSON configuration (including
 `OPENCODE_CONFIG_CONTENT` and its explicit environment references). They do not
 copy global agents, MCP definitions, or task sessions. JSONC-only custom provider
-definitions must also be supplied as JSON for this initial adapter. V2 runs use
-`--standalone`; the installed legacy CLI's private `run` path remains supported.
+definitions must also be supplied as JSON. Provider configuration that references
+`CODEBOT_*`, `GH_TOKEN` or `GITHUB_TOKEN` is refused.
 
-## Repair boundaries
+## Incidents
 
-Automatic source repairs are limited to reproducible TypeError, AttributeError,
-KeyError, IndexError, JSONDecodeError and eligible startup SyntaxError incidents.
-User-input waits, credentials/configuration, outages, disk errors, and application
-test failures are not automatically reclassified as implementation bugs.
+The worker reports failures as typed incidents, never as log text
+(`src/selfheal_events.py`). An incident has `version: 2`, `class` (`transient`,
+`agent` or `fatal`, from `src/errors.py`), `code`, `errno`, `resource`, a redacted
+`message` (500 chars), `retry_after` and up to 16 innermost `src/file:line:function`
+frames. A failure before the worker is up (an import error, a SyntaxError, a non-zero
+`SystemExit`) is written by a small bootstrap to `data/supervisor/crash.json`, which
+the supervisor reads once. The supervisor dispatches on `class` and `code`.
 
-The supervisor stops the worker before snapshotting. Snapshots include current
-uncommitted source but exclude live `data/`, `.env`, and target repositories.
-The repair agent gets its own provider session/configuration; it cannot certify
-its own patch. Promotion accepts only Python source changes plus newly added
-`tests/test_selfheal_regression_*.py` tests. Existing tests, approval/recovery
-functions, configuration, credential handling, event boundaries, dependencies,
-and supervisor files are not automatically editable. Syntax repair of approval-
-bearing `main.py` needs manual review.
+## Runbooks
 
-A new regression must fail on the old implementation and pass on the candidate.
-The full candidate suite must pass with a fresh HOME/data/XDG environment and
-without task/provider-integration credentials. New regression tests cannot skip;
-existing environment-dependent suite skips remain unchanged. Existing full-suite failures require manual review in this first
-release rather than automatic waivers.
+Operational problems get a deterministic runbook, not an LLM repair
+(`scripts/selfheal.py`):
 
-Candidate/test processes run under the trusted-agent model. Environment/path
-separation is **not an OS security sandbox**: the parent container still has
-host bind mounts and the Docker socket. Do not enable auto for untrusted code.
-The supervisor enforces promotion scope, not a security boundary around shell tools.
+- `git_index_lock`: removes an `index.lock` older than 5 minutes in the target or its
+  children when no git process runs.
+- `claude_config`: restores a corrupt `~/.claude.json` from its newest valid backup.
+- `corrupt_json`: reports state files the worker quarantined (`*.corrupt-*`).
+- `retention`: removes `outbox/checks`, `diagnostics`, repair folders and quarantined
+  files after 14 days (1 day when disk is under 5% free). It keeps the active
+  promotion and every proposed candidate.
+- `outage_backoff`: records transient outages.
 
-## Promotion, recovery and rollback
+Runbooks act only in `auto`; `observe` and `propose` log a dry run. Each runs at most
+3 times an hour and reports the same finding at most once every 6 hours. They run
+every 10 minutes and on every incident that is not a code bug.
+
+## Code repairs
+
+Only `agent`-class incidents of TypeError, AttributeError, KeyError, IndexError,
+JSONDecodeError, NameError, UnboundLocalError, UnicodeDecodeError, or a startup
+SyntaxError, reach the repair agent. The innermost frame must be in `src/`, outside
+the protected files, and the task must not be in IDLE or a wait state. A startup
+crash is repaired only on its first restart in the hour.
+
+The worker keeps running during the repair; its task stays parked in WAIT_STUCK. It
+is stopped only to drain the repair's tools, briefly around validation, and to
+promote.
+
+The repair agent works on a snapshot of the source. It never sees live `data/`,
+`.env` or the target repositories:
+
+- Its shell denies `git push`, `git commit`, `git reset`, `git checkout`,
+  `git worktree`, `gh`, `docker` and `sudo`, and reads of `/app/.env`,
+  `/proc/*/environ` and live `data/`. Claude runs without setting sources and
+  without subagents; OpenCode gets the same bash deny patterns.
+- It must write `.repair-result.json`: `status` (`fixed`, `not_reproducible`,
+  `out_of_scope` or `needs_human`), `root_cause`, `files`, `regression_test`, `risk`,
+  `summary`. Any status other than `fixed` ends the repair.
+- It has `CODEBOT_REPAIR_AGENT_TIMEOUT` seconds (default 600). A failed agent run is
+  not retried.
+- After the agent, and again after the tests, the live source is compared with the
+  snapshot. Any drift is restored, kept under `<repair>/drift`, and the supervisor
+  pauses.
+
+## Validation
+
+- At most 4 files and 400 changed lines; no deletions and no group/world-writable
+  modes.
+- Only Python source plus one new `tests/test_selfheal_regression_*.py`. Protected
+  files (`src/config.py`, `secret_store.py`, `selfheal_events.py`,
+  `repair_notifications.py`, `turn_control.py`) and approval-bearing functions
+  (`do_approval_reply`, `do_merge_reply`, `_finish_task`, `_abort_and_reset`,
+  `_validate_target_state`, `_clear_stuck`, `_acquire_single_instance_lock`) are
+  rejected.
+- On the old code, the regression test must raise the incident's exception type
+  through the incident's frame file. On the candidate it must pass. Each run has
+  300 s; new regression tests cannot skip.
+- The full suite runs with a fresh HOME/data/XDG and no task credentials (900 s).
+  Failures the old snapshot also has are tolerated: that baseline runs once per
+  runtime epoch and is cached in `data/supervisor/baseline/`.
+- A rejected candidate is retried with the rejection reason, within the budget:
+  2 candidates per incident and 3 admissions per UTC day, persisted in `budget.json`.
+
+Candidate and test processes are not an OS sandbox: the container still has host
+bind mounts and the Docker socket. Do not enable `auto` for untrusted code.
+
+## Promotion, observation and rollback
 
 There is one supervisor per writable source checkout and data directory. File
-preimages/postimages and promotion phases are journaled in `data/supervisor`.
-The whole live source snapshot must still match before promotion; concurrent
-edits cancel it. Workers do not start against partially applied patches.
+preimages, postimages and promotion phases are journaled in `data/supervisor`. The
+live source must still match the snapshot before promotion; concurrent edits cancel
+it. Interrupted promotions roll back before the worker starts. Rollback changes only
+files that still match the repair's version; a conflict pauses the worker until an
+operator fixes it and runs `--control resolve`.
 
-Interrupted promotions roll back before worker startup. Rollback changes only
-files still matching the repair's version; divergent human edits are preserved
-and require operator intervention. Failed promotion/observation restores the
-original source without rewinding task state or externally accepted effects.
-State saved by the repaired worker remains authoritative even after rollback;
-the original worker may retry the interrupted phase with its preserved receipts.
+After a promotion the supervisor observes the worker for
+`max(900, CODEBOT_AGENT_TIMEOUT + 900)` seconds (45 minutes by default). Recovery means
+the incident's phase completes, for the same task, into a state other than WAIT_STUCK
+(for a startup incident: the worker reports ready). A new incident, a worker exit, a
+pause or a rollback request in that window rolls the patch back.
 
-Runtime fingerprints invalidate computational agent checkpoints/check caches.
-Task identities and externally accepted PR/message/backlog receipts are retained.
-Recovery tickets are bound to the task, target, state/decision version and new
-runtime fingerprint, and consumed durably before phase execution. They can resume the matching incident's WAIT_STUCK phase,
-not approve a proposal, replace a new question, or force a different task forward.
+Task state saved by the repaired worker stays authoritative after a rollback.
+Runtime fingerprints invalidate agent checkpoints and check caches; PR, message and
+backlog receipts are kept. Recovery tickets are bound to the task, target,
+state/decision version and the new runtime fingerprint. They resume the incident's
+WAIT_STUCK phase only; they never approve, answer or move another task.
 
-Recovery requires the task to advance legitimately during a 15-minute observation
-window, not merely an exit-code-zero restart. Startup repairs require worker
-readiness. Two candidates per incident and three daily candidate admissions are
-persisted across restarts. Provider execution has a 10-minute deadline; full-suite
-validation has a 15-minute deadline. Liveness/startup restarts are limited to
-three per hour, persisted across supervisor restarts; exhaustion pauses the worker.
+Each promotion is announced with the root cause, a per-file diff stat and the exact
+rollback command.
 
-## Communication and provider independence
+## Restarts and health
 
-Supervisor events contain opaque task/provider/channel/conversation references.
-The delivery bridge uses the existing communication facade and durable receipts;
-Email and Slack are adapters, not dependencies of the supervisor state machine.
-Future adapters use the same event contract. Backlog updates remain worker-owned;
-the supervisor never calls Jira/GitHub/GDoc clients or changes backlog claims.
+Liveness/startup restarts are limited to three per hour, `restart_count × 2` seconds
+apart. When they are used up, a breaker opens instead of pausing forever: cooldowns
+of 5, 10, 20, 40 minutes up to 1 hour, then one probe start; 10 healthy minutes close
+it. A `fatal` crash (missing credential, broken configuration) opens the breaker at
+once. The worker counts as stalled after `max(180, 3 × CODEBOT_POLL_INTERVAL)` seconds
+without a heartbeat.
 
-Delivery failures keep events queued and cannot invalidate a successful repair.
-Channel changes do not automatically redirect private queued messages.
-Delivery runs in a bounded subprocess, not the task loop. Its receipts use an
-isolated namespace, sending is locked, and interrupted attempts rotate so one
-unresponsive event does not starve the rest. The supervisor retries while paused.
+With self-healing on, `scripts/healthcheck.sh` watches
+`data/supervisor/heartbeat.json`: unhealthy after 60 s, PID 1 killed after
+`CODEBOT_HEARTBEAT_HARD` (default 600 s). A paused supervisor reports unhealthy and is
+never killed.
 
-Operator controls are currently local, through the stable supervisor CLI:
+## Communication
+
+Supervisor events carry opaque task, provider, channel and conversation references.
+The delivery bridge uses the existing communication facade and durable receipts.
+The supervisor never calls Jira, GitHub or GDoc clients. Delivery failures keep events
+queued; delivery runs in a bounded subprocess. Handled events and delivered
+notifications are pruned after 7 days.
+
+## Operator controls
 
 ```bash
 docker compose exec codebot python3 /opt/coderbot-supervisor/supervisor.py --control pause
 docker compose exec codebot python3 /opt/coderbot-supervisor/supervisor.py --control resume
+docker compose exec codebot python3 /opt/coderbot-supervisor/supervisor.py --control resolve
+docker compose exec codebot python3 /opt/coderbot-supervisor/supervisor.py --control rollback <incident-id>
 ```
 
-`docker compose stop` cancels repairs and never restarts the worker. Channel-native
-repair approval/control commands and broad automatic stall diagnosis are not part
-of this initial rollout. Use local controls/manual review for those cases.
-
-## Operational checks
-
-- Supervisor heartbeat remains fresh while the worker is intentionally stopped.
-- Heartbeats stop when supervisor operation deadlines expire; hard-stale checks
-  trigger container recovery, including interrupted-promotion rollback.
-- Worker heartbeat/readiness stalls get bounded restarts, not blind code rewrites.
-- Python agent/check subprocess groups and Linux orphaned descendants are stopped
-  before promotion. Unowned Docker resources are never automatically removed.
-- Private repair logs/journals are not attachments; notifications contain status
-  and changed paths, not secrets or full model prompts.
-- Source/image drift is explicit: only `/app/src` Python edits apply via worker
-  restart. Entrypoint, baked plugin and dependency repairs require rebuilding.
-
-Implementation/tests do not enable self-healing or restart the live bot. This is
-an initial guarded rollout: synthetic promotion/rollback/lifecycle tests are not
-a substitute for validating real provider credentials and the rebuilt image.
+`rollback` undoes only the latest committed promotion; any other id is refused.
+`resolve` clears a rollback conflict and resumes. `docker compose stop` cancels
+repairs and never restarts the worker. Only `/app/src` Python edits apply through a
+worker restart; entrypoint, plugin and dependency changes need an image rebuild.

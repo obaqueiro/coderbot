@@ -20,3 +20,31 @@ bumping a pin in the `Dockerfile` (`docker run --rm --entrypoint bash <image> -c
 | C8 `openspec-update-change` skill present | image built from the current Dockerfile | present, with apply/archive/explore/propose/sync. An image built before the Dockerfile generated `/opt/coderbot/openspec-skills` (e.g. a 2 Sep `coderbot-codebot:latest`) lacks the directory, and coderbot then refuses to start: rebuild before deploying |
 | C10 OpenCode `prompt_async` with `format: json_schema` | opencode 1.18.18, 1.18.29, 1.19.5; DeepSeek v4.1 Flash via OpenRouter | **broken**: the prompt is accepted but every later `GET /session/{id}/message` fails with `Expected OutputFormatJsonSchema` (the server cannot re-encode the stored format), which also breaks the bridge. OpenCode uses the text-JSON result plus one repair turn instead |
 | C10 bash permission `{permission: bash, pattern: "git push*", action: deny}` after allow-all | opencode 1.18.18 | blocks `git push` and `git -C . push`; plain turns complete with DeepSeek v4.1 Flash |
+
+## What the code does now (29 Oct)
+
+The table above is the record of the 28 Oct checks. Since then:
+
+- **C0:** coderbot sets only `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` and
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (`src/tool_policy.py`). It passes
+  `--dangerously-skip-permissions`, not `--permission-mode`. The startup runtime probe
+  (`src/retention.py`) checks the pinned versions and the flags coderbot uses.
+- **C1:** with Caveman on there is a fourth plugin dir.
+- **C3:** a missing `structured_output` is not treated as a failed turn. In the phases
+  that need a structured field (VERIFYING, INTERNAL_REVIEW, ADDRESS_REVIEW,
+  ADDRESS_PR_THREADS) coderbot asks once more in the same session with tools off.
+  Otherwise, or when that repair fails, the turn's text is used (`src/turns.py`).
+- **C4:** deny rules use both `:*` and ` *` suffixes; planning and read-only phases
+  also deny commit, reset, checkout, switch, merge, rebase and stash. A further layer
+  was added: the agent's git and gh run without credentials, so a push the rules miss
+  still fails.
+- **C5:** implemented as recorded: `python3 guard.py || true` with a 5 s timeout; the
+  guard denies only through its JSON reply and always exits 0.
+- **C6:** production uses `--output-format json`, not `stream-json`.
+  `--disallowedTools Task Agent` applies to the phases in `tool_policy.NO_SUBAGENTS`
+  (every working phase after approval) unless `CODEBOT_EXECUTION=subagent`; read-only
+  phases also disallow Edit/Write.
+- **C7:** utility calls use `CODEBOT_UTILITY_MODEL` when set (not a fixed Haiku), effort
+  low and `CODEBOT_UTILITY_TIMEOUT`. The reply classifier lives in `src/replies.py`.
+- **C10:** unchanged. The OpenCode JSON repair turn is limited to the four phases
+  listed under C3.

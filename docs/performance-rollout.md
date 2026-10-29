@@ -28,14 +28,13 @@ que resolvería los seeds al home de root en vez del usuario del servicio.
 
 No restaurar un backup de estado viejo sobre una tarea que ya avanzó. Primero
 detener y limpiar el intento, conservar el cursor/store actual y elegir una imagen
-compatible con esos datos aditivos. Trust-total se mantiene durante rollback;
-una imagen antigua sin ese comportamiento solo se utiliza con el plugin gestionado
-de confianza total correspondiente.
+compatible con esos datos aditivos. Una imagen anterior a las guardas del runtime
+(`CODEBOT_TOOL_POLICY`) no las aplica: el agente vuelve a poder hacer push.
 
 ## Verificación de rollback aislado
 
 Probar la imagen anterior en un contenedor aislado con el código/plugin gestionado
-compatible. Validar integración headless de confianza total, store, reanudación,
+compatible. Validar integración headless, store, reanudación,
 cancelación, artifacts y entrega sin revertir el servicio productivo.
 
 La verificación de mounts comprueba que release cambia solo /app y rollback
