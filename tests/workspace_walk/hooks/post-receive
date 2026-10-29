@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Bare-origin hook for the workspace walk: logs every ref update to $WALK_DIR/pushes.log
+(a no-op push updates nothing and logs nothing). WALK_KILL=push kills coderbot
+(kill -9 of $WALK_DIR/driver.pid) once, right after its first feature-branch push landed."""
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+
+walk = Path(os.environ["WALK_DIR"])
+repository = Path.cwd().name.removesuffix(".git")
+for line in sys.stdin:
+    old, new, ref = line.split()
+    with (walk / "pushes.log").open("a") as log:
+        log.write(json.dumps({"repo": repository, "ref": ref, "old": old, "new": new}) + "\n")
+    marker = walk / "fault-kill-push"
+    if os.environ.get("WALK_KILL") == "push" and ref.startswith("refs/heads/walkbot-") and not marker.exists():
+        marker.touch()
+        os.kill(int((walk / "driver.pid").read_text()), signal.SIGKILL)
