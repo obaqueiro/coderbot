@@ -33,8 +33,7 @@ class CheckRepairTests(unittest.TestCase):
         for status in ("infrastructure", "unknown", "fail"):
             with self.subTest(status=status):
                 state = {"state": "E2E", "slug": "task", "item": "task", "session_id": "sid"}
-                with patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
-                     patch.object(main, "_scope_drift", return_value=False), \
+                with patch.object(main, "_scope_drift", return_value=False), \
                      patch.object(main, "content_snapshot", return_value="same"), \
                      patch.object(main.final_checks, "run", return_value=failed(status)), \
                      patch.object(main, "save_state"), patch.object(main, "email") as send, \
@@ -110,8 +109,7 @@ class CheckRepairTests(unittest.TestCase):
     def test_legacy_e2e_reply_gets_repair_prompt_not_bare_answer(self):
         state = {"state": "WAIT_REPLY", "return_state": "E2E", "slug": "task",
                  "final_check_report": failed(), "final_check_round": 3}
-        with patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
-             patch.object(main, "content_snapshot", return_value="same"):
+        with patch.object(main, "content_snapshot", return_value="same"):
             prompt = main._reply_prompt(state, "E2E", "Fix it; don't ask me to edit the bot")
         self.assertIn("Diagnose before retrying", prompt)
         self.assertIn("missing-pytz.log", prompt)
@@ -152,8 +150,7 @@ class CheckRepairTests(unittest.TestCase):
     def test_push_repair_preserves_push_context_and_never_pushes(self):
         state = {"state": "PUSHING", "slug": "task", "item": "task",
                  "push_context": {"continuation": "threads", "output": "RESOLVE: x"}}
-        with patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
-             patch.object(main.final_checks, "run", return_value=failed()), \
+        with patch.object(main.final_checks, "run", return_value=failed()), \
              patch.object(main, "content_snapshot", return_value="same"), \
              patch.object(main, "save_state"), patch.object(main, "email"), patch.object(main, "git") as git:
             main.do_push(state)
@@ -190,11 +187,10 @@ class CheckRepairTests(unittest.TestCase):
         self.assertIn("Implement missing approved functionality", prompt)
         self.assertIn("Do not weaken inventory validation", prompt)
 
-    def test_evidence_push_requires_checks_even_when_default_disabled(self):
+    def test_push_requires_passing_final_checks(self):
         state = {"state": "PUSHING", "slug": "task", "item": "task",
                  "push_context": {"continuation": "evidence"}}
-        with patch.object(main.config, "DETERMINISTIC_CHECKS", False), \
-             patch.object(main.final_checks, "run", return_value=failed()) as run, \
+        with patch.object(main.final_checks, "run", return_value=failed()) as run, \
              patch.object(main, "content_snapshot", return_value="same"), \
              patch.object(main, "save_state"), patch.object(main, "email"), patch.object(main, "git") as git:
             main.do_push(state)

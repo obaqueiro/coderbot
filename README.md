@@ -363,7 +363,7 @@ Top engineering priority: implement the requested behavior with as little code a
 possible. Prefer reuse, simplification and justified net code removal; preserve
 existing functionality, tests, readability and safety. Line-count tricks do not count.
 
-With `CODEBOT_DETERMINISTIC_CHECKS=true` (default), the feature gate runs extensive
+The feature gate (run by coderbot, not the agent) runs extensive
 unit/functional checks, then genuinely selected E2E covering the actual changes,
 including changed harness paths. E2E plans declare `kind: "e2e"`, focused plans declare
 `scope: "focused"`, and a structured reporter must prove positive test execution

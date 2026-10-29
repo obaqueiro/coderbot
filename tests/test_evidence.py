@@ -59,11 +59,6 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(evidence.supplied_artifacts([video], "fixture"), [])
 
     def test_timeout_bytes_and_ffmpeg_timeout_are_best_effort(self):
-        with patch("evidence.operations.run", side_effect=subprocess.TimeoutExpired(["run"], 1,
-                 output=b"partial", stderr=b"error")), patch("evidence._teardown_stack"):
-            passed, output = evidence.run_suite()
-        self.assertFalse(passed)
-        self.assertIn("partial", output)
         with tempfile.TemporaryDirectory() as root:
             clip = Path(root) / "clip.webm"
             clip.write_bytes(b"video")
@@ -202,29 +197,6 @@ class EvidenceTests(unittest.TestCase):
         diagnostic = json.loads(next(Path(self.scratch.name).rglob("diagnostic.json")).read_text())
         self.assertEqual(diagnostic["stage"], "implementation")
         self.assertIn("missing.spec.ts", diagnostic["detail"])
-
-    def test_suite_timeout_tears_down_stack_and_reports(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            e2e_dir = Path(tmp)
-            (e2e_dir / "docker-compose.e2e.yaml").write_text("services: {}\n")
-            calls = []
-
-            def fake_run(cmd, **kwargs):
-                calls.append(cmd)
-                if cmd[0] == "./run.sh":
-                    raise subprocess.TimeoutExpired(cmd, 1, output="partial", stderr="")
-                return subprocess.CompletedProcess(cmd, 0, "", "")
-
-            with patch.object(evidence, "E2E_DIR", e2e_dir), \
-                 patch.object(evidence.config, "E2E_TIMEOUT_SECONDS", 1), \
-                 patch("evidence.subprocess.run", side_effect=fake_run), \
-                 patch("evidence.operations.run", side_effect=fake_run):
-                passed, output = evidence.run_suite()
-
-        self.assertFalse(passed)
-        self.assertIn("TIMED OUT", output)
-        self.assertIn("partial", output)
-        self.assertEqual(calls[1][:4], ["docker", "compose", "-f", "docker-compose.e2e.yaml"])
 
     def test_teardown_is_noop_without_compose_file(self):
         with tempfile.TemporaryDirectory() as tmp, \

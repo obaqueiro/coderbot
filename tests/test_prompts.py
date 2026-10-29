@@ -14,12 +14,12 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gma
 
 CARDS = {"EXPLORE": prompts.EXPLORE, "PROPOSE": prompts.PROPOSE, "REVISE_PROPOSAL": prompts.REVISE_PROPOSAL,
          "IMPLEMENT": prompts.IMPLEMENT, "VERIFY": prompts.VERIFY, "INTERNAL_REVIEW": prompts.INTERNAL_REVIEW,
-         "FIX_E2E": prompts.FIX_E2E, "FIX_ARCHIVE": prompts.FIX_ARCHIVE, "ADDRESS_REVIEW": prompts.ADDRESS_REVIEW,
+         "FIX_ARCHIVE": prompts.FIX_ARCHIVE, "ADDRESS_REVIEW": prompts.ADDRESS_REVIEW,
          "ADDRESS_PR_THREADS": prompts.ADDRESS_PR_THREADS, "APPLY_PR_FEEDBACK": prompts.APPLY_PR_FEEDBACK,
          "RESOLVE_CONFLICTS": prompts.RESOLVE_CONFLICTS, "REMOVE_EVIDENCE_FROM_REPO": prompts.REMOVE_EVIDENCE_FROM_REPO}
 SKILLS = {"EXPLORE": "brainstorming", "PROPOSE": "openspec-propose", "IMPLEMENT": "openspec-apply-change",
           "VERIFY": "verification-before-completion", "INTERNAL_REVIEW": "requesting-code-review",
-          "FIX_E2E": "systematic-debugging", "ADDRESS_REVIEW": "receiving-code-review",
+          "ADDRESS_REVIEW": "receiving-code-review",
           "ADDRESS_PR_THREADS": "receiving-code-review"}
 MARKERS = ("QUALITY_GATE:", "INTERNAL_REVIEW:", "CHECK_PLAN:", "RESOLVE:", "E2E_SPEC:", "ATTACH:",
            "CREDENTIAL_REQUEST:", "NEED_USER_INPUT:")

@@ -1363,8 +1363,6 @@ def _complete_implementation(state: dict, result) -> None:
         instructions = json.loads(_run_checked([
             "openspec", "instructions", "apply", "--change", slug, "--json"]))
         plan = task_phases.validate_progress(config.REPO_PATH, slug, instructions)
-        if plan["final_checks"] and not config.DETERMINISTIC_CHECKS:
-            raise ValueError("Pending controller final-suite tasks require deterministic checks")
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         _enter_stuck(state, "IMPLEMENTING", "Cannot confirm implementation completion: " + str(error))
         return
@@ -1672,8 +1670,6 @@ def _complete_verify(state: dict, result) -> None:
             task_phases.validate_progress(config.REPO_PATH, slug, instructions)
         deferred = parsed.get("deferred", 0)
         if deferred:
-            if not config.DETERMINISTIC_CHECKS:
-                raise ValueError("Deferred final-suite tasks require deterministic controller checks")
             owned = task_phases.inspect(config.REPO_PATH, slug)
             if owned["implementation"] or len(owned["final_checks"]) != deferred:
                 raise ValueError("Deferred tasks must be explicitly owned by codebot final checks")
@@ -1751,7 +1747,7 @@ def _controller_verify(state: dict) -> bool:
         deferred = len(pending["final_checks"])
         total, complete = progress["total"], progress["complete"]
         if instructions.get("state") not in (("all_done", "ready") if deferred else ("all_done",)) \
-                or complete + deferred != total or (deferred and not config.DETERMINISTIC_CHECKS):
+                or complete + deferred != total:
             return False
     except Exception as error:  # noqa: BLE001 - the agent turn repairs and reports it
         log.info("controller verification needs the agent: %s", error)
@@ -1830,89 +1826,30 @@ def _tracked_snapshot() -> tuple[str, str]:
             git("status", "--porcelain", "--untracked-files=no"))
 
 
-def _finish_e2e_repair(state: dict) -> None:
-    before = (state.pop("e2e_repair_head"), state.pop("e2e_repair_status"))
-    if _tracked_snapshot() != before:
-        state["verify_round"] = 0
-        state["state"] = "VERIFYING"
-        state.pop("e2e_passed", None)
-    else:
-        state["state"] = "E2E"
-
-
 def do_e2e(state: dict) -> None:
     if _scope_drift(state):
         return
-    if config.DETERMINISTIC_CHECKS:
-        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
-        state["final_check_report"] = report
-        save_state(state)
-        if report["status"] != "pass":
-            _begin_check_repair(state, report, resume="E2E")
-            return
-        state.pop("check_repair", None)
-        state.pop("final_repair_round", None)
-        state.pop("final_check_round", None)
-        state["e2e_passed"] = report.get("suite_status") == "pass" and bool(state.get("has_e2e_harness")) and not any(
-            w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
-        if state.get("quality_report", {}).get("deferred"):
-            _commit_final_check_tasks(state)
-        if state.pop("feedback_delivery_pending", False) and state.get("archive_path"):
-            _queue_push(state, "feedback", "Requested corrections verified.",
-                        feedback=state.get("pending_feedback", ""))
-            return
-        state["state"] = "ARCHIVING"
-        announce_milestone(state, "archiving", "Final checks passed; I'm archiving the change.")
+    for key in ("e2e_repair_head", "e2e_repair_status"):  # the retired agent-run suite's repair
+        state.pop(key, None)
+    report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
+    state["final_check_report"] = report
+    save_state(state)
+    if report["status"] != "pass":
+        _begin_check_repair(state, report, resume="E2E")
         return
-    if "e2e_repair_head" in state and "e2e_repair_status" in state:
-        _finish_e2e_repair(state)
-        if state["state"] != "E2E":
-            return
-    if not state.get("has_e2e_harness"):
-        log.info("no e2e harness detected for this task; skipping the e2e gate")
-        state["state"] = "ARCHIVING"
-        announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
+    state.pop("check_repair", None)
+    state.pop("final_repair_round", None)
+    state.pop("final_check_round", None)
+    state["e2e_passed"] = report.get("suite_status") == "pass" and bool(state.get("has_e2e_harness")) and not any(
+        w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
+    if state.get("quality_report", {}).get("deferred"):
+        _commit_final_check_tasks(state)
+    if state.pop("feedback_delivery_pending", False) and state.get("archive_path"):
+        _queue_push(state, "feedback", "Requested corrections verified.",
+                    feedback=state.get("pending_feedback", ""))
         return
-    log.info("running e2e suite (e2e/run.sh)")
-    if any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", [])):
-        state["e2e_passed"] = False
-        state["state"] = "ARCHIVING"
-        return
-    passed, output = evidence.run_suite()
-    if not passed:
-        state["e2e_round"] = state.get("e2e_round", 0) + 1
-        log.warning("e2e suite FAILED (round %d/%d); resuming session to fix. Tail:\n%s",
-                    state["e2e_round"], config.E2E_MAX_ROUNDS, output[-1500:])
-        trail(state, f"e2e suite failed (round {state['e2e_round']}/{config.E2E_MAX_ROUNDS})",
-              output[-1500:])
-        if state["e2e_round"] > config.E2E_MAX_ROUNDS:
-            log.warning("e2e round limit (%d) reached; asking user for help instead of retrying",
-                        config.E2E_MAX_ROUNDS)
-            email(state, "e2e suite stuck — needs your help",
-                  f"Task: {state['item']}\n\nThe e2e suite has failed {config.E2E_MAX_ROUNDS} "
-                  "times in a row and I could not fix it myself (this is often caused by "
-                  "something outside the code, e.g. a stuck process/port left over from a "
-                   "prior run). Diagnostic output is attached.\n\n"
-                  "Please investigate, then reply with guidance (or tell me what to try) "
-                   "to continue.", [diagnostics.report(phase_checkpoint.store(), state,
-                   config.REPO_PATH, config.DATA_DIR, "E2E", detail=output)])
-            state["return_state"] = "E2E"
-            state["pending_question"] = handoffs.render_decision(state["pending_decision"]) if state.get("pending_decision") else "How should I repair the failed E2E suite?"
-            state["state"] = "WAIT_REPLY"
-            return
-        state["e2e_repair_head"], state["e2e_repair_status"] = _tracked_snapshot()
-        save_state(state)
-        result = agent_runner.resume(state["session_id"], prompts.render(prompts.FIX_E2E, output=output))
-        if handle_result(state, result, "E2E"):
-            return
-        _finish_e2e_repair(state)
-        return  # loop re-enters E2E and re-runs the suite
-    log.info("e2e suite PASSED")
-    state["e2e_round"] = 0
-    state["e2e_passed"] = True
     state["state"] = "ARCHIVING"
-    trail(state, "e2e suite passed; archiving the change")
-    announce_milestone(state, "archiving", "The e2e suite passed; I'm archiving the OpenSpec change.")
+    announce_milestone(state, "archiving", "Final checks passed; I'm archiving the change.")
 
 
 def _begin_check_repair(state: dict, report: dict, *, resume: str) -> None:
@@ -3485,14 +3422,13 @@ def do_push(state: dict) -> None:
     if continuation not in ("review", "feedback", "threads", "conflicts", "evidence"):
         raise RuntimeError(f"invalid push continuation: {continuation!r}")
 
-    if config.DETERMINISTIC_CHECKS or state.get("check_repair", {}).get("evidence") or continuation == "evidence":
-        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
-        state["final_check_report"] = report
-        save_state(state)
-        if report["status"] != "pass":
-            _begin_check_repair(state, report, resume="PUSHING")
-            return
-        state.pop("check_repair", None)
+    report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
+    state["final_check_report"] = report
+    save_state(state)
+    if report["status"] != "pass":
+        _begin_check_repair(state, report, resume="PUSHING")
+        return
+    state.pop("check_repair", None)
     git("push", "origin", ("HEAD:refs/heads/" + state["remote_branch"])
         if state.get("remote_branch") else state["branch"])
     state["delivered_sha"] = git("rev-parse", "HEAD")
@@ -5672,19 +5608,16 @@ def _continue_internal_review(state: dict, result) -> None:
 
 def _continue_e2e(state: dict, result) -> None:
     _grant_budget(state, "answer during E2E", "e2e_round", "final_check_round", "final_repair_round")
-    if state.get("check_repair") and config.DETERMINISTIC_CHECKS:
+    if state.get("check_repair"):
         _complete_check_repair(state, result)
         return
     # Upgrade legacy WAIT_REPLY final-check blockers into repair before rerunning.
-    if config.DETERMINISTIC_CHECKS and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
+    if state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
         _begin_check_repair(state, state["final_check_report"], resume="E2E")
         state["check_repair"]["guidance"] = "Prior user-guided investigation:\n" + result.output
         save_state(state)
         return
-    if "e2e_repair_head" in state and "e2e_repair_status" in state:
-        _finish_e2e_repair(state)
-    else:
-        state["state"] = "E2E"  # re-run the suite on the (answer-informed) fix
+    state["state"] = "E2E"  # re-run the final checks on the (answer-informed) fix
 
 
 def _continue_archiving(state: dict, result) -> None:
@@ -5758,7 +5691,7 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
     if phase == "EVIDENCE_REVIEW":
         return (prompts.ENVIRONMENT + "\n" + prompts.PHASE_RULES[phase] +
                 "\n" + prompts.fenced_authoritative("user recovery guidance", reply))
-    if phase == "E2E" and config.DETERMINISTIC_CHECKS and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
+    if phase == "E2E" and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
         state["check_repair"] = {"attempt": 1, "resume": "E2E",
             "checks": check_repair.unresolved(state["final_check_report"]),
             "before": content_snapshot(config.REPO_PATH), "guidance": reply}

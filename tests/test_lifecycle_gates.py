@@ -147,10 +147,9 @@ class LifecycleGateTests(unittest.TestCase):
         patcher = patch.object(main, "announce_milestone")
         patcher.start()
         self.addCleanup(patcher.stop)
-        for patcher in (patch.object(main.config, "DETERMINISTIC_CHECKS", False),
-                        patch.object(main, "content_snapshot", return_value="fixture")):
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        patcher = patch.object(main, "content_snapshot", return_value="fixture")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def base_state(self, **updates):
         state = {
@@ -329,78 +328,6 @@ class LifecycleGateTests(unittest.TestCase):
         self.assertEqual(state["state"], "VERIFYING")
         self.assertEqual(state["verify_round"], 1)
         self.assertNotIn("return_state", state)
-
-    def test_e2e_repair_with_tracked_change_returns_to_verification(self):
-        state = self.base_state(state="E2E", e2e_round=0)
-        with patch.object(main.evidence, "run_suite", return_value=(False, "failure")), \
-             patch.object(main, "git", side_effect=["head-1", "", "head-2", ""]), \
-             patch.object(main.agent_runner, "resume", return_value=result("fixed")):
-            main.do_e2e(state)
-
-        self.assertEqual(state["state"], "VERIFYING")
-        self.assertEqual(state.get("verify_round", 0), 0)
-
-    def test_e2e_repair_snapshot_is_saved_before_agent_resume(self):
-        state = self.base_state(state="E2E", e2e_round=0)
-        events = []
-
-        def save(saved):
-            events.append(("save", saved["e2e_repair_head"], saved["e2e_repair_status"]))
-
-        def resume(*args):
-            events.append(("resume",))
-            return result("fixed")
-
-        with patch.object(main.evidence, "run_suite", return_value=(False, "failure")), \
-             patch.object(main, "git", side_effect=["head-1", "", "head-2", ""]), \
-             patch.object(main, "save_state", side_effect=save), \
-             patch.object(main.agent_runner, "resume", side_effect=resume):
-            main.do_e2e(state)
-
-        self.assertEqual(events[0], ("save", "head-1", ""))
-        self.assertEqual(events[1], ("resume",))
-
-    def test_e2e_repair_without_tracked_change_reruns_e2e(self):
-        state = self.base_state(state="E2E", e2e_round=0)
-        with patch.object(main.evidence, "run_suite", return_value=(False, "failure")), \
-             patch.object(main, "git", side_effect=["head-1", " M tracked", "head-1", " M tracked"]), \
-             patch.object(main.agent_runner, "resume", return_value=result("no code change")):
-            main.do_e2e(state)
-
-        self.assertEqual(state["state"], "E2E")
-
-    def test_e2e_restart_with_changed_repair_enters_verification_before_suite(self):
-        state = self.base_state(
-            state="E2E", e2e_round=1, e2e_repair_head="head-1", e2e_repair_status="")
-        with patch.object(main, "git", side_effect=["head-2", ""]), \
-             patch.object(main.evidence, "run_suite") as run_suite:
-            main.do_e2e(state)
-
-        run_suite.assert_not_called()
-        self.assertEqual(state["state"], "VERIFYING")
-        self.assertNotIn("e2e_repair_head", state)
-        self.assertNotIn("e2e_repair_status", state)
-
-    def test_e2e_restart_with_unchanged_repair_reruns_suite(self):
-        state = self.base_state(
-            state="E2E", e2e_round=1, e2e_repair_head="head-1",
-            e2e_repair_status=" M tracked")
-        with patch.object(main, "git", side_effect=["head-1", " M tracked"]), \
-             patch.object(main.evidence, "run_suite", return_value=(True, "ok")) as run_suite:
-            main.do_e2e(state)
-
-        run_suite.assert_called_once_with()
-        self.assertEqual(state["state"], "ARCHIVING")
-
-    def test_e2e_paths_enter_archiving(self):
-        no_harness = self.base_state(state="E2E", has_e2e_harness=False)
-        passed = self.base_state(state="E2E", has_e2e_harness=True)
-        with patch.object(main.evidence, "run_suite", return_value=(True, "ok")):
-            main.do_e2e(no_harness)
-            main.do_e2e(passed)
-
-        self.assertEqual(no_harness["state"], "ARCHIVING")
-        self.assertEqual(passed["state"], "ARCHIVING")
 
     def test_e2e_exhaustion_reply_without_repair_snapshot_reruns_e2e(self):
         state = self.base_state(

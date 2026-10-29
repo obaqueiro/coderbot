@@ -231,7 +231,6 @@ OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL") or ""
 # Empty preserves OpenCode/provider defaults; explicit values control GPT reasoning.
 OPENCODE_EFFORT = (os.environ.get("OPENCODE_EFFORT") or "").strip().lower()
 OPENCODE_TRANSPORT = os.environ.get("CODEBOT_OPENCODE_TRANSPORT", "http")
-DETERMINISTIC_CHECKS = os.environ.get("CODEBOT_DETERMINISTIC_CHECKS", "on").lower() != "off"
 CONTEXT_TOKEN_BUDGET = _int("CODEBOT_CONTEXT_TOKEN_BUDGET", 80000)
 OPENCODE_ROLE_MODELS = json.loads(os.environ.get("CODEBOT_OPENCODE_ROLE_MODELS", "{}"))
 OPENCODE_ROLE_EFFORTS = json.loads(os.environ.get("CODEBOT_OPENCODE_ROLE_EFFORTS", "{}"))
@@ -263,7 +262,6 @@ PROVIDER_TIMEOUT_SECONDS = _int("CODEBOT_PROVIDER_TIMEOUT", 180)
 SUBPROCESS_TIMEOUT_SECONDS = _int("CODEBOT_SUBPROCESS_TIMEOUT", 120)
 # Cap the e2e-fails -> resume-to-fix -> re-run loop so a failure Claude can't resolve
 # (e.g. an external resource stuck from a prior run) doesn't spin forever.
-E2E_MAX_ROUNDS = _int("CODEBOT_E2E_MAX_ROUNDS", 5)
 QUALITY_GATE_MAX_ROUNDS = _int("CODEBOT_QUALITY_GATE_MAX_ROUNDS", 3)
 # A suite that ran zero tests (or skipped them all) is always reported as such. With this
 # flag on, it also fails the final gate, but only for checks the agent declared in its

@@ -180,26 +180,6 @@ def _teardown_stack() -> None:
         log.exception("e2e stack teardown failed")
 
 
-def run_suite() -> tuple[bool, str]:
-    """Run the full e2e suite via run.sh. Returns (passed, output tail)."""
-    log.info("running full e2e suite in %s", E2E_DIR)
-    try:
-        proc = operations.run(
-            ["./run.sh"], cwd=E2E_DIR,
-            timeout=config.E2E_TIMEOUT_SECONDS,
-            exclusive=[str(E2E_DIR)],
-        )
-    except subprocess.TimeoutExpired as exc:
-        log.error("e2e suite timed out after %ss; tearing down leaked stack",
-                  config.E2E_TIMEOUT_SECONDS)
-        _teardown_stack()
-        tail = (_text(exc.stdout) + "\n" + _text(exc.stderr))[-6000:]
-        return False, f"e2e suite TIMED OUT after {config.E2E_TIMEOUT_SECONDS}s\n{tail}"
-    output = (proc.stdout + "\n" + proc.stderr)[-8000:]
-    log.info("e2e suite exit=%d", proc.returncode)
-    return proc.returncode == 0, output
-
-
 def record_evidence(spec_files: list[str], kind: str | None) -> list[Path]:
     """Re-run the given spec/collection files with evidence recording forced on;
     return the recorded evidence file(s) — a stitched Playwright video, or the

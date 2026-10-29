@@ -57,7 +57,7 @@ def deploy(app, release, image):
     override = release / "rollout.json"
     mounts = preserved_mounts(inspected, release)
     override.write_text(json.dumps({"services": {"codebot": {"image": image,
-        "environment": {"CODEBOT_OPENCODE_TRANSPORT": "http", "CODEBOT_DETERMINISTIC_CHECKS": "on"},
+        "environment": {"CODEBOT_OPENCODE_TRANSPORT": "http"},
         "volumes": mounts}}}))
     compose = [*docker, "compose", "-p", "app", "-f", str(app / "docker-compose.yml")]
     if (app / "docker-compose.override.yml").exists():

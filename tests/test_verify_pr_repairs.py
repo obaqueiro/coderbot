@@ -81,8 +81,7 @@ class VerifyPrRepairTests(unittest.TestCase):
         state = {'state': 'E2E', 'session_id': 'session', 'slug': 'feature', 'item': 'task', 'quality_report': {'status': 'pass'},
                  'internal_review_report': {'status': 'pass'}, 'quality_controller_validated': True}
         report = {'status': 'fail', 'checks': [{'check': 'unit', 'gate': {'regressions': ['t']}}]}
-        with patch.object(config, 'DETERMINISTIC_CHECKS', True), \
-             patch.object(main, '_scope_drift', return_value=False), patch.object(main, 'save_state'), \
+        with patch.object(main, '_scope_drift', return_value=False), patch.object(main, 'save_state'), \
              patch.object(main.final_checks, 'run', return_value=report), \
              patch.object(main, 'email'), patch.object(main, 'trail'), \
              patch.object(main, 'content_snapshot', side_effect=['before', 'after']), \

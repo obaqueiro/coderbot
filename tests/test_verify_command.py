@@ -139,8 +139,7 @@ class VerifyCommandTests(unittest.TestCase):
     def test_e2e_runs_final_checks_without_coverage_audit(self):
         state = {"state": "E2E", "item": "task", "slug": "feature", "approved_proposal": "approved",
                  "coverage_report": {"requirements": [{"status": "missing"}]}}
-        with patch.object(config, "DETERMINISTIC_CHECKS", True), \
-             patch.object(main.final_checks, "run", return_value={"status": "pass", "checks": []}) as checks, \
+        with patch.object(main.final_checks, "run", return_value={"status": "pass", "checks": []}) as checks, \
              patch.object(main.phase_checkpoint, "store"), patch.object(main, "save_state"), \
              patch.object(main, "announce_milestone"), patch.object(main.agent_runner, "run") as agent:
             main.do_e2e(state)

@@ -17,8 +17,7 @@ class FinalCheckTests(unittest.TestCase):
         import main
         state = {"state": "PUSHING", "branch": "b", "item": "t",
                  "push_context": {"continuation": "threads", "output": "RESOLVE: x"}}
-        with patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
-             patch.object(main.final_checks, "run", return_value={"status": "indeterminate", "checks": []}), \
+        with patch.object(main.final_checks, "run", return_value={"status": "indeterminate", "checks": []}), \
              patch.object(main, "save_state"), patch.object(main, "email"), \
              patch.object(main, "content_snapshot", return_value="same"), \
              patch.object(main, "git") as git:

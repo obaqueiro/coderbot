@@ -308,26 +308,20 @@ class TaskPhaseTests(unittest.TestCase):
             self.assertIn("counts", gate.call_args.args[3])
 
     def test_implementation_can_defer_only_explicit_controller_tasks(self):
-        for deterministic in (False, True):
-            with self.subTest(deterministic=deterministic), tempfile.TemporaryDirectory() as root:
-                path = Path(root) / "openspec/changes/task/tasks.md"
-                path.parent.mkdir(parents=True)
-                path.write_text("- [x] 1. Implementation\n- [ ] 2. [codebot:final-checks] Run suite\n")
-                state = {"state": "IMPLEMENTING", "slug": "task", "item": "task"}
-                with patch.object(main.config, "REPO_PATH", Path(root)), \
-                     patch.object(main.config, "DETERMINISTIC_CHECKS", deterministic), \
-                     patch.object(main, "_run_checked", return_value=json.dumps({"state": "ready",
-                         "progress": {"total": 2, "complete": 1, "remaining": 1}})), \
-                     patch.object(main, "_scrub_evidence_from_repo", return_value=[]), patch.object(main, "trail"), \
-                     patch.object(main, "_enter_stuck") as stuck, patch.object(main, "announce_milestone") as announce:
-                    main._complete_implementation(state, SimpleNamespace(output="Done", attachments=[]))
-                if deterministic:
-                    self.assertEqual(state["state"], "VERIFYING")
-                    announce.assert_called_once()
-                    stuck.assert_not_called()
-                else:
-                    stuck.assert_called_once()
-                    announce.assert_not_called()
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("- [x] 1. Implementation\n- [ ] 2. [codebot:final-checks] Run suite\n")
+            state = {"state": "IMPLEMENTING", "slug": "task", "item": "task"}
+            with patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main, "_run_checked", return_value=json.dumps({"state": "ready",
+                     "progress": {"total": 2, "complete": 1, "remaining": 1}})), \
+                 patch.object(main, "_scrub_evidence_from_repo", return_value=[]), patch.object(main, "trail"), \
+                 patch.object(main, "_enter_stuck") as stuck, patch.object(main, "announce_milestone") as announce:
+                main._complete_implementation(state, SimpleNamespace(output="Done", attachments=[]))
+            self.assertEqual(state["state"], "VERIFYING")
+            announce.assert_called_once()
+            stuck.assert_not_called()
 
     def test_partial_turns_in_both_paths_preserve_evidence_and_only_final_turn_announces(self):
         for via_reply in (False, True):
@@ -477,7 +471,6 @@ class TaskPhaseTests(unittest.TestCase):
             output = 'QUALITY_GATE: ' + json.dumps({"status": "pass", "openspec": "pass",
                 "commands": ["focused: pass"], "tasks": "1/2", "deferred": 1})
             with patch.object(main.config, "REPO_PATH", Path(root)), \
-                 patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
                  patch.object(main, "content_snapshot", return_value="checked-content"), \
                  patch.object(main, "handle_result", return_value=False), patch.object(main, "trail"), \
                  patch.object(main, "_run_checked", side_effect=["valid", json.dumps({"state": "ready",
@@ -486,7 +479,7 @@ class TaskPhaseTests(unittest.TestCase):
             self.assertEqual(state["state"], "INTERNAL_REVIEW")
             self.assertEqual(len(task_phases.inspect(root, "task")["final_checks"]), 1)
             with patch.object(main.config, "REPO_PATH", Path(root)), \
-                 patch.object(main.config, "DETERMINISTIC_CHECKS", True), patch.object(main, "save_state"), \
+                 patch.object(main, "save_state"), \
                  patch.object(main, "announce_milestone"), \
                  patch.object(main, "email"), \
                  patch.object(main, "_gate_failed"), \
@@ -494,7 +487,7 @@ class TaskPhaseTests(unittest.TestCase):
                 main.do_e2e(state)
             self.assertEqual(len(task_phases.inspect(root, "task")["final_checks"]), 1)
             with patch.object(main.config, "REPO_PATH", Path(root)), \
-                 patch.object(main.config, "DETERMINISTIC_CHECKS", True), patch.object(main, "save_state"), \
+                 patch.object(main, "save_state"), \
                  patch.object(main, "announce_milestone"), \
                  patch.object(main.phase_checkpoint, "store", return_value=database), \
                  patch.object(main.final_checks, "run", return_value={"status": "pass", "checks": []}):

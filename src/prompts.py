@@ -227,19 +227,6 @@ Done when: no Critical or Important finding is open. Fill review: critical and i
 # Used when the pinned Superpowers reviewer template is unavailable.
 REVIEW_GUIDE_FALLBACK = """Review checklist: does the change do what the OpenSpec requirements and scenarios say, and nothing they exclude? Are errors, edge cases and security handled? Are there tests for each changed behaviour, and do they test real behaviour? Is the code as simple as it can be and consistent with the codebase? Classify each finding as Critical (bug, data loss, security), Important (missing requirement, poor error handling, missing test) or Minor (style, small improvement)."""
 
-FIX_E2E = """The end-to-end suite failed; its output is below. Task: fix it with systematic-debugging.
-
-Steps:
-1. Find the root cause from the output before editing.
-2. When applicable, write a regression test and watch it fail.
-3. Make the minimal fix, run the focused tests, and commit.
-
-""" + fenced("e2e failure output", "$output") + """
-
-Done when: the focused tests pass. Return status done with the cause and the fix.
-"""
-
-
 FIX_ARCHIVE = """OpenSpec archival failed with the error below. Task: fix the OpenSpec planning/spec files so it can archive; edit only files under openspec/, then commit. coderbot retries the archive.
 
 """ + fenced("archive error", "$error") + """
