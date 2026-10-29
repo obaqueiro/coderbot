@@ -263,7 +263,9 @@ def pick(state):
     if not main.task_source.claim_task(chosen["text"], chosen.get("id")):
         return
     state.pop("workspace", None)
-    state["state"] = "IDLE"
+    # A notice sent while idle (the dirty-tree wait) leaves its thread behind: the new
+    # task gets its own, and without it the fresh binding is not refused as an active task.
+    state.update(state="IDLE", thread_id=None)
     bind(state, context)
     # A unique branch per attempt: re-picking a slug never adopts an old (merged) PR.
     state.update(item=chosen["text"], item_detail=chosen.get("detail", ""),

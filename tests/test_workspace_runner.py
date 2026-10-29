@@ -137,6 +137,18 @@ class WorkspaceRunnerTests(unittest.TestCase):
         runner.run_phase(state)
         self.assertEqual(state["state"], "IDLE")
 
+    def test_pick_after_the_dirty_notice_starts_the_task(self):
+        # The dirty notice opened a thread on the idle state; the next pick must still bind
+        # a fresh workspace (it raised TargetMismatch and saved a state no tick could load).
+        state = bind_and_validate({"state": "IDLE"}, self.context)
+        state.update(thread_id="thread-1", pending_decision={"wait_state": "WAIT_CLEAN"})
+        main.task_source.list_pending_items.return_value = [{"text": "Feature", "id": "TASK-1"}]
+        main.task_source.claim_task.return_value = True
+        with patch.object(main, "_load_holds", return_value=[]):
+            runner.pick(state)
+        self.assertEqual(state["state"], "EXPLORING")
+        self.assertEqual(bind_and_validate(state, self.context)["workspace"]["repositories"], {})
+
     def ok(self):
         return SimpleNamespace(session_id="session", output="Repaired", question=None, attachments=[], data=None)
 
@@ -614,6 +626,22 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual((report["merged"], report["failed"]), (["ui"], "api"))
         self.assertEqual(main.email.call_args.args[1], "partial merge")
         self.assertIn("Partial merge", lifecycle.status_body(self.state))
+
+    def test_a_merge_lost_to_a_crash_is_recorded_not_reported_as_blocking(self):
+        # Killed after `gh pr merge` of ui took effect but before the record was saved:
+        # the retry must merge the rest, not stop at "ui: PR is MERGED" (workspace walk W10).
+        (self.root / "workspace.json").write_text(json.dumps({"merge_order": ["ui", "api"]}))
+        self.stack.enter_context(patch.object(main.config, "WORKSPACE_MANIFEST", "workspace.json"))
+        self.publish()
+        self.state["state"] = "WAIT_MERGE"
+        self.github.prs[("ui", 2)]["state"] = "MERGED"
+        verdict = SimpleNamespace(output=json.dumps({"action": "merge"}))
+        with patch.object(main.agent_runner, "run", return_value=verdict), \
+             patch.object(main, "unresolved_review_threads", return_value=[]):
+            runner.reply(self.state, "merge")
+        self.assertNotIn("merge blocked", [call.args[1] for call in main.email.call_args_list])
+        merges = [c[0] for c in self.github.calls if c[1:3] == ("pr", "merge")]
+        self.assertEqual(merges, ["api"])
 
     def test_typed_tool_errors(self):
         cases = {"echo 'fatal: unable to access: Could not resolve host: github.com' >&2; exit 1": errors.TRANSIENT,

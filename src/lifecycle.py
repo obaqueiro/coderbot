@@ -270,6 +270,9 @@ def precheck(target, records, order):
         if record.get("merge", {}).get("status") == "MERGED":
             continue
         value = target.repo(name).pr(pr_number(record), PR_FIELDS + ",statusCheckRollup")
+        if value.get("state") == "MERGED":  # merged before a crash could record it
+            record["merge"] = {"status": "MERGED"}
+            continue
         if value.get("state") != "OPEN":
             problems.append(f"{name}: PR is {value.get('state')}")
         elif value.get("headRefOid") != record.get("delivered_sha"):
