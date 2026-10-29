@@ -220,7 +220,7 @@ Steps:
 2. Fix every Critical and Important finding, run the tests that cover the fixes, and commit.
 3. Re-review only the fix commits.
 
-Done when: no Critical or Important finding is open. Fill review: critical and important = findings still open (0 when all fixed), minor, tests as "<command>: <result>", findings as one line each.
+Done when: no Critical finding is open (Important ones you could not fix are listed on the PR). Fill review: critical and important = findings still open (0 when all fixed), minor, tests as "<command>: <result>", findings = open findings, one line each.
 """
 
 FEATURE_REVIEW = """Task: you are the fresh, read-only reviewer of feature $slug across the repositories below (requesting-code-review). Change no files and do not dispatch another reviewer; coderbot's implementer fixes what you find.

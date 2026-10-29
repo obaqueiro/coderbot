@@ -1881,6 +1881,8 @@ def _complete_internal_review(state: dict, result) -> None:
             return
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
+        parsed = _review_with_leftovers(result)
+    if parsed is None:
         _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason,
                      _gate_report(result.output, "INTERNAL_REVIEW"),
                      [Path(path) for path in getattr(result, "attachments", [])])
@@ -1895,6 +1897,28 @@ def _complete_internal_review(state: dict, result) -> None:
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
     if state["state"] == "ARCHIVING":
         announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
+
+
+def _review_with_leftovers(result) -> dict | None:
+    """The feature review already ran its fix wave and re-review in the turn. Open
+    Important/Minor findings do not block: they are listed on the PR. Only open Critical
+    findings (or a review without evidence) go back through the gate."""
+    review = (getattr(result, "data", None) or {}).get("review") or {}
+    try:
+        critical, important = int(review.get("critical", 1)), int(review.get("important", 0))
+    except (TypeError, ValueError):
+        return None
+    tests = [t for t in review.get("tests") or [] if isinstance(t, str) and t.strip()]
+    if critical or not tests:
+        return None
+    findings = [f for f in review.get("findings") or [] if isinstance(f, str) and f.strip()][:20]
+    return {"status": "pass", "critical": 0, "important": important, "tests": tests,
+            "concerns": findings or ([f"{important} Important finding(s) left open"] if important else [])}
+
+
+def _review_concerns(state: dict) -> str:
+    concerns = state.get("internal_review_report", {}).get("concerns") or []
+    return ("Open review findings (not blocking):\n" + "\n".join(f"- {c}" for c in concerns)) if concerns else ""
 
 
 def do_internal_review(state: dict) -> None:
@@ -2420,6 +2444,8 @@ def do_open_pr(state: dict) -> None:
         _resume_archiving(state, "archive is not committed in HEAD")
         return
     body = f"Implements: {state['item']}\n\nOpenSpec archive: `{reference}`"
+    if concerns := _review_concerns(state):
+        body += "\n\n" + concerns
     if config.TASK_SOURCE == "jira" and state.get("item_url"):
         key = state.get("item_key") or state["item_url"].rstrip("/").rsplit("/", 1)[-1]
         body += f"\n\nCloses {key}\nJira: {state['item_url']}"
@@ -2667,6 +2693,8 @@ def finalize_pr(state: dict, note: str = "") -> None:
             path.name for path in omitted) + "\n\n"
     if note:
         body += note + "\n\n"
+    if concerns := _review_concerns(state):
+        body += concerns + "\n\n"
     if not video_url and any(path.suffix in (".mp4", ".webm", ".html") for path in evidence_files):
         attachment_desc = ("a Newman run report (html)" if state.get("e2e_kind") == "newman"
                             else "a Playwright video (mp4)" if any(p.suffix.lower() == ".mp4" for p in evidence_files)

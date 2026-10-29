@@ -70,3 +70,19 @@ class ImplementBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewLeftovers(unittest.TestCase):
+    def result(self, **review):
+        return SimpleNamespace(output="reviewed", attachments=[], data={"status": "done", "summary": "s", "review": review})
+
+    def test_open_important_findings_proceed_and_are_listed(self):
+        value = main._review_with_leftovers(self.result(critical=0, important=1, tests=["pytest: pass"],
+                                                        findings=["api.py: missing retry"]))
+        self.assertEqual(value["concerns"], ["api.py: missing retry"])
+        self.assertIn("- api.py: missing retry", main._review_concerns({"internal_review_report": value}))
+
+    def test_open_critical_findings_or_no_tests_still_gate(self):
+        self.assertIsNone(main._review_with_leftovers(self.result(critical=1, important=0, tests=["t: pass"])))
+        self.assertIsNone(main._review_with_leftovers(self.result(critical=0, important=2)))
+        self.assertIsNone(main._review_with_leftovers(SimpleNamespace(output="x", data=None)))
