@@ -1288,9 +1288,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
     # Never let the autonomous working session self-declare approval. Classify the
     # user's own words with a fresh, dedicated session (like do_merge_reply) and only
     # advance on an explicit go-ahead; anything else keeps us waiting for real approval.
-    explicit = reply.strip().casefold().rstrip(".! ")
-    verdict = ({"action": "approve"} if explicit in ("approve", "approved", "aprobado", "aprobar", "apruebo",
-                                                       "implementa", "lgtm", "go ahead", "adelante")
+    verdict = ({"action": "approve"} if re.fullmatch(parallel_conversation.APPROVE, reply)
                else replies.classify("approval", reply, state))
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)

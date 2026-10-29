@@ -307,3 +307,13 @@ class EarlyPrDecisions(unittest.TestCase):
             with self.subTest(state=state["state"]):
                 self.assertTrue(parallel_conversation.deferred_pr_reply(state, "merge"))
         self.assertFalse(parallel_conversation.deferred_pr_reply({**single, "state": "IMPLEMENTING"}, "merge"))
+
+
+class ModelFreeApproval(unittest.TestCase):
+    def test_a_plain_approval_is_routed_without_a_classifier(self):
+        import parallel_conversation
+        for text in ("approve", "Aprobado.", "LGTM!", "go ahead"):
+            with self.subTest(text=text):
+                self.assertTrue(parallel_conversation.deterministic({"state": "WAIT_APPROVAL"}, text)
+                                ["resolves_pending_question"])
+        self.assertIsNone(parallel_conversation.deterministic({"state": "WAIT_APPROVAL"}, "approve but rename it"))

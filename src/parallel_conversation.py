@@ -392,10 +392,16 @@ def classification_prompt(row):
             + prompts.fenced("user message", _safe(row["data"]["text"])))
 
 
+# The explicit approvals do_approval_reply accepts without a classifier.
+APPROVE = r"(?i)\s*(approve|approved|aprobado|aprobar|apruebo|implementa|lgtm|go ahead|adelante)\s*[.!]*\s*"
+
+
 def deterministic(state, text):
     if parse_btw(text) is not None:
         return None
     if deferred_pr_reply(state, text):
+        return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
+    if state.get("state") == "WAIT_APPROVAL" and re.fullmatch(APPROVE, text):
         return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
     if parse_command(text) or re.fullmatch(r"(?i)\s*(retry|abort|complete|merge(?: anyway)?)\s*[.!]?\s*", text):
         return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
