@@ -533,3 +533,13 @@ class TrailReceipts(unittest.TestCase):
             main.trail(state, "Implementation complete; verifying")
             main.trail(state, "Internal review passed")
         self.assertEqual(note.call_count, 2)
+
+
+class OutdatedBotThreads(unittest.TestCase):
+    def test_outdated_bot_threads_are_resolved_without_the_agent(self):
+        state = {"pr_url": PR}
+        outdated = dict(ocr("T1"), outdated=True)
+        with patch.object(main, "_resolve_review_threads") as resolve:
+            remaining = main._resolve_repeated_findings(state, [outdated, ocr("T2")])
+        self.assertEqual([t["id"] for t in remaining], ["T2"])
+        self.assertIn("RESOLVE: T1 fixed: the code this comment refers to has changed", resolve.call_args.args[1])

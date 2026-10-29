@@ -3340,25 +3340,29 @@ def _finding_key(thread: dict) -> str:
 
 
 def _resolve_repeated_findings(state: dict, threads: list[dict]) -> list[dict]:
-    """Reply to and resolve bot threads that repeat an already-declined finding; return
+    """Reply to and resolve, without an agent turn, bot threads that repeat an
+    already-declined finding or sit on code that has since changed (outdated); return
     the threads that still need the agent."""
     declined = state.get("declined_findings") or {}
-    repeats = [t for t in threads if _finding_key(t) in declined]
-    if not repeats:
+    reasons = {}
+    for t in threads:
+        if _finding_key(t) in declined:
+            reasons[t["id"]] = declined[_finding_key(t)] + " (already evaluated in an earlier round)"
+        elif t.get("outdated"):
+            reasons[t["id"]] = "fixed: the code this comment refers to has changed since (outdated)."
+    if not reasons:
         return threads
     saved = state.get("review_threads")
-    state["review_threads"] = repeats
+    state["review_threads"] = [t for t in threads if t["id"] in reasons]
     try:
-        _resolve_review_threads(state, "\n".join(
-            f"RESOLVE: {t['id']} {declined[_finding_key(t)]} (already evaluated in an earlier round)"
-            for t in repeats))
+        _resolve_review_threads(state, "\n".join(f"RESOLVE: {tid} {reason}" for tid, reason in reasons.items()))
     finally:
         if saved is None:
             state.pop("review_threads", None)
         else:
             state["review_threads"] = saved
-    log.info("resolved %d repeated finding(s) without an agent turn", len(repeats))
-    return [t for t in threads if t not in repeats]
+    log.info("resolved %d repeated or outdated bot finding(s) without an agent turn", len(reasons))
+    return [t for t in threads if t["id"] not in reasons]
 
 
 def _remember_bot_comment(state: dict, reply_json: str) -> None:
