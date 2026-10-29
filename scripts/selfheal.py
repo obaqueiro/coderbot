@@ -239,7 +239,7 @@ def run_process(argv, cwd, env, timeout, log, *, cancelled=None):
         except BaseException:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):  # macOS: EPERM for a group of zombies
                 pass
             process.wait()
             raise
@@ -247,7 +247,7 @@ def run_process(argv, cwd, env, timeout, log, *, cancelled=None):
             # Even a successful CLI/test can leave background tools in its group.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
     with Path(log).open("rb") as stream:
         stream.seek(max(0, stream.seek(0, os.SEEK_END) - 64000))
@@ -407,6 +407,25 @@ class Repairs:
         failures = failed_tests(output) if tests_executed(output) and code else set()
         atomic_json(path, {"failures": sorted(failures), "created": time.time()})
         return failures
+
+    def restore_drift(self, folder):
+        """Live files that differ from the repair's snapshot, restored from it; each drifted
+        live file is first copied to <folder>/drift so no edit is lost. Returns their names."""
+        folder = Path(folder)
+        before = read_json(folder / "record.json")["snapshot"]
+        current = inventory(self.source)
+        drifted = sorted(name for name in set(before) | set(current) if before.get(name) != current.get(name))
+        for name in drifted:
+            live = self.source / name
+            if live.is_file():
+                (folder / "drift" / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(live, folder / "drift" / name)
+            if name in before:
+                self._replace(folder / "before" / name, live, expected=before[name])
+            else:
+                live.unlink(missing_ok=True)
+                sync_directory(live.parent)
+        return drifted
 
     def promote(self, folder, changed):
         folder = Path(folder)

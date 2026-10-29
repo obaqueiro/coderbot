@@ -3,10 +3,17 @@
 RepairResult, and logs each call next to itself.
 
 The patch is correct under test, so it always passes validation; in the live worker
-WALK_PATCH=regress makes it fail again, and WALK_PATCH=gate fails once data/go exists."""
+WALK_PATCH=regress makes it fail again, and WALK_PATCH=gate fails once data/go exists.
+
+The supervisor gives the agent a scrubbed environment, so its knob is a file beside it:
+`agent-mode` = `hang` (never finishes; also leaves a child in its process group) or
+`wait` (patches only once `go` exists beside it). It records its pid in agent.pid."""
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import time
 
 BUG = '''import os
 from pathlib import Path
@@ -36,6 +43,16 @@ class Empty(unittest.TestCase):
 here = Path(__file__).resolve().parent
 with (here / "calls.log").open("a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\n")
+(here / "agent.pid").write_text(str(os.getpid()))
+mode = (here / "agent-mode").read_text().strip() if (here / "agent-mode").exists() else ""
+if mode == "hang":
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    (here / "agent-child.pid").write_text(str(child.pid))
+    time.sleep(600)
+if mode == "wait":
+    deadline = time.monotonic() + 120
+    while not (here / "go").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
 Path("src/bug.py").write_text(BUG)
 Path("tests/test_selfheal_regression_empty.py").write_text(REGRESSION)
 Path(".repair-result.json").write_text(json.dumps({

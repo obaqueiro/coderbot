@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """Fake `gh` for the workspace walk: PRs per `--repo acme/<name>` in $WALK_DIR/gh.json;
 a merge moves that repository's bare origin ($WALK_DIR/origins/<name>.git). Every call
-is logged; an unsupported invocation exits 1 and is recorded. WALK_CLOSE=<name> closes
-that repository's first PR when coderbot marks it ready (a reviewer closing it)."""
+is logged; an unsupported invocation exits 1 and is recorded. Mergeability is computed
+from the origin (`git merge-tree`), and a merge of a moved base makes a merge commit.
+
+Opt-in faults, each firing once (a marker in $WALK_DIR):
+- WALK_CLOSE=<name> closes that repository's PR when coderbot marks it ready.
+- WALK_KILL=create|merge kills coderbot (kill -9 of $WALK_DIR/driver.pid) right after the
+  first PR create / merge took effect, before coderbot can record it.
+- WALK_MERGE_FAIL=<name> fails that repository's first merge.
+- WALK_EXTERNAL=<name> pushes a reviewer's commit to its PR branch when it is marked ready.
+- WALK_CONFLICT=<name> lands a conflicting commit on its base when another repository's
+  PR merges (a conflict after the first merge)."""
 import json
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 walk = Path(os.environ["WALK_DIR"])
@@ -29,9 +40,15 @@ def save():
     db_path.write_text(json.dumps(db, indent=1))
 
 
+def git(*argv, cwd=None, check=True):
+    out = subprocess.run(["git", *argv], cwd=cwd, capture_output=True, text=True)
+    if check and out.returncode:
+        raise SystemExit(f"fake gh: git {' '.join(argv)} failed: {out.stderr}")
+    return out
+
+
 def ref(name):
-    out = subprocess.run(["git", "--git-dir", str(origin), "rev-parse", "refs/heads/" + name],
-                         capture_output=True, text=True)
+    out = git("--git-dir", str(origin), "rev-parse", "refs/heads/" + name, check=False)
     return out.stdout.strip() if out.returncode == 0 else None
 
 
@@ -39,17 +56,59 @@ def find(number):
     return next(pr for pr in db["prs"] if pr["repo"] == repo and pr["number"] == int(number))
 
 
+def once(name):
+    marker = walk / f"fault-{name}"
+    if marker.exists():
+        return False
+    marker.touch()
+    return True
+
+
+def kill_coderbot(point):
+    if os.environ.get("WALK_KILL") == point and once("kill-" + point):
+        os.kill(int((walk / "driver.pid").read_text()), signal.SIGKILL)
+
+
+def commit_on(name, branch, files, message):
+    """Somebody else pushes a commit to `branch` of repository `name`."""
+    with tempfile.TemporaryDirectory(dir=walk) as clone:
+        git("clone", "-q", "-b", branch, str(walk / "origins" / f"{name}.git"), clone)
+        for path, text in files.items():
+            (Path(clone) / path).write_text(text)
+        git("add", "-A", cwd=clone)
+        git("commit", "-qm", message, cwd=clone)
+        git("push", "-q", "origin", branch, cwd=clone)
+
+
+def fast_forward(pr):
+    base, head = ref(pr["base"]), ref(pr["head"])
+    return git("--git-dir", str(origin), "merge-base", "--is-ancestor", base, head, check=False).returncode == 0
+
+
+def mergeable(pr):
+    if fast_forward(pr):
+        return "MERGEABLE"
+    clean = git("--git-dir", str(origin), "merge-tree", "--write-tree", ref(pr["base"]), ref(pr["head"]),
+                check=False).returncode == 0
+    return "MERGEABLE" if clean else "CONFLICTING"
+
+
 def view(pr, fields):
     value = {"number": pr["number"], "state": pr["state"], "headRefName": pr["head"],
              "headRefOid": ref(pr["head"]) or "", "baseRefName": pr["base"], "isCrossRepository": False,
-             "body": pr["body"], "mergeable": "MERGEABLE", "url": pr["url"], "title": pr["title"],
-             "isDraft": pr["draft"], "statusCheckRollup": []}
+             "body": pr["body"], "mergeable": mergeable(pr) if pr["state"] == "OPEN" else "UNKNOWN",
+             "url": pr["url"], "title": pr["title"], "isDraft": pr["draft"], "statusCheckRollup": []}
     return {key: value[key] for key in fields.split(",")}
 
 
 def done(value=""):
     print(value if isinstance(value, str) else json.dumps(value))
     sys.exit(0)
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
 
 
 if args[:2] == ["auth", "status"]:
@@ -64,6 +123,7 @@ if args[:2] == ["pr", "create"] and repo:
                       "title": opt("--title", ""), "body": opt("--body", ""), "state": "OPEN",
                       "draft": "--draft" in args})
     save()
+    kill_coderbot("create")
     done(url)
 if args[:2] == ["pr", "view"] and repo:
     done(view(find(args[2]), opt("--json")))
@@ -77,17 +137,30 @@ if args[:2] == ["pr", "ready"] and repo:
     if os.environ.get("WALK_CLOSE") == repo and not any(p.get("closed") for p in db["prs"]):
         pr.update(state="CLOSED", closed=True)
     save()
+    if os.environ.get("WALK_EXTERNAL") == repo and once("external"):
+        commit_on(repo, pr["head"], {"EXTERNAL.md": "Pushed by a reviewer.\n"}, "Reviewer tweak")
     done()
 if args[:2] == ["pr", "merge"] and repo:
     pr = find(args[2])
     head = ref(pr["head"])
     if opt("--match-head-commit") not in (None, head) or pr["state"] != "OPEN":
-        print("head moved or PR not open", file=sys.stderr)
-        sys.exit(1)
-    subprocess.run(["git", "--git-dir", str(origin), "update-ref", "refs/heads/" + pr["base"], head], check=True)
+        fail("head moved or PR not open")
+    if os.environ.get("WALK_MERGE_FAIL") == repo and once("merge-fail"):
+        fail("GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)")
+    if mergeable(pr) != "MERGEABLE":
+        fail("Pull request is not mergeable: the merge commit cannot be cleanly created.")
+    if not fast_forward(pr):
+        tree = git("--git-dir", str(origin), "merge-tree", "--write-tree", ref(pr["base"]), head).stdout.strip()
+        head = git("--git-dir", str(origin), "commit-tree", tree, "-p", ref(pr["base"]), "-p", head,
+                   "-m", f"Merge #{pr['number']}").stdout.strip()
+    git("--git-dir", str(origin), "update-ref", "refs/heads/" + pr["base"], head)
     pr["state"] = "MERGED"
     db.setdefault("merges", []).append(repo)
     save()
+    conflict = os.environ.get("WALK_CONFLICT")
+    if conflict and conflict != repo and once("conflict"):
+        commit_on(conflict, "main", {"greet.py": "def greet(name):\n    return 'Hi ' + name\n"}, "Someone else's greet")
+    kill_coderbot("merge")
     done()
 if args[:2] == ["api", "graphql"] and any("reviewThreads" in a for a in args):
     done({"data": {"repository": {"pullRequest": {"reviewThreads": {
@@ -95,5 +168,4 @@ if args[:2] == ["api", "graphql"] and any("reviewThreads" in a for a in args):
 if args[:1] == ["api"]:
     done([])
 (walk / "gh-unsupported.log").open("a").write(json.dumps(args) + "\n")
-print("fake gh: unsupported " + " ".join(args), file=sys.stderr)
-sys.exit(1)
+fail("fake gh: unsupported " + " ".join(args))

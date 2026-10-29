@@ -51,11 +51,77 @@ CHECKS = [{"id": "api-unit", "argv": ["python3", "-m", "unittest", "-q"], "cwd":
            "'ui/banner.txt').read_text().startswith('Hello') else 1)"], "cwd": ".", "scope": "focused"}]
 
 
+def git(*args, check=True):
+    return subprocess.run(["git", *args], check=check, capture_output=True, text=True)
+
+
 def commit(repo, files, message):
+    """Idempotent: a replayed turn (after a restart) finds its work already committed."""
     for name, text in files.items():
+        (Path(repo) / name).parent.mkdir(parents=True, exist_ok=True)
         (Path(repo) / name).write_text(text)
-    subprocess.run(["git", "-C", repo, "add", "-A"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", repo, "commit", "-qm", message], check=True, capture_output=True)
+    git("-C", repo, "add", "-A")
+    if git("-C", repo, "status", "--porcelain").stdout.strip():
+        git("-C", repo, "commit", "-qm", message)
+
+
+def once(name):
+    marker = walk / f"fault-{name}"
+    if marker.exists():
+        return False
+    marker.touch()
+    return True
+
+
+def new_child(name):
+    """A repository that appears mid-task, with its own (local, GitHub-looking) origin."""
+    origin, url = walk / "origins" / f"{name}.git", f"https://github.com/acme/{name}.git"
+    rewrite = f"url.{origin}.insteadOf={url}"
+    git("init", "-q", "--bare", "-b", "main", str(origin))
+    git("-c", rewrite, "clone", "-q", "-c", rewrite, url, name)
+    commit(name, {"README.md": f"# {name}\n"}, "initial")
+    git("-C", name, "push", "-q", "origin", "main")
+    git("-C", name, "remote", "set-head", "origin", "main")
+
+
+# What the walk's guard probe asks of the PreToolUse hook: (tool call, expected decision).
+GUARD_PROBES = [({"tool_name": "Bash", "tool_input": {"command": "git init"}}, "deny"),
+                ({"tool_name": "Bash", "tool_input": {"command": "git -C . init -q"}}, "deny"),
+                ({"tool_name": "Bash", "tool_input": {"command": "cd api && git init .."}}, "deny"),
+                ({"tool_name": "Bash", "tool_input": {"command": "bash -c 'git init'"}}, "deny"),
+                ({"tool_name": "Bash", "tool_input": {"command": "git -C api push origin HEAD"}}, "deny"),
+                ({"tool_name": "Bash", "tool_input": {"command": "gh api -X POST repos/acme/api/issues"}}, "deny"),
+                ({"tool_name": "Write", "tool_input": {"file_path": "workspace.json", "content": "{}"}}, "deny"),
+                ({"tool_name": "Bash", "tool_input": {"command": "git -C api status --short"}}, "allow"),
+                ({"tool_name": "Write", "tool_input": {"file_path": "api/notes.py", "content": ""}}, "allow")]
+
+
+def probe_guard():
+    """Run the PreToolUse hook exactly as Claude Code would (the command from --settings,
+    the call as JSON on stdin) and only perform the calls it allows."""
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    [hook] = [h["command"] for entry in settings["hooks"]["PreToolUse"] for h in entry["hooks"]]
+    for call, expected in GUARD_PROBES:
+        payload = {"hook_event_name": "PreToolUse", "session_id": session, "cwd": os.getcwd(), **call}
+        out = subprocess.run(hook, shell=True, input=json.dumps(payload), capture_output=True, text=True)
+        decision = (json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"]
+                    if out.stdout.strip() else "allow")
+        if decision == "allow" and call["tool_name"] == "Bash":
+            subprocess.run(call["tool_input"]["command"], shell=True, capture_output=True)
+        with (walk / "guard.log").open("a") as log:
+            log.write(json.dumps({"call": call, "expected": expected, "decision": decision,
+                                  "exit": out.returncode, "stderr": out.stderr[-300:],
+                                  "policy": bool(os.environ.get("CODEBOT_POLICY"))}) + "\n")
+
+
+def resolve_conflicts(names):
+    for name in names:
+        merged = git("-C", name, "merge", "--no-edit", "-q", "origin/main", check=False)
+        if merged.returncode:
+            for path in git("-C", name, "diff", "--name-only", "--diff-filter=U").stdout.split():
+                git("-C", name, "checkout", "--ours", "--", path)
+                git("-C", name, "add", "--", path)
+            git("-C", name, "commit", "--no-edit", "-q")
 
 
 def respond(answer):
@@ -74,6 +140,7 @@ def phase():
                  ("Classify an authorized task-thread message",
                   {"intent": "answer", "resolves_pending_question": True, "requested_action": None,
                    "action_depends_on_change": False, "inputs": []}),
+                 ("please stop", {"action": "abort", "feedback": ""}),
                  ("replied to the proposal-review", {"action": "approve", "feedback": ""}),
                  ("replied to the pull-request review", {"action": "merge", "force": True, "feedback": ""}),
                  # A "merge" sent before the PR closed reaches the stuck wait: not an answer.
@@ -84,6 +151,8 @@ def phase():
                 return "utility:" + marker, json.dumps(answer)
         return None, None
     if "explore this backlog item" in prompt:
+        if os.environ.get("WALK_DIRTY") and once("dirty"):  # notes the user never saves
+            Path(os.environ["WALK_DIRTY"], "NOTES.local").write_text("scratch\n")
         return "EXPLORE", {"summary": "api needs greet(); ui shows it. unused is unrelated.",
                            "classification": "bounded", "pr_title": "Add greeting"}
     if "turn the exploration into OpenSpec change" in prompt:
@@ -100,19 +169,45 @@ def phase():
                                         "    def test_named(self):\n        self.assertEqual(greet('Ada'), 'Hello, Ada!')\n"},
                "Add greet() with a unit test")
         commit("ui", {"banner.txt": "Hello, Ada!\n"}, "Show the greeting banner")
+        if os.environ.get("WALK_ROUNDS"):  # each attempt changes both repositories
+            attempt = re.search(r"walkbot-[a-z0-9-]+-[0-9a-f]{6}", raw_prompt)[0]
+            for repo in ("api", "ui"):
+                commit(repo, {"ATTEMPT": attempt + "\n"}, "Record the attempt")
+        if os.environ.get("WALK_LARGE"):
+            commit("api", {f"gen/f{i:03}.txt": f"{i}\n" for i in range(int(os.environ["WALK_LARGE"]))},
+                   "Generated fixtures")
+        if os.environ.get("WALK_NEW_CHILD") and once("new-child"):
+            new_child(os.environ["WALK_NEW_CHILD"])
+        if os.environ.get("WALK_GUARD") and once("guard"):
+            probe_guard()
         tasks = change / "tasks.md"
         tasks.write_text(tasks.read_text().replace("- [ ]", "- [x]"))
-        return "IMPLEMENT", {"summary": "Implemented greet() and the banner test-first.", "checks": CHECKS}
+        checks = CHECKS
+        if os.environ.get("WALK_BAD_CWD"):  # checks that would run outside the workspace
+            checks = CHECKS + [{"id": f"escape-{n}", "argv": ["python3", "-c", f"open({str(walk / f'escaped-{n}')!r}, 'w')"],
+                                "cwd": cwd, "scope": "focused"} for n, cwd in enumerate(["../..", str(walk), "api/../.."])]
+        return "IMPLEMENT", {"summary": "Implemented greet() and the banner test-first.", "checks": checks}
+    if "merge origin/<base> (already fetched by coderbot" in prompt:
+        names = json.loads(re.search(r'"conflicts": (\[[^\]]*\])', raw_prompt)[1])
+        resolve_conflicts(names)
+        return "RESOLVE_CONFLICTS", {"summary": "Merged origin/main and kept our greet() in " + ", ".join(names)}
     if "fresh, read-only reviewer of feature" in prompt:
         assert "- api: base" in raw_prompt and "- ui: base" in raw_prompt and "- unused:" not in raw_prompt
+        sections = re.split(r"(?m)^- (\w+): base ", raw_prompt)[1:]
+        logged["truncated"] = sorted(sections[i] for i in range(0, len(sections), 2)
+                                     if "(truncated; run the diff yourself)" in sections[i + 1])
+        logged["listed_files"] = raw_prompt.count("gen/f")
         return "REVIEW", {"summary": "Reviewed api and ui; nothing to fix.",
                           "review": {"critical": 0, "important": 0, "tests": ["python3 -m unittest: pass"]}}
     return None, None
 
 
+logged = {}
 name, text = phase()
+attempt = re.search(r"walkbot-[a-z0-9-]+-[0-9a-f]{6}", raw_prompt)
+logged["branch"] = attempt and attempt[0]
 with (walk / "claude.log").open("a") as log:
-    log.write(json.dumps({"phase": name, "utility": utility, "resume": "--resume" in argv,
+    log.write(json.dumps({**logged, "phase": name, "utility": utility, "resume": "--resume" in argv,
                           "chars": len(prompt), "gh_token": os.environ.get("GH_TOKEN"),
                           "credential_helper": os.environ.get("GIT_CONFIG_VALUE_0")}) + "\n")
 if name is None:
