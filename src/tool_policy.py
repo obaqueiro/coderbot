@@ -20,8 +20,8 @@ PLANNING_DENIED = ("git commit", "git reset", "git checkout", "git switch", "git
                    "git rebase", "git stash")
 # Work turns that must finish in this session rather than delegating.
 NO_SUBAGENTS = {"IMPLEMENTING", "REPAIR_CHECKS", "E2E", "APPLY_FEEDBACK", "APPLY_PR_FEEDBACK",
-                "ADDRESS_REVIEW", "ADDRESS_PR_THREADS", "RESOLVE_CONFLICTS", "RECOVERING",
-                "ARCHIVING", "VERIFYING", "INTERNAL_REVIEW", "EVIDENCE_REVIEW"}
+                "ADDRESS_REVIEW", "ADDRESS_PR_THREADS", "RESOLVE_CONFLICTS",
+                "ARCHIVING", "VERIFYING", "INTERNAL_REVIEW"}
 GUARD = config.BRIDGE_PLUGIN_DIR / "runtime" / "guard.py"
 
 

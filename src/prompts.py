@@ -411,9 +411,7 @@ Classify the reply's intent. Respond with ONLY a JSON object, no other text:
 # Restated when resuming a session with the user's answer: the raw reply carries no
 # phase context. Push/PR/merge/archive bans are enforced by the runtime (tool_policy).
 PHASE_RULES = {
-    "RECOVERING": "Repair task-owned code and tests and verify before committing; keep unrelated work.",
     "REPAIR_CHECKS": "Diagnose the failing checks from their logs and fix code, tests or dependencies; coderbot re-runs the checks.",
-    "EVIDENCE_REVIEW": "Review and fix the evidence-recovery changes against the approved task, commit, and fill review.",
     "REPLANNING": "Revise only the OpenSpec planning artifacts; keep the implementation and git history.",
     "APPLY_FEEDBACK": "Apply the localized correction, verify it, and commit.",
     "FEEDBACK_QUESTION": "Investigate the user's answer against the approved requirements and report what would change.",

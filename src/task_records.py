@@ -14,11 +14,6 @@ def migrate(state, store, repo):
             "text": state["pending_question"], "kind": "pending_question",
             "phase": state.get("return_state"), "thread_id": state.get("thread_id")},
             status="waiting")
-    if state.get("stuck_return"):
-        row = store.record("recovery", state, repo, "legacy-blocker", {
-            "origin": state["stuck_return"], "detail": state.get("stuck_error", ""),
-            "attribution": "unknown", "resume": state["stuck_return"]}, status="waiting")
-        state.setdefault("recovery_id", row["id"])
     # Replay only durable pending transitions, never infer consent from a phase.
     pending = store.list("feedback", task_id)
     if state.get("state") not in ("WAIT_APPROVAL", "WAIT_REPLY", "WAIT_STUCK"):

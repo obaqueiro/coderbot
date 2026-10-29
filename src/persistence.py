@@ -97,7 +97,7 @@ TASK_KEYS = ("sent_messages", "declined_findings", "review_head", "draft_pr_url"
              "pr_title_guidance",
              "pr_threads", "pr_thread_round", "pr_thread_notified", "pr_threads_seen",
              "bot_comment_ids", "verify_round",
-             "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
+             "review_gate_round", "archive_round", "archive_fix_turn", "archive_path", "e2e_repair_head",
              "e2e_repair_status", "push_context", "archive_error", "e2e_round",
              "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
              "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
@@ -124,12 +124,22 @@ GLOBAL_KEYS = {"state": "IDLE", "retire_thread_id": None, "slack_last_handled_id
                "original_workspace": None}
 # Removed state names -> where a task saved under them resumes. Old state.json and
 # holds.json files keep loading after a state is deleted.
-FORWARD_STATES: dict[str, str] = {}
+FORWARD_STATES = {"RECOVERING": "VERIFYING", "EVIDENCE_REVIEW": "VERIFYING"}
+_STATE_POINTERS = ("state", "stuck_return", "return_state", "conflict_return", "recovery_resume",
+                   "banner_state", "feedback_origin", "verification_requested_from")
 
 
 def forward(state: dict) -> dict:
-    if state.get("state") in FORWARD_STATES:
-        state["state"] = FORWARD_STATES[state["state"]]
+    """Every key that names a phase, not only `state`: a WAIT_STUCK task whose
+    stuck_return is a deleted phase must resume somewhere real."""
+    for key in _STATE_POINTERS:
+        if state.get(key) in FORWARD_STATES:
+            state[key] = FORWARD_STATES[state[key]]
+    repair = state.get("check_repair")
+    if isinstance(repair, dict) and repair.get("resume") in FORWARD_STATES:
+        repair["resume"] = FORWARD_STATES[repair["resume"]]
+    if isinstance(state.get("pending_decision"), dict) and state["pending_decision"].get("origin") in FORWARD_STATES:
+        state["pending_decision"]["origin"] = FORWARD_STATES[state["pending_decision"]["origin"]]
     return state
 
 

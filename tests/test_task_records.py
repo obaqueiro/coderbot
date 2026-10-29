@@ -25,7 +25,7 @@ class TaskRecordsTests(unittest.TestCase):
             for key, value in original.items():
                 self.assertEqual(restored[key], value)
             self.assertEqual(len(reopened.list("feedback", restored["execution_task_id"])), 1)
-            self.assertEqual(reopened.get("recovery", restored["recovery_id"])["data"]["attribution"], "unknown")
+            self.assertNotIn("recovery_id", restored)
 
     def test_contact_event_never_overwrites_phase(self):
         with tempfile.TemporaryDirectory() as root:

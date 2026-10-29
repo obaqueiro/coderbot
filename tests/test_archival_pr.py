@@ -300,17 +300,17 @@ class ArchivalTests(unittest.TestCase):
         self.assertFalse(any(c.args[:2] == ("commit", "-m") for c in git.call_args_list))
         self.assertEqual(self.state["state"], "OPEN_PR")
 
-    def test_dirty_tracked_tree_blocks_first_archive(self):
+    def test_dirty_tracked_tree_is_set_aside_and_reverified_before_archive(self):
         with patch.object(main.config, "REPO_PATH", self.repo), \
-             patch.object(main, "save_state"), \
+             patch.object(main, "save_state"), patch.object(main, "trail"), \
              patch.object(main, "git", return_value=" M app.py"), \
-             patch.object(main.recovery, "begin", side_effect=lambda db, state, repo, reason, resume: state.update(state="RECOVERING")) as recover, \
+             patch.object(main, "_preserve_uncommitted", return_value="stashed") as preserve, \
              patch.object(main.operations, "tool") as process:
             main.do_archive(self.state)
 
         process.assert_not_called()
-        self.assertEqual(self.state["state"], "RECOVERING")
-        recover.assert_called_once()
+        preserve.assert_called_once()
+        self.assertEqual(self.state["state"], "VERIFYING")
 
     def test_untracked_openspec_file_blocks_first_archive(self):
         def git(*args):
@@ -355,15 +355,25 @@ class ArchivalTests(unittest.TestCase):
         self.assertFalse(any(c.args and c.args[0] == "add" for c in git_call.call_args_list))
         self.assertEqual(self.state["state"], "ARCHIVING")
 
-    def test_archive_retry_exhaustion_emails_and_waits(self):
+    def test_archive_exhaustion_tries_one_fix_turn_then_emails_and_waits(self):
+        fixed = Mock(session_id="session-1", output="fixed the spec", question=None, attachments=[])
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
              patch.object(main.config, "ARCHIVE_MAX_ROUNDS", 2, create=True), \
-             patch.object(main, "git", return_value=" M app.py"), \
+             patch.object(main, "git", return_value=""), \
+             patch.object(main, "_run_checked", side_effect=RuntimeError("strict validation failed")), \
+             patch.object(main.agent_runner, "resume", return_value=fixed) as resume, \
              patch.object(main, "email") as email:
             main.do_archive(self.state)
             main.do_archive(self.state)
+            self.assertEqual(self.state["state"], "ARCHIVING")
+            resume.assert_called_once()
+            self.assertIn("strict validation failed", resume.call_args.args[1])
+            email.assert_not_called()
+            main.do_archive(self.state)
+            main.do_archive(self.state)
 
+        resume.assert_called_once()
         self.assertEqual(self.state["state"], "WAIT_REPLY")
         self.assertEqual(self.state["return_state"], "ARCHIVING")
         email.assert_called_once()

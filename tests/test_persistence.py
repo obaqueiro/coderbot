@@ -85,3 +85,16 @@ class Holds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForwardStates(unittest.TestCase):
+    def test_deleted_phases_resume_in_verification_from_every_pointer(self):
+        import persistence
+        state = persistence.forward({"state": "WAIT_STUCK", "stuck_return": "RECOVERING",
+                                     "return_state": "EVIDENCE_REVIEW", "check_repair": {"resume": "RECOVERING"},
+                                     "pending_decision": {"origin": "EVIDENCE_REVIEW"}})
+        self.assertEqual((state["state"], state["stuck_return"], state["return_state"]),
+                         ("WAIT_STUCK", "VERIFYING", "VERIFYING"))
+        self.assertEqual(state["check_repair"]["resume"], "VERIFYING")
+        self.assertEqual(state["pending_decision"]["origin"], "VERIFYING")
+        self.assertEqual(persistence.forward({"state": "RECOVERING"})["state"], "VERIFYING")

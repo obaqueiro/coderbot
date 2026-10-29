@@ -25,7 +25,7 @@ STATE_STAGES = {
 
 def state_stage(state: dict) -> str:
     phase = state["state"]
-    if phase in ("WAIT_REPLY", "WAIT_STUCK", "RECOVERING", "WAIT_CLEAN"):
+    if phase in ("WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN"):
         origin = state.get("stuck_return") if phase == "WAIT_STUCK" else state.get("return_state")
         return STATE_STAGES.get(origin or "", state.get("banner_stage") or "exploring")
     return STATE_STAGES.get(phase, "exploring")

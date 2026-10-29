@@ -138,7 +138,7 @@ def finalize(output: str, structured=None):
 # Phases whose controller step reads a structured field (gate verdict, review counts,
 # per-thread actions). Elsewhere a prose-only reply is today's normal output, so a
 # missing object is not worth an extra repair call.
-STRUCTURED_PHASES = {"VERIFYING", "INTERNAL_REVIEW", "EVIDENCE_REVIEW", "ADDRESS_REVIEW", "ADDRESS_PR_THREADS"}
+STRUCTURED_PHASES = {"VERIFYING", "INTERNAL_REVIEW", "ADDRESS_REVIEW", "ADDRESS_PR_THREADS"}
 
 
 def needs_result(phase) -> bool:

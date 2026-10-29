@@ -40,12 +40,10 @@ class VerifyPrRepairTests(unittest.TestCase):
             (repo / 'backend/requirements.txt').write_text('fixture==2')
             self.assertNotEqual(before, dependency_snapshot(repo, inputs))
 
-    def test_recovery_and_review_receive_current_scope(self):
-        import recovery
+    def test_review_receives_current_scope(self):
         import handoff_context
         state = {'slug': 'feature', 'verification_guidance': 'Exclude legacy/** and preserve it'}
         self.assertIn(state['verification_guidance'], main._internal_review_prompt(state))
-        self.assertIn(state['verification_guidance'], recovery.prompt({'data': {'reason': 'dirty'}}, [], state))
         self.assertIn(state['verification_guidance'], handoff_context.render(state, 'INTERNAL_REVIEW'))
 
     def test_dependency_install_identity_ignores_scripts_but_not_packages(self):

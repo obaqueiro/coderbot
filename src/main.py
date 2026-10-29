@@ -29,7 +29,6 @@ import errors
 import feedback
 import parallel_conversation
 import replanning
-import recovery
 import verification_ledger
 import verification_recovery
 import review_intent
@@ -1979,7 +1978,7 @@ def _complete_check_repair(state: dict, result) -> None:
             state.pop(key, None)
     active = not state.get("archive_path") and (config.REPO_PATH / "openspec/changes" / state["slug"]).is_dir()
     if context.get("evidence"):
-        state["state"] = "EVIDENCE_REVIEW" if changed else "PUSHING"
+        state["state"] = "PUSHING"  # do_push re-runs the final checks; the PR's review sees the fix
         save_state(state)
         trail(state, "Evidence repair returned to controller verification", context["findings"])
         return
@@ -2106,10 +2105,16 @@ def _archive_failed(state: dict, error: Exception) -> None:
     if state["archive_round"] < config.ARCHIVE_MAX_ROUNDS:
         state["state"] = "ARCHIVING"
         return
-    if state.get("session_id") and state.get("execution_task_id"):
-        recovery.begin(phase_checkpoint.store(), state, config.REPO_PATH,
-                       "Archive condition requires repair: " + str(error), "ARCHIVING")
-        save_state(state)
+    if state.get("session_id") and not state.get("archive_fix_turn"):
+        # One automatic repair of the OpenSpec files before asking (work is committed:
+        # do_archive refuses to run on a dirty tree).
+        state["archive_fix_turn"] = True
+        result = agent_runner.resume(state["session_id"], prompts.render(
+            prompts.FIX_ARCHIVE, error=str(error), guidance="none"))
+        if handle_result(state, result, "ARCHIVING"):
+            return
+        state.pop("archive_round", None)
+        state["state"] = "ARCHIVING"
         return
     email(state, "OpenSpec archival stuck - needs your help",
           f"Task: {state['item']}\n\nArchival failed {state['archive_round']} times. "
@@ -2202,8 +2207,11 @@ def do_archive(state: dict) -> None:
             raise RuntimeError("active change and expected archive both exist")
         if active.exists():
             if git("status", "--porcelain", "--untracked-files=no"):
-                recovery.begin(phase_checkpoint.store(), state, config.REPO_PATH,
-                               "Pending tracked changes before archival", "ARCHIVING")
+                # Only verified commits are archived and pushed. Keep the stray edits
+                # recoverable and re-verify the committed tree.
+                kept = _preserve_uncommitted(f"{state['slug']} before archive")
+                trail(state, "Uncommitted changes set aside before archiving", kept or "")
+                state["state"] = "VERIFYING"
                 save_state(state)
                 return
             if git("status", "--porcelain", "--untracked-files=all", "--", "openspec/"):
@@ -2230,6 +2238,7 @@ def do_archive(state: dict) -> None:
             git("add", "-A", "--", *paths)
             git("commit", "-m", "chore: archive OpenSpec change", "--", *paths)
         state.pop("archive_round", None)
+        state.pop("archive_fix_turn", None)
         state.pop("archive_error", None)
         state["state"] = "OPEN_PR"
         trail(state, "OpenSpec change archived; opening the PR")
@@ -2552,37 +2561,6 @@ def _begin_evidence_repair(state: dict, *, note: str = "") -> None:
         "gate": {"status": "fail", "reason": "Complete playable evidence is required before PR delivery"},
         "recording_diagnostics": evidence_delivery.recovery_details(config.REPO_PATH)}]}
     _begin_check_repair(state, report, resume="PUSHING")
-
-
-def _complete_evidence_review(state: dict, result) -> None:
-    if handle_result(state, result, "EVIDENCE_REVIEW"):
-        return
-    parsed, reason = parse_internal_review(result.output)
-    if parsed is None:
-        _gate_failed(state, "EVIDENCE_REVIEW", "review_gate_round", reason,
-                     _gate_report(result.output, "INTERNAL_REVIEW"))
-        return
-    if _tracked_snapshot()[1]:
-        _gate_failed(state, "EVIDENCE_REVIEW", "review_gate_round",
-                     "Evidence review repairs must be committed", result.output)
-        return
-    state.pop("review_gate_round", None)
-    state["internal_review_report"] = parsed
-    state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
-    state["state"] = "PUSHING"
-    save_state(state)
-
-
-def do_evidence_review(state: dict) -> None:
-    result = agent_runner.resume(state["session_id"],
-        _gate_feedback(state, "review_gate_round") + prompts.ENVIRONMENT +
-        "\nReview the evidence recovery changes with a fresh reviewer. Inspect the current "
-        "approved task and archived specs without restoring/rearchiving them. Fix and commit "
-        "findings; preserve scope, validators and unrelated work. Do not push or merge. "
-        "Run focused diagnostics and end with INTERNAL_REVIEW: {\"status\":\"pass\","
-        "\"critical\":0,\"important\":0,\"tests\":[\"command: result\"]}. "
-        "Only report pass when the review is clean. Controller final checks run next.\n")
-    _complete_evidence_review(state, result)
 
 
 def finalize_pr(state: dict, note: str = "") -> None:
@@ -3646,9 +3624,7 @@ def _maybe_ping(state: dict) -> None:
 # ---------------------------------------------------------------- loop
 
 PHASES = {
-    "RECOVERING": lambda state: do_recover(state),
     "REPAIR_CHECKS": do_repair_checks,
-    "EVIDENCE_REVIEW": do_evidence_review,
     "REPLANNING": lambda state: do_replan(state),
     "APPLY_FEEDBACK": lambda state: do_apply_feedback(state),
     "IDLE": do_pick,
@@ -4368,162 +4344,6 @@ def _continue_replanning(state, result):
                         outcome="revised proposal delivery queued")
 
 
-def do_recover(state: dict) -> None:
-    database = phase_checkpoint.store()
-    row = database.get("recovery", state["recovery_id"])
-    if not row:
-        raise RuntimeError("Recovery context is missing")
-    current = repo_provenance.inspect(config.REPO_PATH)
-    if "before" not in row["data"]:
-        row = database.update("recovery", row, before=current, reason=row["data"].get("detail", "Legacy blocked repository"), attempts=0)
-        if row is None:
-            raise RuntimeError("Legacy recovery migration failed")
-    owned, protected = recovery.ownership(database, state, config.REPO_PATH, current)
-    if row["data"].get("isolated"):
-        owned = row["data"].get("owned", [])
-    elif protected and not row["data"].get("attribution_checked"):
-        result = agent_runner.run(recovery.attribution_prompt(state, current))
-        value = parse_json_reply(result.output)
-        attributed = recovery.validate_attribution(value, current)
-        owned = sorted(set(owned) | set(attributed))
-        protected = [path for path in protected if path not in attributed]
-        row = database.update("recovery", row, attribution_checked=True, owned=owned,
-                              protected=protected, attribution_evidence=value["evidence"])
-        if row is None:
-            raise RuntimeError("Recovery attribution could not be saved")
-    elif row["data"].get("attribution_checked"):
-        owned = row["data"].get("owned", owned)
-        protected = row["data"].get("protected", protected)
-    if protected and not row["data"].get("isolated"):
-        workspace = recovery.isolate(state, config.REPO_PATH, config.DATA_DIR, owned)
-        config.REPO_PATH = workspace
-        repo_provenance.inspect(workspace)
-        state["state"] = "RECOVERING"
-        database.update("recovery", row, isolated=True, protected=protected,
-                        owned=owned, status="running", merge_heads=state.get("isolated_merge_heads", []))
-        save_state(state)
-        return
-    if not current["files"] and not current["operations"]:
-        merge_heads = row["data"].get("merge_heads", [])
-        if merge_heads and not row["data"].get("merge_completed"):
-            attempts = row["data"].get("attempts", 0) + 1
-            if attempts > config.MAX_STATE_FAILURES:
-                _enter_stuck(state, "RECOVERING", "Preserved merge needs a concrete conflict resolution; diagnostics are attached.")
-                return
-            row = database.update("recovery", row, attempts=attempts)
-            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state) +
-                "\nComplete the equivalent preserved merge with these heads: " + json.dumps(merge_heads))
-            if handle_result(state, result, "RECOVERING"):
-                return
-            for head in merge_heads:
-                _run_checked(["git", "merge-base", "--is-ancestor", head, "HEAD"])
-            database.update("recovery", row, merge_completed=True)
-            _complete_recovery(state, result)
-            return
-        if row["data"].get("reason", "").startswith("Archive condition requires repair"):
-            attempts = row["data"].get("attempts", 0) + 1
-            if attempts > config.MAX_STATE_FAILURES:
-                _enter_stuck(state, "RECOVERING", "Archive repair did not resolve its condition; diagnostic guidance is needed.")
-                return
-            row = database.update("recovery", row, attempts=attempts)
-            if row is None:
-                raise RuntimeError("Archive recovery update failed")
-            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state))
-            if handle_result(state, result, "RECOVERING"):
-                return
-            _complete_recovery(state, result)
-            return
-        if row["data"].get("repair_checks") and row["data"]["repair_checks"].get("status") != "pass":
-            attempts = row["data"].get("attempts", 0) + 1
-            if attempts > config.MAX_STATE_FAILURES:
-                _enter_stuck(state, "RECOVERING", "Post-repair checks remain unresolved; diagnostic guidance is needed.")
-                return
-            row = database.update("recovery", row, attempts=attempts)
-            if row is None:
-                raise RuntimeError("Recovery update failed")
-            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state) +
-                "\nDiagnose these post-repair checks and repair the underlying issue:\n" + json.dumps(row["data"]["repair_checks"]))
-            if handle_result(state, result, "RECOVERING"):
-                return
-            _complete_recovery(state, result)
-            return
-        from types import SimpleNamespace
-        _complete_recovery(state, SimpleNamespace(output="Repository precondition restored."))
-        return
-    attempts = row["data"].get("attempts", 0) + 1
-    if attempts > config.MAX_STATE_FAILURES:
-        _enter_stuck(state, "RECOVERING", "Repository recovery made no verified progress. "
-                     "I need a concrete resolution for the preserved repository condition.")
-        return
-    row = database.update("recovery", row, attempts=attempts)
-    if row is None:
-        raise RuntimeError("Recovery update failed")
-    before = current["fingerprint"]
-    prompt = recovery.prompt(row, owned, state)
-    if row["data"].get("merge_heads"):
-        prompt += "\nThe preserved original checkout had an interrupted merge with heads " + json.dumps(row["data"]["merge_heads"]) + ". Complete the equivalent merge in this isolated workspace, preserving both branch intents."
-    if row["data"].get("diagnosis"):
-        prompt += "\nPrior attempt: " + row["data"]["diagnosis"] + "\nInvestigate and change the repair plan before retrying."
-    result = agent_runner.resume(state["session_id"], prompt)
-    if handle_result(state, result, "RECOVERING"):
-        return
-    if owned and not current["operations"] and not row["data"].get("merge_heads") and repo_provenance.inspect(config.REPO_PATH)["head"] != current["head"]:
-        # Recovery can commit task repairs, but never smuggle protected paths into
-        # that commit. The pre-existing worktree remains the preservation copy.
-        changed = git("diff", "--name-only", current["head"], "HEAD").splitlines()
-        outside = [path for path in changed if path not in owned]
-        if outside:
-            raise RuntimeError("Recovery committed paths outside its attributed scope: " + ", ".join(outside))
-    _complete_recovery(state, result)
-    if state["state"] == "RECOVERING" and repo_provenance.inspect(config.REPO_PATH)["fingerprint"] == before:
-        database.update("recovery", row, diagnosis="No repository progress; inspect prior attempt before repeating")
-
-
-def _complete_recovery(state, result):
-    database = phase_checkpoint.store()
-    row = database.get("recovery", state["recovery_id"])
-    if not row:
-        raise RuntimeError("Recovery context is missing")
-    after = repo_provenance.inspect(config.REPO_PATH)
-    protected = row["data"].get("protected", [])
-    if protected and not row["data"].get("isolated"):
-        raise RuntimeError("Recovery must isolate protected changes before repair")
-    if after["files"] or after["operations"]:
-        database.update("recovery", row, last_fingerprint=after["fingerprint"])
-        state["state"] = "RECOVERING"
-        return
-    if row["data"].get("reason", "").startswith("Archive condition requires repair"):
-        try:
-            active = config.REPO_PATH / "openspec/changes" / state["slug"]
-            if active.exists():
-                _run_checked(["openspec", "validate", state["slug"], "--strict", "--no-interactive"])
-            elif state.get("archive_path"):
-                _validate_archived_change(config.REPO_PATH / state["archive_path"])
-            else:
-                raise RuntimeError("Neither active change nor archive is available")
-        except Exception as error:
-            database.update("recovery", row, diagnosis=str(error))
-            state["state"] = "RECOVERING"
-            return
-    if row["data"]["before"]["head"] != after["head"]:
-        # Archived tasks cannot re-enter active-change-only verification prompts.
-        # Verify actual repaired content deterministically before resuming its origin.
-        report = final_checks.run(state, config.REPO_PATH, database)
-        state["final_check_report"] = report
-        if report["status"] != "pass":
-            database.update("recovery", row, diagnosis="Repair checks require diagnosis: " + report["status"],
-                            repair_checks=report)
-            state["state"] = "RECOVERING"
-            return
-    for key in ("quality_report", "internal_review_report", "reviewed_snapshot", "coverage_report"):
-        state.pop(key, None)
-    state["verify_round"] = 0
-    state["recovery_resume"] = row["data"]["resume"]
-    state["state"] = row["data"]["resume"]
-    save_state(state)
-    database.update("recovery", row, status="complete", outcome=result.output)
-
-
 def do_apply_feedback(state: dict) -> None:
     result = agent_runner.resume(state["session_id"], prompts.render(prompts.APPLY_PR_FEEDBACK,
         feedback=state["pending_feedback"], branch=state["branch"]) + review_intent.RULES)
@@ -4877,19 +4697,6 @@ def do_stuck_reply(state: dict, reply: str) -> None:
               f"\n\n{reply}\n\nPlease reply 'retry', 'abort', 'complete', or with explicit "
               "instructions.")
         return  # stay in WAIT_STUCK
-    if failed_state == "RECOVERING" and state.get("recovery_id"):
-        database = phase_checkpoint.store()
-        row = database.get("recovery", state["recovery_id"])
-        if row:
-            database.update("recovery", row, attempts=0, diagnosis="User recovery guidance: " + reply)
-    if failed_state in ("ARCHIVING", "RESOLVE_CONFLICTS") and state.get("session_id"):
-        current = repo_provenance.inspect(config.REPO_PATH)
-        if current["files"] or current["operations"]:
-            recovery.begin(phase_checkpoint.store(), state, config.REPO_PATH,
-                "Recover blocked repository; user guidance: " + reply, failed_state)
-            _clear_stuck(state, failed_state)
-            save_state(state)
-            return
     if action == "instructions" and failed_state == "OPEN_PR":
         # OPEN_PR is orchestrator-driven: the PR title/body never pass through the coding
         # session, so guidance about them must be applied HERE or it would be silently
@@ -5543,9 +5350,7 @@ def _continue_apply_pr_feedback(state: dict, result) -> None:
 
 
 CONTINUATIONS = {
-    "RECOVERING": _complete_recovery,
     "REPAIR_CHECKS": _complete_check_repair,
-    "EVIDENCE_REVIEW": _complete_evidence_review,
     "REPLANNING": _continue_replanning,
     "APPLY_FEEDBACK": _complete_local_feedback,
     "FEEDBACK_QUESTION": lambda state, result: state.update(state="VERIFYING"),
@@ -5572,9 +5377,6 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
         context["guidance"] = reply
         context["attempt"] = 1
         return check_repair.prompt(state, context)
-    if phase == "EVIDENCE_REVIEW":
-        return (prompts.ENVIRONMENT + "\n" + prompts.PHASE_RULES[phase] +
-                "\n" + prompts.fenced_authoritative("user recovery guidance", reply))
     if phase == "E2E" and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
         state["check_repair"] = {"attempt": 1, "resume": "E2E",
             "checks": check_repair.unresolved(state["final_check_report"]),

@@ -171,7 +171,7 @@ class CheckRepairTests(unittest.TestCase):
         self.assertIn("commit only intended", state["check_repair"]["previous"])
         invalidate.assert_not_called()
 
-    def test_archived_evidence_repair_requires_review(self):
+    def test_archived_evidence_repair_goes_straight_to_a_checked_push(self):
         state = {"state": "REPAIR_CHECKS", "slug": "task", "item": "task", "archive_path": "archive/task",
                  "push_context": {"continuation": "evidence"},
                  "check_repair": {"attempt": 1, "resume": "PUSHING", "before": "old",
@@ -180,7 +180,7 @@ class CheckRepairTests(unittest.TestCase):
              patch.object(main.phase_checkpoint, "store"), patch.object(checks, "invalidate_environment"), \
              patch.object(main, "save_state"), patch.object(main, "trail"):
             main._complete_check_repair(state, SimpleNamespace(output="Implemented missing demo and video support"))
-        self.assertEqual(state["state"], "EVIDENCE_REVIEW")
+        self.assertEqual(state["state"], "PUSHING")
         self.assertEqual(state["push_context"]["continuation"], "evidence")
         self.assertNotIn("e2e_passed", state)
         prompt = check_repair.prompt(state, state["check_repair"])
