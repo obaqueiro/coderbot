@@ -128,8 +128,8 @@ def _validate_target_state(state: dict) -> dict:
 def save_state(state: dict) -> None:
     persistence.write_json(config.STATE_PATH, state, indent=2)
     global _conversation_state
-    with _status_command_lock:
-        _conversation_state = copy.deepcopy(state)
+    # Rebinding is atomic: no lock, so a save never waits behind the status thread's I/O.
+    _conversation_state = copy.deepcopy(state)
     if state.get("conversation_flow_id"):
         store = phase_checkpoint.store()
         row = store.get("conversation", state["conversation_flow_id"])
@@ -5182,8 +5182,8 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
         log.warning("reset after hold left notes: %s", problems)
         body += "\n\nRepo reset:\n- " + "\n- ".join(problems)
     email(state, "on hold", body)
+    _publish_progress(state, "paused")
     with _status_command_lock:
-        _publish_progress(state, "paused")
         for key in RESET_KEYS:
             state.pop(key, None)
         if config.TARGET_MODE == "workspace":
@@ -5898,6 +5898,7 @@ def _handle_reply(state: dict, reply: str) -> None:
 _liveness = {"tick_started": time.time()}
 _work_active = threading.Event()
 _status_command_lock = threading.RLock()
+_progress_lock = threading.RLock()
 _current_state: dict | None = None  # main-thread owner; status worker reads a snapshot only
 _lock_handle = None  # kept alive for the process lifetime so the flock is held
 _conversation_worker = None
@@ -6097,7 +6098,7 @@ def _status_supervisor_loop() -> None:
 
 def _refresh_progress() -> None:
     """Publish independently of STATUS requests, including user-side waits."""
-    with _status_command_lock:
+    with _progress_lock:
         state = dict(_current_state) if _current_state is not None else load_state()
         if state.get("item") and state.get("thread_id"):
             _publish_progress(state)
@@ -6105,7 +6106,8 @@ def _refresh_progress() -> None:
 
 
 def _publish_progress(state: dict, situation: str | None = None) -> None:
-    with _status_command_lock:
+    # Its own lock: a slow progress update must not hold up commands or state saves.
+    with _progress_lock:
         try:
             # Reply handlers retain wait states for safe retries while running an
             # agent. Polling a wait alone is not work; a live turn is.
@@ -6137,11 +6139,15 @@ class ShutdownRequested(BaseException):
     way out instead of waiting for it."""
 
 
+_shutdown = threading.Event()
+
+
 def _request_shutdown(signum, _frame) -> None:
-    if _conversation_worker:
-        _conversation_worker.close()
-    turn_control.request_kick(None)
-    raise ShutdownRequested(signal.Signals(signum).name)
+    """Only a flag and the interrupting raise: taking a lock here could deadlock against
+    the main thread that holds it. main()'s finally stops the other children."""
+    if not _shutdown.is_set():
+        _shutdown.set()
+        raise ShutdownRequested(signal.Signals(signum).name)
 
 
 def _install_shutdown_handlers() -> None:
@@ -6149,6 +6155,7 @@ def _install_shutdown_handlers() -> None:
     plain `docker stop` (Spot interruption, host shutdown, redeploy) would be ignored
     until Docker SIGKILLs us. With the handler we drop everything at once and exit;
     the last completed tick is already on disk, so the next start resumes from it."""
+    _shutdown.clear()
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
 
@@ -6304,6 +6311,8 @@ def main() -> None:
     finally:
         if _conversation_worker:
             _conversation_worker.close()
+        if _shutdown.is_set():
+            turn_control.request_kick(None)
         _release_single_instance_lock()
 
 
@@ -6334,8 +6343,7 @@ def _run_loop() -> None:
         attempt_task_id = state.get("execution_task_id")
         selfheal_events.emit("heartbeat", state)
         _current_state = state
-        with _status_command_lock:
-            _conversation_state = copy.deepcopy(state)
+        _conversation_state = copy.deepcopy(state)
         try:
             if state.get("item") and state["state"] != "IDLE":
                 agent_runner.set_task_context(state)
