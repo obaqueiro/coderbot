@@ -29,9 +29,10 @@ def due(stamp: Path, now=None) -> bool:
         return True
 
 
-def sweep(data_dir: Path, repo: Path, keep=(), store=None, now=None) -> int:
+def sweep(data_dir: Path, repo: Path, keep=(), store=None, now=None, keep_tasks=()) -> int:
     """Remove swept entries older than KEEP_DAYS (except paths in `keep`), prune stale
-    git worktrees and old finished checkpoints. Returns how many entries went."""
+    git worktrees and old finished checkpoints of tasks not in `keep_tasks` (the
+    current and held tasks resume from theirs). Returns how many entries went."""
     now = now or time.time()
     cutoff, kept, removed = now - KEEP_DAYS * _DAY, {Path(p).resolve() for p in keep if p}, 0
     for relative in SWEPT:
@@ -59,9 +60,11 @@ def sweep(data_dir: Path, repo: Path, keep=(), store=None, now=None) -> int:
         log.debug("retention: git worktree prune failed: %s", error)
     if store is not None:
         try:
+            tasks = sorted({t for t in keep_tasks if t})
             with store.connection() as db:
                 removed += db.execute("DELETE FROM checkpoint WHERE status IN ('complete','consumed') "
-                                      "AND updated < ?", (cutoff,)).rowcount
+                                      f"AND updated < ? AND task_id NOT IN ({','.join('?' * len(tasks))})",
+                                      (cutoff, *tasks)).rowcount
         except Exception as error:  # noqa: BLE001 — an old schema or a locked db just waits a day
             log.debug("retention: checkpoint cleanup failed: %s", error)
     return removed
@@ -74,7 +77,8 @@ def maybe_sweep(data_dir: Path, repo: Path, keep=(), store=None) -> None:
         return
     try:
         stamp.touch()
-        removed = sweep(data_dir, repo, keep() if callable(keep) else keep, store)
+        paths, tasks = keep() if callable(keep) else (keep, ())
+        removed = sweep(data_dir, repo, paths, store, keep_tasks=tasks)
         if removed:
             log.info("retention: removed %d entr%s older than %d days", removed,
                      "y" if removed == 1 else "ies", KEEP_DAYS)

@@ -139,12 +139,14 @@ def _probe_runtime() -> None:
         log.warning("runtime probe failed", exc_info=True)
 
 
-def _retention_keep(state: dict) -> list:
-    """Recovery worktrees still in use: the current task's and every held task's."""
-    saved = [state] + [h.get("saved") or {} for h in _load_holds()]
-    return [s.get("workspace_path") for s in saved] + \
+def _retention_keep(state: dict) -> tuple[list, list]:
+    """What the current and held tasks still use: recovery worktrees and checkpoints."""
+    saved = [s for s in [state] + [h.get("saved") or {} for h in _load_holds()] if s.get("item")]
+    store = phase_checkpoint.store()
+    paths = [s.get("workspace_path") for s in saved] + \
         [config.DATA_DIR / "workspaces" / str(s.get("execution_task_id", ""))[:16]
          for s in saved if s.get("execution_task_id")]
+    return paths, [store.task_identity(s, config.REPO_PATH) for s in saved]
 
 
 def _validate_target_state(state: dict) -> dict:

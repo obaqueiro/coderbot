@@ -34,10 +34,12 @@ class Sweep(unittest.TestCase):
             store = ExecutionStore(data / "execution.sqlite")
             store.put("checkpoint", task_id="done", data={}, status="complete")
             store.put("checkpoint", task_id="live", data={}, status="running")
+            store.put("checkpoint", task_id="held", data={}, status="complete")
             with store.connection() as db:
                 db.execute("UPDATE checkpoint SET updated=?", (old,))
             with patch.object(retention.operations, "tool") as tool:
-                removed = retention.sweep(data, data, keep=[entries["workspaces/held-task"]], store=store)
+                removed = retention.sweep(data, data, keep=[entries["workspaces/held-task"]], store=store,
+                                          keep_tasks=["held"])
             tool.assert_called_once()
             self.assertEqual(tool.call_args.args[0], ["git", "worktree", "prune"])
             self.assertEqual(removed, 4)
@@ -49,6 +51,7 @@ class Sweep(unittest.TestCase):
                 self.assertTrue(entries[kept].exists(), kept)
             self.assertEqual([r["task_id"] for r in store.list("checkpoint", "live")], ["live"])
             self.assertEqual(store.list("checkpoint", "done"), [])
+            self.assertEqual(len(store.list("checkpoint", "held")), 1, "a held task resumes from it")
 
     def test_runs_at_most_once_a_day_and_never_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

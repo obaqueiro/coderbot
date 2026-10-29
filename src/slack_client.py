@@ -83,7 +83,7 @@ def web():
         _web = WebClient(token=config.SLACK_BOT_TOKEN, timeout=30)
         # Honour Slack's Retry-After before the error reaches the loop (errors.kind
         # then types what is left: ratelimited -> transient, invalid_auth -> fatal).
-        _web.retry_handlers.append(RateLimitErrorRetryHandler(max_retry_count=2))
+        _web.retry_handlers.append(RateLimitErrorRetryHandler(max_retry_count=1))
     return _web
 
 
