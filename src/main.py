@@ -44,6 +44,7 @@ import evidence_delivery
 import message_templates
 import performance
 import persistence
+import retention
 import config
 import drive_client
 import evidence
@@ -95,22 +96,55 @@ def load_state() -> dict:
     return _validate_target_state({"state": "IDLE"})
 
 
+def _notify_operator(topic: str, body: str) -> bool:
+    """A one-way operational notice outside any task thread. Never raises."""
+    try:
+        if config.COMM_CHANNEL == "slack":
+            gmail_client.announce(f"{config.INSTANCE_ID}: {body}")
+        else:
+            gmail_client.send(f"{config.SUBJECT_PREFIX} {topic}", body)
+        return True
+    except Exception:  # noqa: BLE001 — a notice must never stall the loop
+        log.warning("could not send the %s notice", topic, exc_info=True)
+        return False
+
+
 def _report_quarantined() -> None:
-    """Tell the operator once about every unparseable file set aside (best effort)."""
+    """Tell the operator once about every unparseable file set aside."""
     while persistence.quarantined:
         path, moved = persistence.quarantined[0]
         log.error("%s did not parse; moved it to %s and continued without it", path, moved)
-        body = (f"{config.INSTANCE_ID}: {path} was unreadable (not valid JSON). It was moved to "
-                f"{moved} and I continued without it; check that copy for anything to restore.")
-        try:
-            if config.COMM_CHANNEL == "slack":
-                gmail_client.announce(body)
-            else:
-                gmail_client.send(f"{config.SUBJECT_PREFIX} unreadable state file", body)
-        except Exception:  # noqa: BLE001 — the report must never stall the loop
-            log.warning("could not report the quarantined file", exc_info=True)
+        if not _notify_operator("unreadable state file", f"{path} was unreadable (not valid JSON). "
+                                f"It was moved to {moved} and I continued without it; check that "
+                                "copy for anything to restore."):
             return
         persistence.quarantined.pop(0)
+
+
+def _probe_runtime() -> None:
+    """Startup check of the pinned CLIs: log and notify once per distinct mismatch."""
+    try:
+        problems = retention.probe(config.AGENT)
+        if not problems:
+            return
+        log.error("runtime probe: %s", "; ".join(problems))
+        stamp = config.DATA_DIR / ".runtime-probe"
+        digest_text = hashlib.sha256("\n".join(problems).encode()).hexdigest()
+        if stamp.exists() and stamp.read_text() == digest_text:
+            return
+        if _notify_operator("runtime mismatch", "the installed CLIs differ from the pinned "
+                            "runtime; I keep running, but expect failures:\n- " + "\n- ".join(problems)):
+            stamp.write_text(digest_text)
+    except Exception:  # noqa: BLE001 — the probe only informs
+        log.warning("runtime probe failed", exc_info=True)
+
+
+def _retention_keep(state: dict) -> list:
+    """Recovery worktrees still in use: the current task's and every held task's."""
+    saved = [state] + [h.get("saved") or {} for h in _load_holds()]
+    return [s.get("workspace_path") for s in saved] + \
+        [config.DATA_DIR / "workspaces" / str(s.get("execution_task_id", ""))[:16]
+         for s in saved if s.get("execution_task_id")]
 
 
 def _validate_target_state(state: dict) -> dict:
@@ -6298,6 +6332,7 @@ def main() -> None:
     except Exception:  # noqa: BLE001 — an unreachable backlog must not block startup
         log.exception("could not re-assert the in-flight task's claim at startup")
     _install_shutdown_handlers()
+    threading.Thread(target=_probe_runtime, name="runtime-probe", daemon=True).start()
     try:
         selfheal_events.emit("ready", load_state())
         _run_loop()
@@ -6324,6 +6359,9 @@ def _run_loop() -> None:
         try:
             state = load_state()
             _report_quarantined()
+            if retention.due(config.DATA_DIR / ".retention-stamp"):
+                retention.maybe_sweep(config.DATA_DIR, config.REPO_PATH, lambda: _retention_keep(state),
+                                      phase_checkpoint.store())
             if state.get("workspace_path"):
                 config.REPO_PATH = Path(state["workspace_path"])
         except (ValueError, OSError):
