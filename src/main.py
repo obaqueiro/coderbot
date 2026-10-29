@@ -4784,7 +4784,6 @@ def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
 
 def _clear_stuck(state: dict, failed_state: str) -> None:
     if state.get("workspace"):
-        state["workspace"].pop("harness_repair_round", None)
         state["workspace"].pop("verification_rounds", None)
     if state.get("reported_check_plan_error"):
         state.pop("check_plan_repair_round", None)

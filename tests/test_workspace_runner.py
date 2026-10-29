@@ -635,3 +635,26 @@ class WorkspaceRunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SameDayArchive(unittest.TestCase):
+    def test_re_picked_slug_archives_beside_todays_earlier_archive(self):
+        import datetime
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            today = datetime.date.today().isoformat()
+            (root / f"openspec/changes/archive/{today}-export").mkdir(parents=True)
+            (root / "openspec/changes/export").mkdir(parents=True)
+            (root / "openspec/changes/export/tasks.md").write_text("- [x] 1. Done\n")
+
+            def archive(repo, argv):
+                (root / "openspec/changes/export").rename(root / f"openspec/changes/archive/{today}-export")
+            state = {"slug": "export", "workspace": {"verified_snapshot": "s"}, "state": "ARCHIVING"}
+            with patch.object(runner, "target", return_value=SimpleNamespace(root=root)), \
+                 patch.object(runner, "snapshot", return_value="s"), \
+                 patch.object(runner, "command", side_effect=archive), \
+                 patch.object(main.task_phases, "complete_final_checks"):
+                runner.archive(state)
+            self.assertEqual(state["archive_path"], f"openspec/changes/archive/{today}-export")
+            self.assertTrue((root / f"openspec/changes/archive/{today}-export-1").is_dir())
+            self.assertEqual(state["state"], "OPEN_PR")

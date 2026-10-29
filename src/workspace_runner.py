@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import datetime
 import re
 import secrets
 import sys
@@ -651,11 +652,20 @@ def archive(state):
         from task_phases import TASK, VERIFICATION
         (active / "tasks.md").write_text(TASK.sub(lambda task: task[1] + "x" + task[3] + task[4]
             if VERIFICATION in task[4] else task[0], text))
+        archives = context.root / "openspec/changes/archive"
+        earlier = archives / f"{datetime.date.today().isoformat()}-{state['slug']}"
+        if earlier.exists():  # a same-slug task archived earlier today blocks OpenSpec's target
+            n = 1
+            while earlier.with_name(f"{earlier.name}-{n}").exists():
+                n += 1
+            earlier.rename(earlier.with_name(f"{earlier.name}-{n}"))
         command(context.root, ["openspec", "archive", state["slug"], "-y", "--json"])
-    matches = sorted((context.root / "openspec/changes/archive").glob("*-" + state["slug"]))
-    if len(matches) != 1:
-        raise workspace.WorkspaceError("Cannot identify the shared local feature archive")
-    state["archive_path"] = matches[0].relative_to(context.root).as_posix()
+        state.pop("archive_path", None)
+    if not state.get("archive_path"):
+        matches = sorted((context.root / "openspec/changes/archive").glob("*-" + state["slug"]))
+        if len(matches) != 1:
+            raise workspace.WorkspaceError("Cannot identify the shared local feature archive")
+        state["archive_path"] = matches[0].relative_to(context.root).as_posix()
     # Planning is excluded from the implementation identity. Publication still
     # verifies the actual source identity and refuses any concurrent code change.
     state["state"] = "OPEN_PR"
