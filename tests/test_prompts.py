@@ -78,7 +78,7 @@ class Cards(unittest.TestCase):
         values = dict(project="p", branch="b", item="i", detail="d", images="", slug="s", e2e_note="",
                       e2e_report_note="", base="abc", feedback="f", output="o", error="e", guidance="g",
                       threads="t", paths="x", outbox_dir="/o", base_branch="main",
-                      review_guide="guide")
+                      review_guide="guide", scope="review it", findings="f")
         for name, card in CARDS.items():
             with self.subTest(card=name):
                 self.assertNotRegex(prompts.render(card, **values), r"\$[a-z_]+")

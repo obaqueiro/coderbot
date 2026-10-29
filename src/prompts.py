@@ -188,16 +188,29 @@ Fix the cause first; do not repeat the same run and report.
 """ + fenced("your previous report", "$report") + "\n"
 
 
-INTERNAL_REVIEW = """Task: you are the fresh reviewer of OpenSpec change $slug before its PR (requesting-code-review). Review it yourself in this session; do not dispatch another reviewer.
+INTERNAL_REVIEW = """Task: you are the fresh, read-only reviewer of OpenSpec change $slug before its PR (requesting-code-review). Change no files and do not dispatch another reviewer; the implementer fixes what you find.
 
 $review_guide
 
 Steps:
-1. Review `git diff $base...HEAD` against openspec/changes/$slug/ (or its archive): spec compliance first, then code quality.
-2. Fix every Critical and Important finding, run the tests that cover the fixes, and commit.
-3. Re-review only the fix commits.
+1. $scope
+2. Run the tests that cover a finding when that helps you judge it.
 
-Done when: no Critical finding is open (Important ones you could not fix are listed on the PR). Fill review: critical and important = findings still open (0 when all fixed), minor, tests as "<command>: <result>", findings = open findings, one line each.
+Done when: the change is reviewed. Fill review: critical, important and minor = open findings; findings as one line each "<path>: <issue>"; tests as "<command>: <result>" you relied on.
+"""
+
+REVIEW_SCOPE = "Review `git diff $base...HEAD` against openspec/changes/$slug/ (or its archive): spec compliance first, then code quality."
+RE_REVIEW_SCOPE = "Re-review only the fix commits, `git diff $base...HEAD`: do they resolve your earlier findings without new problems?"
+
+FIX_REVIEW = """The feature review of $slug found the issues below. Task: handle them with receiving-code-review.
+
+""" + fenced("review findings", "$findings") + """
+
+Steps:
+1. Check each finding against the code. Fix the real ones, with a test for each changed behaviour.
+2. For a finding that is wrong, keep the code and say why in your summary.
+3. Run the focused tests for what you changed and commit.
+Done when: every finding is fixed or answered. Return status done listing each finding and what you did.
 """
 
 FEATURE_REVIEW = """Task: you are the fresh, read-only reviewer of feature $slug across the repositories below (requesting-code-review). Change no files and do not dispatch another reviewer; coderbot's implementer fixes what you find.

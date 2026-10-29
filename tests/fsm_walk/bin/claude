@@ -108,7 +108,7 @@ def phase():
         gate = {"status": "pass", "commands": ["python3 -m unittest: pass"], "preexisting": [],
                 "openspec": "pass", "tasks": tasks_count()}
         return "VERIFY", {"summary": "All checks pass.", "verification": gate}
-    if "fresh reviewer of OpenSpec change" in prompt:
+    if "read-only reviewer of OpenSpec change" in prompt:
         review = {"critical": 0, "important": 0, "tests": ["python3 -m unittest: pass"]}
         return "INTERNAL_REVIEW", {"summary": "Fresh review found nothing to fix.", "review": review}
     return None, None

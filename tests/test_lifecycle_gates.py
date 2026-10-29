@@ -252,7 +252,8 @@ class LifecycleGateTests(unittest.TestCase):
                 state = self.base_state(
                     state="INTERNAL_REVIEW", review_gate_round=1,
                     has_e2e_harness=has_harness)
-                with patch.object(main.agent_runner, "resume", return_value=result(REVIEW_PASS)):
+                with patch.object(main.agent_runner, "resume", return_value=result(REVIEW_PASS)), \
+                     patch.object(main, "git", return_value="head"):
                     main.do_internal_review(state)
                 self.assertEqual(state["state"], expected)
                 self.assertNotIn("review_gate_round", state)

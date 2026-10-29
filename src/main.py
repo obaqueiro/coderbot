@@ -1643,8 +1643,9 @@ def _internal_review_prompt(state: dict) -> str:
     return (_gate_feedback(state, "review_gate_round")
             + (prompts.fenced_authoritative("verification scope", state["verification_guidance"]) + "\n"
                if state.get("verification_guidance") else "")
-            + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"], base=state.get("base_sha", "HEAD~1"),
-                             review_guide=_review_guide(state)))
+            + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"], review_guide=_review_guide(state),
+                             scope=prompts.render(prompts.RE_REVIEW_SCOPE if state.get("review_fix_base") else prompts.REVIEW_SCOPE,
+                                                  slug=state["slug"], base=state.get("review_fix_base") or state.get("base_sha", "HEAD~1"))))
 
 
 def _verification_blocked(state: dict, kind: str, detail: str) -> None:
@@ -1802,7 +1803,6 @@ def _advance_verified(state: dict) -> None:
     state["review_gate_round"] = 0
     reviewed = state.get("internal_review_report", {})
     reusable = (reviewed.get("status") == "pass" and reviewed.get("critical") == 0
-                and reviewed.get("important") == 0
                 and state.get("reviewed_snapshot") == state["quality_snapshot"])
     state["state"] = "E2E" if reusable else "INTERNAL_REVIEW"
     trail(state, "Verification passed; " + ("reusing content-bound internal review" if reusable else "running internal review"))
@@ -1897,6 +1897,15 @@ def _complete_internal_review(state: dict, result) -> None:
                       "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
             _begin_check_repair(state, report, resume="INTERNAL_REVIEW")
             return
+    review = (getattr(result, "data", None) or {}).get("review") or {}
+    if (review.get("critical") or review.get("important")) and not state.get("review_fix_base"):
+        # One fix wave in the implementer's session, then one re-review of its commits.
+        state["review_fix_base"] = git("rev-parse", "HEAD")
+        state["review_findings"] = [f for f in review.get("findings") or [] if isinstance(f, str)][:30] \
+            or [result.output[-3000:]]
+        state["state"] = "APPLY_FEEDBACK"
+        trail(state, "Internal review found issues; fixing them", "\n".join(state["review_findings"]))
+        return
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
         parsed = _review_with_leftovers(result)
@@ -1942,7 +1951,18 @@ def _review_concerns(state: dict) -> str:
 def do_internal_review(state: dict) -> None:
     if _scope_drift(state):
         return
+    before = (git("rev-parse", "HEAD"), content_snapshot(config.REPO_PATH))
     result = agent_runner.resume(state["session_id"], _internal_review_prompt(state))
+    if (git("rev-parse", "HEAD"), content_snapshot(config.REPO_PATH)) != before:
+        # The reviewer is read-only; a review whose own edits it judged proves nothing.
+        kept = _preserve_uncommitted(f"{state['slug']} reviewer edits")
+        log.warning("the read-only reviewer changed the tree; discarding its review (%s)", kept)
+        if git("rev-parse", "HEAD") != before[0]:
+            state["state"] = "VERIFYING"  # it committed despite the deny rules: verify that code
+            return
+        _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", "The reviewer changed files",
+                     "Review read-only; the implementer fixes the findings.")
+        return
     _complete_internal_review(state, result)
 
 
@@ -4409,14 +4429,22 @@ def _continue_replanning(state, result):
 
 
 def do_apply_feedback(state: dict) -> None:
-    result = agent_runner.resume(state["session_id"], prompts.render(prompts.APPLY_PR_FEEDBACK,
-        feedback=state["pending_feedback"], branch=state["branch"]) + review_intent.RULES)
+    if state.get("review_findings"):
+        prompt = prompts.render(prompts.FIX_REVIEW, slug=state["slug"], findings="\n".join(state["review_findings"]))
+    else:
+        prompt = prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=state["pending_feedback"],
+                                branch=state["branch"]) + review_intent.RULES
+    result = agent_runner.resume(state["session_id"], prompt)
     if handle_result(state, result, "APPLY_FEEDBACK"):
         return
     _complete_local_feedback(state, result)
 
 
 def _complete_local_feedback(state, result):
+    if state.pop("review_findings", None) is not None:
+        state.pop("reviewed_snapshot", None)
+        state["state"] = "VERIFYING"  # then the one re-review of the fix commits
+        return
     state["verify_round"] = 0
     state.pop("reviewed_snapshot", None)
     state.pop("final_check_report", None)

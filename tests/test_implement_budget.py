@@ -117,3 +117,44 @@ class EvidenceScrub(unittest.TestCase):
             tracked = subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True, text=True).stdout.split()
             self.assertEqual(sorted(tracked), ["README.md", "src/evidence_parser.py"])
             self.assertFalse((repo / "demo.webm").exists())
+
+
+class FeatureReviewWave(unittest.TestCase):
+    def test_findings_get_one_fix_wave_then_one_scoped_re_review(self):
+        state = {"state": "INTERNAL_REVIEW", "slug": "task", "item": "task", "session_id": "impl",
+                 "base_sha": "base"}
+        found = SimpleNamespace(output="review", attachments=[], session_id="rev", question=None,
+                                data={"status": "done", "summary": "s", "review": {
+                                    "critical": 1, "important": 0, "findings": ["api.py: no auth"]}})
+        with patch.object(main, "git", return_value="head-1"), patch.object(main, "trail"), \
+             patch.object(main, "content_snapshot", return_value="same"), \
+             patch.object(main.agent_runner, "resume", return_value=found):
+            main.do_internal_review(state)
+        self.assertEqual((state["state"], state["review_fix_base"]), ("APPLY_FEEDBACK", "head-1"))
+        fixed = SimpleNamespace(output="fixed", attachments=[], session_id="impl", question=None, data=None)
+        with patch.object(main.agent_runner, "resume", return_value=fixed) as resume, \
+             patch.object(main, "save_state"):
+            main.do_apply_feedback(state)
+        self.assertIn("api.py: no auth", resume.call_args.args[1])
+        self.assertEqual(state["state"], "VERIFYING")
+        prompt = main._internal_review_prompt(state)
+        self.assertIn("Re-review only the fix commits, `git diff head-1...HEAD`", prompt)
+        with patch.object(main, "git", return_value="head-2"), \
+             patch.object(main, "content_snapshot", return_value="same"), \
+             patch.object(main, "_gate_failed") as gate, \
+             patch.object(main.agent_runner, "resume", return_value=found):
+            main.do_internal_review(state)
+        gate.assert_called_once()  # still critical after the wave: the gate, not another wave
+        self.assertEqual(state["review_fix_base"], "head-1")
+
+    def test_a_reviewer_that_edits_is_discarded(self):
+        state = {"state": "INTERNAL_REVIEW", "slug": "task", "item": "task", "session_id": "impl"}
+        snapshots = iter(["before", "after"])
+        with patch.object(main, "git", return_value="head"), \
+             patch.object(main, "content_snapshot", side_effect=lambda repo: next(snapshots)), \
+             patch.object(main, "_preserve_uncommitted", return_value="stashed") as preserve, \
+             patch.object(main, "_gate_failed") as gate, \
+             patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="x", data=None)):
+            main.do_internal_review(state)
+        preserve.assert_called_once()
+        gate.assert_called_once()

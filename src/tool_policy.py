@@ -26,7 +26,7 @@ NO_SUBAGENTS = {"IMPLEMENTING", "REPAIR_CHECKS", "E2E", "APPLY_FEEDBACK", "APPLY
 GUARD = config.BRIDGE_PLUGIN_DIR / "runtime" / "guard.py"
 # A read-only turn inside any phase (feedback investigation): inspect, never change.
 READING = "READING"
-READ_ONLY = {"EXPLORING", READING}
+READ_ONLY = {"EXPLORING", READING, "INTERNAL_REVIEW"}  # the reviewer finds, the implementer fixes
 reading = contextvars.ContextVar("reading", default=False)
 
 
@@ -43,7 +43,7 @@ def enabled() -> bool:
 
 
 def denied(phase: str | None) -> tuple[str, ...]:
-    return DENIED + (PLANNING_DENIED if phase in PLANNING or phase == READING else ())
+    return DENIED + (PLANNING_DENIED if phase in PLANNING or phase in READ_ONLY else ())
 
 
 def claude_args(phase: str | None) -> list[str]:
