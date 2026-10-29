@@ -132,6 +132,13 @@ class RepositoryRecord(unittest.TestCase):
                          (self.URL, True, "c" * 40))
         self.assertFalse(persistence.repository_record(state)["draft"])
 
+    def test_a_legacy_mid_adoption_draft_keeps_the_scalars_the_old_code_wrote(self):
+        state = {"branch": "bot-x", "pr_url": self.URL, "draft_pr_url": self.URL}  # no draft_pr_ready
+        self.assertTrue(persistence.repository_record(state)["draft"])
+        persistence.mirror_record(state)
+        self.assertEqual((state["pr_url"], state["draft_pr_url"]), (self.URL, self.URL))
+        self.assertNotIn("draft_pr_ready", state)
+
     def test_scalars_win_and_a_left_over_record_is_dropped(self):
         state = {"branch": "bot-x", "pr_url": self.URL, "remote_branch": "original",
                  "repository": {"branch": "bot-old", "merge": {"status": "MERGED"}}}

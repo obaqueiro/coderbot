@@ -187,16 +187,20 @@ def mirror_record(state: dict) -> None:
     if not isinstance(record, dict):
         return
     url = record.get("pr_url")
+    # A draft keeps whatever pr_url the old code wrote (pr_url == draft_pr_url while it
+    # was adopting the draft); both scalars always name the one PR, by its current URL.
     if url and record.get("draft"):
         state["draft_pr_url"] = url
-        state.pop("pr_url", None)
+        if state.get("pr_url"):
+            state["pr_url"] = url
     elif url:
         state["pr_url"] = url
-        if state.get("draft_pr_url") == url:
+        if state.get("draft_pr_url"):
+            state["draft_pr_url"] = url
             state["draft_pr_ready"] = True
-    else:
-        state.pop("pr_url", None)
-        state.pop("draft_pr_url", None)
+    else:  # the PR was closed and dropped: the next delivery opens a fresh one
+        for key in ("pr_url", "draft_pr_url", "draft_pr_ready"):
+            state.pop(key, None)
     for key, scalar in (("delivered_sha", "delivered_sha"), ("draft_attempts", "draft_pr_attempts")):
         if record.get(key) is None:
             state.pop(scalar, None)

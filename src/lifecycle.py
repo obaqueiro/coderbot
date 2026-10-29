@@ -52,12 +52,22 @@ def call(argv, cwd, *, timeout=None):
         raise errors.Fatal(f"{label} cannot run: {error}", code=argv[0] + "_missing", resource=str(cwd)) from error
 
 
+PR_URL = re.compile(r"https?://([^/\s]+)/([^/\s]+)/([^/\s]+?)(?:\.git)?/pull/(\d+)(?:[/?#]\S*)?", re.IGNORECASE)
+
+
+def parse_pr_url(url):
+    """(host, "owner/repo", number) of any GitHub host's PR URL, tolerating trailing
+    segments (/files) and .git; None when it names no PR."""
+    match = PR_URL.fullmatch(str(url or "").strip())
+    return (match[1].lower(), f"{match[2]}/{match[3]}", int(match[4])) if match else None
+
+
 def pr_number(record):
     """The pinned PR number; older records only stored the URL."""
     if record.get("pr_number"):
         return int(record["pr_number"])
-    match = re.search(r"/pull/(\d+)$", record.get("pr_url") or "")
-    return int(match[1]) if match else None
+    parsed = parse_pr_url(record.get("pr_url"))
+    return parsed[2] if parsed else None
 
 
 @dataclass(frozen=True)
@@ -71,8 +81,8 @@ class RepoOps:
     @classmethod
     def checkout(cls, path, base, pr_url=None):
         """The repository of repo mode, named by its PR once there is one."""
-        match = re.match(r"https://([^/]+/[^/]+/[^/]+)/pull/\d+$", pr_url or "")
-        return cls(Path(path), ".", match[1] if match else "", base, infer=True)
+        parsed = parse_pr_url(pr_url)
+        return cls(Path(path), ".", f"{parsed[0]}/{parsed[1]}" if parsed else "", base, infer=True)
 
     @property
     def slug(self):
@@ -182,10 +192,10 @@ class RepoOps:
         return pr_number({"pr_url": url}), url
 
     def matches(self, record, value):
-        """The PR is the one this record pinned: number, branches and repository (any case)."""
-        expected = self.url(pr_number(record)).rsplit("/", 1)[0].casefold() + "/"
+        """The PR is the one this record pinned: its number in this repository (gh was asked
+        for it there), its head branch and base, not a fork. The URL may be a new canonical
+        one after a rename or transfer; pinned() adopts it."""
         return (isinstance(value, dict) and value.get("number") == pr_number(record)
-                and str(value.get("url", "")).casefold().startswith(expected)
                 and value.get("headRefName") == record.get("branch") and value.get("baseRefName") == self.base
                 and value.get("isCrossRepository") is False)
 
@@ -395,6 +405,9 @@ def review_threads(ops, number):
     irreversible merge, so it fails closed. The WHOLE thread is fetched, not just the
     opener: a reviewer's follow-up lives in later comments, and the agent must see both it
     and its own earlier reply. `viewer` is the bot's own login, used to label those replies."""
+    if "/" not in ops.slug:
+        log.warning("review threads: no repository is known for PR #%s", number)
+        return None
     owner, repo = ops.slug.split("/", 1)
     threads, cursor = [], None
     while True:
@@ -598,18 +611,23 @@ def pr_body(state, name, *, draft=False):
             + ("" if draft else state.get("implementation_summary", "") + "\n\n") + status_body(state))
 
 
-def closed(state, name, record):
-    """A PR closed without merging: ask, keeping every other repository's PR."""
-    import main
+def closed(state, name, record, *, resume="PUSHING", save=None, ask=None):
+    """A PR closed without merging: drop it from the record and ask; 'retry' opens a fresh
+    one from the same verified branch. Every other repository's PR is kept."""
+    if save is None or ask is None:
+        import main
+        save, ask = save or (lambda: main.save_state(state)), ask or main._enter_stuck
     number = pr_number(record)
     record.setdefault("closed_prs", []).append(number)
     for key in ("pr_number", "pr_url", "delivered_sha", "announced", "draft"):
         record.pop(key, None)
     record["merge"] = {}
-    main.save_state(state)
-    main._enter_stuck(state, "PUSHING", f"The PR for {name} (#{number}) was closed without merging. Reply "
-                      "'retry' to open a new PR for it from the same verified branch, 'complete' to finish the "
-                      "task without it, or 'abort' to stop. The other repositories' PRs are unchanged.")
+    save()
+    which, others = (("The PR", "") if name == "." else
+                     (f"The PR for {name}", " The other repositories' PRs are unchanged."))
+    ask(state, resume, f"{which} (#{number}) was closed without merging. Reply 'retry' to open a "
+        "new PR from the same verified branch, 'complete' to finish the task without it, or 'abort' "
+        "to stop." + others)
 
 
 def moved(state, name, ops, record, value):
@@ -636,18 +654,23 @@ def pinned(ops, record):
     if not ops.matches(record, value):
         raise errors.Fatal(f"{ops.name}: {record.get('pr_url')} no longer matches its repository and branch",
                            code="pr_mismatch")
+    url = value.get("url")
+    if parse_pr_url(url) and str(url).casefold() != str(record.get("pr_url") or "").casefold():
+        log.info("%s: PR #%s is now %s (renamed or transferred); adopting it", ops.name, value["number"], url)
+        record["pr_url"] = url
     return value
 
 
-def deliver(ops, record, title, body, save, *, ready_body=False):
-    """Push the verified head to the record's PR (validated first, never forced), open one
-    when there is none, mark a draft ready (`ready_body`: with the final title and body)
-    and record the delivered head. A PR that is no longer open is returned untouched."""
+def deliver(ops, record, title, body, save, *, ready=True, ready_body=False, clean=True):
+    """Push the committed head to the record's PR (validated first, never forced), open
+    one when there is none and record the delivered head. `ready` (the publication step
+    only) marks a draft ready, with the final title and body when `ready_body`; `clean`
+    refuses uncommitted tracked changes. A PR that is no longer open is returned untouched."""
     if pr_number(record):
         value = pinned(ops, record)
         if value["state"] != "OPEN":
             return value
-    if ops.tracked_changes():
+    if clean and ops.tracked_changes():
         raise errors.AgentFault(f"{ops.name}: PR publication requires committed tracked changes", code="dirty_publication")
     ops.push(record["branch"])
     if not pr_number(record):
@@ -658,11 +681,12 @@ def deliver(ops, record, title, body, save, *, ready_body=False):
     value = pinned(ops, record)
     if value["state"] == "OPEN" and value["headRefOid"] != ops.head():
         raise errors.Transient(f"{ops.name}: the PR head does not match the pushed HEAD yet", code="pr_head_lag")
-    if value["state"] == "OPEN" and (value.get("isDraft") or record.get("draft")):
+    if ready and value["state"] == "OPEN" and (value.get("isDraft") or record.get("draft")):
         if ready_body:
             ops.gh("pr", "edit", str(value["number"]), "--title", title(), "--body", body())
         ops.gh("pr", "ready", str(value["number"]))
-    record.update(pr_number=value["number"], delivered_sha=value["headRefOid"], draft=False)
+        record["draft"] = False
+    record.update(pr_number=value["number"], delivered_sha=value["headRefOid"])
     save()
     return value
 
@@ -693,7 +717,7 @@ def publish(ws, state):
             record["state"] = "NO_CHANGES"
             continue
         value = deliver(repo, record, lambda: main._pr_title(state), lambda: pr_body(state, name),
-                        lambda: main.save_state(state))
+                        lambda: main.save_state(state), ready=state["state"] == "OPEN_PR")
         if value["state"] == "CLOSED":
             return closed(state, name, record)
         record.update(state="WAIT_MERGE", merge={"status": value["state"]})

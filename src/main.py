@@ -824,7 +824,8 @@ def _sync_pr_video(state: dict, video_url: str) -> None:
     updated = (re.sub(pattern, lambda _: section, current, flags=re.DOTALL)
                if re.search(pattern, current, re.DOTALL) else current.rstrip() + "\n\n" + section)
     if updated != current:
-        _pr_ops(pr_url).gh("pr", "edit", _pr_owner_number(pr_url)[1], "--body", updated)
+        ops, number = _pr_ref(pr_url)
+        ops.gh("pr", "edit", number, "--body", updated)
     state["pr_summary"] = updated
     verified = _pr_body(pr_url)
     if section not in verified:
@@ -1371,7 +1372,12 @@ def _rails(state: dict, *, commit_plan: bool = False) -> None:
     target, records = _repo_target(state)
     slug = state.get("slug") or ""
     change = f"openspec/changes/{slug}"
-    if commit_plan and not records["."].get("pr_url"):
+    record = records["."]
+    # The approved plan is committed once, for the first draft attempt: later edits to the
+    # change folder are the agent's work, never "the approved change".
+    if (commit_plan and not record.get("pr_url") and not record.get("plan_committed")
+            and record.get("draft_attempts", 0) < 2):
+        record["plan_committed"] = True
         try:
             if git("status", "--porcelain", "--untracked-files=all", "--", change):
                 git("add", "--", change)
@@ -2473,17 +2479,29 @@ def _pr_title(state: dict) -> str:
     return title
 
 
-def _deliver(state: dict, body: str, *, ready_body: bool = False) -> None:
-    """Push the verified head to the task's PR on the shared seam (lifecycle.deliver): a
+def _deliver(state: dict, body: str, *, publication: bool = False) -> bool:
+    """Push the committed head to the task's PR on the shared seam (lifecycle.deliver): a
     stale URL never targets another branch, a fork or a different base, and nothing is
-    forced. A PR that is no longer open stops the delivery."""
+    forced. Only publication (OPEN_PR) marks a draft ready, and, as before, refuses
+    uncommitted tracked changes when the PR already exists. A PR merged on GitHub finishes
+    the task; one closed without merging is dropped and the user asked (retry opens a
+    fresh one). Returns whether the head was delivered."""
     target, records = _repo_target(state)
-    value = lifecycle.deliver(target.repos[0], records["."], lambda: _pr_title(state), lambda: body,
-                              lambda: _save_record(state), ready_body=ready_body)
+    record = records["."]
+    value = lifecycle.deliver(target.repos[0], record, lambda: _pr_title(state), lambda: body,
+                              lambda: _save_record(state), ready=publication, ready_body=publication,
+                              clean=publication and bool(lifecycle.pr_number(record)))
     persistence.mirror_record(state)
+    if value["state"] == "MERGED":
+        trail(state, f"PR merged on GitHub: {state.get('pr_url')}")
+        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False, merged=True)
+        return False
     if value["state"] != "OPEN":
-        raise errors.Fatal(f"The PR is {value['state']}, not open: {state['pr_url']}", code="pr_not_open")
+        lifecycle.closed(state, ".", record, resume=state["state"], save=lambda: _save_record(state),
+                         ask=_enter_stuck)
+        return False
     log.info("PR publication confirmed: %s head=%s", state["pr_url"], state["delivered_sha"])
+    return True
 
 
 def do_open_pr(state: dict) -> None:
@@ -2521,7 +2539,8 @@ def do_open_pr(state: dict) -> None:
     elif state.get("item_url"):
         # A GitHub issue backs the item: let the merge close it.
         body += f"\n\nCloses {state['item_url']}"
-    _deliver(state, body, ready_body=True)
+    if not _deliver(state, body, publication=True):
+        return
     state["pr_summary"] = body
     if state.get("evidence_url"):
         _sync_pr_video(state, state["evidence_url"])
@@ -2546,12 +2565,12 @@ def do_open_pr(state: dict) -> None:
     _enter_review_wait(state)
 
 
-def _pr_owner_number(pr_url: str) -> tuple[str, str]:
-    """Parse 'https://github.com/OWNER/REPO/pull/N' into ('OWNER/REPO', 'N')."""
-    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", pr_url)
-    if not m:
-        raise ValueError(f"cannot parse owner/number from PR url: {pr_url!r}")
-    return m.group(1), m.group(2)
+def _pr_ref(pr_url) -> tuple[lifecycle.RepoOps, str]:
+    """(RepoOps, number) of a PR URL (lifecycle.parse_pr_url); AgentFault when it names no PR."""
+    parsed = lifecycle.parse_pr_url(pr_url)
+    if not parsed:
+        raise errors.AgentFault(f"not a pull-request URL: {str(pr_url)[:200]!r}", code="pr_url")
+    return _pr_ops(pr_url), str(parsed[2])
 
 
 def code_review_check(pr_url: str) -> dict | None:
@@ -2564,7 +2583,12 @@ def code_review_check(pr_url: str) -> dict | None:
     surfaces promptly instead of masquerading as "not started" and stalling the poll loop
     until the review timeout.
     """
-    proc = _pr_ops(pr_url).gh_quiet("pr", "checks", _pr_owner_number(pr_url)[1], "--json", "name,bucket,workflow,link")
+    try:
+        ops, number = _pr_ref(pr_url)
+    except errors.CoderbotError as error:
+        log.warning("gh pr checks: %s", error)
+        return None
+    proc = ops.gh_quiet("pr", "checks", number, "--json", "name,bucket,workflow,link")
     if proc is None:
         return None
     try:
@@ -2596,7 +2620,8 @@ def _pr_ops(pr_url: str | None = None) -> lifecycle.RepoOps:
 
 
 def _pr_body(pr_url: str) -> str:
-    return json.loads(_pr_ops(pr_url).gh("pr", "view", _pr_owner_number(pr_url)[1], "--json", "body"))["body"]
+    ops, number = _pr_ref(pr_url)
+    return json.loads(ops.gh("pr", "view", number, "--json", "body"))["body"]
 
 
 def _bot_comments(endpoint: str) -> list[dict]:
@@ -2620,8 +2645,8 @@ def _bot_comments(endpoint: str) -> list[dict]:
 
 def review_summary(state: dict) -> str:
     """The most recent OCR sticky-summary issue comment body, for extra context ('' if none)."""
-    owner_repo, number = _pr_owner_number(state["pr_url"])
-    summaries = _bot_comments(f"repos/{owner_repo}/issues/{number}/comments")
+    parsed = lifecycle.parse_pr_url(state.get("pr_url"))
+    summaries = _bot_comments(f"repos/{parsed[1]}/issues/{parsed[2]}/comments") if parsed else []
     if not summaries:
         return ""
     return max(summaries, key=lambda c: c.get("updated_at", "")).get("body", "")
@@ -2924,7 +2949,8 @@ def _pr_merge_state(pr_url: str) -> tuple[str | None, str | None]:
     """(state, mergeable) of the PR — e.g. ("OPEN", "CONFLICTING") — or (None, None)
     when the query fails. Callers treat that as "unknown", never as "clean"."""
     try:
-        info = _pr_ops(pr_url).pr(_pr_owner_number(pr_url)[1], "state,mergeable")
+        ops, number = _pr_ref(pr_url)
+        info = ops.pr(number, "state,mergeable")
     except (errors.CoderbotError, ValueError) as error:
         log.warning("gh pr view failed checking mergeability: %s", str(error)[-300:])
         return None, None
@@ -3063,7 +3089,11 @@ def _leave_conflict_resolution(state: dict) -> None:
 
 def unresolved_review_threads(pr_url: str) -> list[dict] | None:
     """The PR's unresolved review threads (lifecycle.review_threads); None when unknown."""
-    return lifecycle.review_threads(_pr_ops(pr_url), _pr_owner_number(pr_url)[1])
+    try:
+        return lifecycle.review_threads(*_pr_ref(pr_url))
+    except errors.CoderbotError as error:  # could not verify: callers fail closed
+        log.warning("review threads: %s", error)
+        return None
 
 
 def _comment_label(comment: dict, thread: dict, bot_ids: set) -> tuple[str, bool]:
@@ -3124,8 +3154,13 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
     (lifecycle.answer_threads), with the task's receipts and thread watermark."""
     if not state.get(key):
         return 0
-    return lifecycle.answer_threads(_pr_ops(state["pr_url"]), _pr_owner_number(state["pr_url"])[1], state[key],
-                                    output, state, state.setdefault("pr_threads_seen", {}), lambda: save_state(state))
+    try:
+        ops, number = _pr_ref(state.get("pr_url"))
+    except errors.CoderbotError as error:  # the next round or the merge gate catches them again
+        log.warning("cannot answer review threads: %s", error)
+        return 0
+    return lifecycle.answer_threads(ops, number, state[key], output, state,
+                                    state.setdefault("pr_threads_seen", {}), lambda: save_state(state))
 
 
 def _resolve_repeated_findings(state: dict, threads: list[dict]) -> list[dict]:
@@ -3356,7 +3391,8 @@ def do_push(state: dict) -> None:
         _begin_check_repair(state, report, resume="PUSHING")
         return
     state.pop("check_repair", None)
-    _deliver(state, state.get("pr_summary") or state.get("item", ""))
+    if not _deliver(state, state.get("pr_summary") or state.get("item", "")):
+        return
     if continuation == "review":
         # The fix is on GitHub now: reply on + resolve the threads the worker declared
         # handled, then wait for the re-review the push triggers.

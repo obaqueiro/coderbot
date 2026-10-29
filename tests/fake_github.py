@@ -15,6 +15,7 @@ class FakeGitHub:
         self.local_head, self.base, self.dirty = head, base, ""
         self.prs, self.calls, self.pushes = {}, [], []
         self.fail_push = self.fail_merge = None
+        self.canonical = {}  # number -> the URL GitHub now reports (a renamed or transferred repository)
 
     def url(self, number):
         return f"https://github.com/{SLUG}/pull/{number}"
@@ -44,7 +45,7 @@ class FakeGitHub:
             return self.url(number)
         pr = self.prs[int(args[2])]
         if args[:2] == ("pr", "view"):
-            url = ops.url(args[2]) if ops.remote else self.url(args[2])  # GitHub answers for the repo asked
+            url = self.canonical.get(int(args[2])) or (ops.url(args[2]) if ops.remote else self.url(args[2]))
             value = {"number": int(args[2]), "url": url, "state": pr["state"], "isDraft": pr["draft"],
                      "mergeable": pr["mergeable"], "headRefName": pr["head"], "baseRefName": pr["base"],
                      "headRefOid": pr["sha"], "isCrossRepository": pr["cross"], "statusCheckRollup": [],

@@ -487,6 +487,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.edit(self.ui)
         self.records()
         self.verified()
+        self.state["state"] = "OPEN_PR"  # only publication marks drafts ready
         main.email.reset_mock()
         lifecycle.publish(runner, self.state)
         self.assertEqual(self.state["state"], "WAIT_MERGE")
