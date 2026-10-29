@@ -782,6 +782,8 @@ def resume(session_id: str, prompt: str):
             phase_checkpoint.remember_session(context, original_prompt, session_id)
         if config.AGENT == "claude":
             result = claude_runner.resume(session_id, prompt) if session_id else claude_runner.run(prompt)
+            if context and getattr(result, "context_tokens", 0):
+                context["session_context_tokens"] = result.context_tokens  # rotation, as with OpenCode
         elif config.AGENT == "opencode":
             # A rotated (fresh) session needs the full instructions; a resume only a reminder.
             prefix = claude_runner.RESUME_REMINDER if session_id else claude_runner.contract_text()

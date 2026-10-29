@@ -188,3 +188,14 @@ class PhaseModels(unittest.TestCase):
                     self.assertEqual(claude_runner._phase_model(), expected)
             finally:
                 agent_runner._task_context.reset(token)
+
+
+class ContextTokens(unittest.TestCase):
+    def test_usage_feeds_the_session_size(self):
+        import json
+        import subprocess
+        import claude_runner
+        proc = subprocess.CompletedProcess([], 0, json.dumps({"session_id": "s", "result": "ok", "usage": {
+            "input_tokens": 10, "cache_read_input_tokens": 90000, "cache_creation_input_tokens": 500,
+            "output_tokens": 40}}), "")
+        self.assertEqual(claude_runner._parse(proc).context_tokens, 90550)

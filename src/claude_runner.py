@@ -72,6 +72,7 @@ class ClaudeResult:
         self.session_id = session_id
         self.output = output
         self.data = data  # the validated result object (turns.RESULT_SCHEMA), or None
+        self.context_tokens = 0
 
     @property
     def question(self) -> str | None:
@@ -286,6 +287,10 @@ def _parse(proc: subprocess.CompletedProcess, *, structured: bool = False) -> Cl
     if structured:
         output, result_data = turns.finalize(output, data.get("structured_output"))
     result = ClaudeResult(session_id=data["session_id"], output=output, data=result_data)
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    # The session's context size: what the next resume re-reads (drives session rotation).
+    result.context_tokens = sum(int(usage.get(key) or 0) for key in (
+        "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"))
     log.info("claude returned session=%s output=%d chars sentinel=%s",
              result.session_id, len(result.output), result.question is not None)
     log.debug("claude output:\n%s", result.output)
