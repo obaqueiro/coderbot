@@ -188,7 +188,7 @@ class LifecycleGateTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, instructions, ""),
         ]
         with patch.object(main.agent_runner, "resume", return_value=result(QUALITY_PASS)) as resume, \
-             patch.object(main.subprocess, "run", side_effect=checks) as process:
+             patch.object(main.operations, "tool", side_effect=checks) as process:
             main.do_verify(state)
 
         self.assertIn("verify OpenSpec change", resume.call_args.args[1])
@@ -242,7 +242,7 @@ class LifecycleGateTests(unittest.TestCase):
             with self.subTest(name=name):
                 state = self.base_state(state="VERIFYING", verify_round=0)
                 with patch.object(main.agent_runner, "resume", return_value=result(QUALITY_PASS)), \
-                     patch.object(main.subprocess, "run", side_effect=checks):
+                     patch.object(main.operations, "tool", side_effect=checks):
                     main.do_verify(state)
                 self.assertEqual(state["state"], "VERIFYING")
                 self.assertEqual(state["verify_round"], 1)

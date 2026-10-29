@@ -57,7 +57,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run", side_effect=self.ok) as process, \
+             patch.object(main.operations, "tool", side_effect=self.ok) as process, \
              patch.object(main, "git",
                           side_effect=["", "", "?? openspec/specs/api/spec.md", "", ""]) as git:
             main.do_archive(self.state)
@@ -85,7 +85,7 @@ class ArchivalTests(unittest.TestCase):
     def test_archive_cli_and_validation_failures_stay_before_open_pr(self):
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), patch.object(main, "git", return_value=""), \
-             patch.object(main.subprocess, "run", return_value=subprocess.CompletedProcess(
+             patch.object(main.operations, "tool", return_value=subprocess.CompletedProcess(
                  [], 1, "", "archive failed")):
             main.do_archive(self.state)
 
@@ -154,7 +154,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), patch.object(main, "git", return_value=""), \
-             patch.object(main.subprocess, "run", side_effect=run):
+             patch.object(main.operations, "tool", side_effect=run):
             main.do_archive(self.state)
 
         self.assertEqual(self.state["state"], "ARCHIVING")
@@ -174,7 +174,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), patch.object(main, "git", return_value=""), \
-             patch.object(main.subprocess, "run", side_effect=run), \
+             patch.object(main.operations, "tool", side_effect=run), \
              self.assertLogs(main.log, level="WARNING") as logs:
             main.do_archive(self.state)
 
@@ -195,7 +195,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), patch.object(main, "git", return_value=""), \
-             patch.object(main.subprocess, "run", side_effect=run):
+             patch.object(main.operations, "tool", side_effect=run):
             main.do_archive(self.state)
 
         self.assertEqual(self.state["state"], "ARCHIVING")
@@ -216,7 +216,7 @@ class ArchivalTests(unittest.TestCase):
                 with patch.object(main.config, "REPO_PATH", self.repo), \
                      patch.object(main, "save_state"), \
                      patch.object(main, "git", return_value=""), \
-                     patch.object(main.subprocess, "run", side_effect=run):
+                     patch.object(main.operations, "tool", side_effect=run):
                     main.do_archive(self.state)
 
                 self.assertEqual(self.state["state"], "ARCHIVING")
@@ -243,7 +243,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run", side_effect=run), \
+             patch.object(main.operations, "tool", side_effect=run), \
              patch.object(main, "git", side_effect=["", "", "M src/app.py"]):
             main.do_archive(self.state)
 
@@ -257,7 +257,7 @@ class ArchivalTests(unittest.TestCase):
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
              patch.object(main, "git", return_value=""), \
-             patch.object(main.subprocess, "run", side_effect=run):
+             patch.object(main.operations, "tool", side_effect=run):
             main.do_archive(self.state)
 
         self.assertEqual(self.state["state"], "ARCHIVING")
@@ -271,7 +271,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run", side_effect=self.ok) as process, \
+             patch.object(main.operations, "tool", side_effect=self.ok) as process, \
              patch.object(main, "git",
                           side_effect=[" M openspec/specs/api/spec.md", "", ""]) as git:
             main.do_archive(self.state)
@@ -291,7 +291,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run", side_effect=self.ok) as process, \
+             patch.object(main.operations, "tool", side_effect=self.ok) as process, \
              patch.object(main, "git", return_value="") as git:
             main.do_archive(self.state)
 
@@ -305,7 +305,7 @@ class ArchivalTests(unittest.TestCase):
              patch.object(main, "save_state"), \
              patch.object(main, "git", return_value=" M app.py"), \
              patch.object(main.recovery, "begin", side_effect=lambda db, state, repo, reason, resume: state.update(state="RECOVERING")) as recover, \
-             patch.object(main.subprocess, "run") as process:
+             patch.object(main.operations, "tool") as process:
             main.do_archive(self.state)
 
         process.assert_not_called()
@@ -322,7 +322,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), patch.object(main, "git", side_effect=git) as git_call, \
-             patch.object(main.subprocess, "run") as process:
+             patch.object(main.operations, "tool") as process:
             main.do_archive(self.state)
 
         self.assertIn(
@@ -348,7 +348,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run", side_effect=run), \
+             patch.object(main.operations, "tool", side_effect=run), \
              patch.object(main, "git", side_effect=git) as git_call:
             main.do_archive(self.state)
 
@@ -408,7 +408,7 @@ class ArchivalTests(unittest.TestCase):
         (self.repo / "openspec/changes/api-version").rename(archive)
         self.state["archive_path"] = "openspec/changes/archive/2026-09-01-api-version"
         with patch.object(main.config, "REPO_PATH", self.repo), \
-             patch.object(main.subprocess, "run", side_effect=self.ok), \
+             patch.object(main.operations, "tool", side_effect=self.ok), \
              patch.object(main, "git", side_effect=[" M openspec/specs/api/spec.md", "",
                                                      RuntimeError("commit failed")]):
             main.do_archive(self.state)
@@ -435,7 +435,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state") as save, \
-             patch.object(main.subprocess, "run", side_effect=run), \
+             patch.object(main.operations, "tool", side_effect=run), \
              patch.object(main, "git", side_effect=["", "", ""]):
             main.do_archive(state)
 
@@ -454,7 +454,7 @@ class ArchivalTests(unittest.TestCase):
                 state = dict(self.state, slug=slug)
                 with patch.object(main.config, "REPO_PATH", self.repo), \
                      patch.object(main, "save_state") as save, \
-                     patch.object(main.subprocess, "run") as process, \
+                     patch.object(main.operations, "tool") as process, \
                      patch.object(main, "git") as git:
                     main.do_archive(state)
                 save.assert_not_called()
@@ -476,7 +476,7 @@ class ArchivalTests(unittest.TestCase):
                 state = dict(self.state, archive_path=archive_path)
                 with patch.object(main.config, "REPO_PATH", self.repo), \
                      patch.object(main, "save_state") as save, \
-                     patch.object(main.subprocess, "run") as process, \
+                     patch.object(main.operations, "tool") as process, \
                      patch.object(main, "git") as git:
                     main.do_archive(state)
                 save.assert_not_called()
@@ -494,7 +494,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state") as save, \
-             patch.object(main.subprocess, "run") as process, \
+             patch.object(main.operations, "tool") as process, \
              patch.object(main, "git") as git:
             main.do_archive(self.state)
 
@@ -511,7 +511,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state") as save, \
-             patch.object(main.subprocess, "run") as process, \
+             patch.object(main.operations, "tool") as process, \
              patch.object(main, "git") as git:
             main.do_archive(self.state)
 
@@ -561,7 +561,7 @@ class NativePullRequestTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
         ]
         with patch.object(main, "git", side_effect=self.ready_git) as git, \
-             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.operations, "tool", side_effect=responses) as process, \
              patch.object(main, "_enter_review_wait") as enter_wait:
             main.do_open_pr(state)
 
@@ -586,7 +586,7 @@ class NativePullRequestTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, "github.com/acme/project/pull/42", ""),
         ]
         with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.subprocess, "run", side_effect=responses):
+             patch.object(main.operations, "tool", side_effect=responses):
             with self.assertRaisesRegex(RuntimeError, "HTTPS"):
                 main.do_open_pr(state)
 
@@ -598,7 +598,7 @@ class NativePullRequestTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42", ""),
         ]
         with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.operations, "tool", side_effect=responses) as process, \
              patch.object(main.task_source, "note_pr") as note_pr, \
              patch.object(main, "trail") as trail, \
              patch.object(main, "_enter_review_wait"):
@@ -621,7 +621,7 @@ class NativePullRequestTests(unittest.TestCase):
         ]
         with patch.object(main.config, "TASK_SOURCE", "jira"), \
              patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.operations, "tool", side_effect=responses) as process, \
              patch.object(main.task_source, "note_pr") as note_pr, \
              patch.object(main, "_enter_review_wait"):
             main.do_open_pr(state)
@@ -644,7 +644,7 @@ class NativePullRequestTests(unittest.TestCase):
     def test_open_pr_restart_reuses_persisted_url_without_external_creation(self):
         state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
         with patch.object(main, "git", side_effect=self.ready_git) as git, \
-             patch.object(main.subprocess, "run") as process, \
+             patch.object(main.operations, "tool") as process, \
              patch.object(main, "_enter_review_wait") as enter_wait:
             main.do_open_pr(state)
 
@@ -659,7 +659,7 @@ class NativePullRequestTests(unittest.TestCase):
         existing = subprocess.CompletedProcess(
             [], 0, '[{"url":"https://github.com/acme/project/pull/42","state":"OPEN"}]', "")
         with patch.object(main, "git", side_effect=self.ready_git) as git, \
-             patch.object(main.subprocess, "run", return_value=existing) as process, \
+             patch.object(main.operations, "tool", return_value=existing) as process, \
              patch.object(main, "_enter_review_wait"):
             main.do_open_pr(state)
 
@@ -682,7 +682,7 @@ class NativePullRequestTests(unittest.TestCase):
                         [], 0, "https://github.com/acme/project/pull/42", ""),
                 ]
                 with patch.object(main, "git", side_effect=self.ready_git), \
-                     patch.object(main.subprocess, "run", side_effect=responses) as process, \
+                     patch.object(main.operations, "tool", side_effect=responses) as process, \
                      patch.object(main, "_enter_review_wait"):
                     main.do_open_pr(state)
 
@@ -706,7 +706,7 @@ class NativePullRequestTests(unittest.TestCase):
                 state = self.state()
                 response = subprocess.CompletedProcess([], 0, output, "")
                 with patch.object(main, "git", side_effect=self.ready_git), \
-                     patch.object(main.subprocess, "run", return_value=response) as process:
+                     patch.object(main.operations, "tool", return_value=response) as process:
                     with self.assertRaises(RuntimeError):
                         main.do_open_pr(state)
                 self.assertEqual(process.call_count, 1)
@@ -717,7 +717,7 @@ class NativePullRequestTests(unittest.TestCase):
         state.pop("archive_path")
         state["review_gate_round"] = 2
         with patch.object(main, "git") as git, \
-             patch.object(main.subprocess, "run") as process:
+             patch.object(main.operations, "tool") as process:
             main.do_open_pr(state)
 
         git.assert_not_called()
@@ -730,7 +730,7 @@ class NativePullRequestTests(unittest.TestCase):
         state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(main.config, "REPO_PATH", Path(tmp)), \
-             patch.object(main, "git") as git, patch.object(main.subprocess, "run") as process, \
+             patch.object(main, "git") as git, patch.object(main.operations, "tool") as process, \
              patch.object(main, "_enter_review_wait"):
             main.do_open_pr(state)
 
@@ -749,7 +749,7 @@ class NativePullRequestTests(unittest.TestCase):
             (repo / "openspec/changes/api-version").mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git") as git, \
-                 patch.object(main.subprocess, "run") as process, \
+                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait"):
                 main.do_open_pr(state)
 
@@ -764,7 +764,7 @@ class NativePullRequestTests(unittest.TestCase):
             (repo / state["archive_path"]).mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git", return_value="?? openspec/specs/new/spec.md") as git, \
-                 patch.object(main.subprocess, "run") as process, \
+                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait"):
                 main.do_open_pr(state)
 
@@ -780,7 +780,7 @@ class NativePullRequestTests(unittest.TestCase):
             (repo / state["archive_path"]).mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git", side_effect=["", ""]) as git, \
-                 patch.object(main.subprocess, "run") as process, \
+                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait"):
                 main.do_open_pr(state)
 
@@ -799,7 +799,7 @@ class NativePullRequestTests(unittest.TestCase):
             (repo / state["archive_path"]).mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git", side_effect=["", tracked]) as git, \
-                 patch.object(main.subprocess, "run") as process, \
+                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait") as enter_wait:
                 main.do_open_pr(state)
 
@@ -813,7 +813,7 @@ class NativePullRequestTests(unittest.TestCase):
     def test_open_pr_rejects_untrusted_archive_reference_before_push(self):
         state = self.state() | {"archive_path": "../../etc/passwd"}
         with patch.object(main.config, "REPO_PATH", Path("/safe/repo")), \
-             patch.object(main, "git") as git, patch.object(main.subprocess, "run") as process:
+             patch.object(main, "git") as git, patch.object(main.operations, "tool") as process:
             with self.assertRaises(ValueError):
                 main.do_open_pr(state)
 
@@ -1024,7 +1024,7 @@ class PushPhaseTests(unittest.TestCase):
         verdict = Mock(output='{"action":"merge","feedback":""}')
         merged = subprocess.CompletedProcess([], 0, '{"state":"MERGED","mergeable":"MERGEABLE"}', "")
         with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main.subprocess, "run", return_value=merged), \
+             patch.object(main.operations, "tool", return_value=merged), \
              patch.object(main.task_source, "mark_done", return_value=True), \
              patch.object(main, "email"):
             main.do_merge_reply(state, "merge")
@@ -1118,7 +1118,7 @@ class LongTitlePullRequestTests(NativePullRequestTests):
             subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
         ]
         with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.operations, "tool", side_effect=responses) as process, \
              patch.object(main, "_enter_review_wait"):
             main.do_open_pr(state)
         command = process.call_args_list[1].args[0]
@@ -1133,7 +1133,7 @@ class LongTitlePullRequestTests(NativePullRequestTests):
             subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
         ]
         with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.operations, "tool", side_effect=responses) as process, \
              patch.object(main.agent_runner, "run", side_effect=RuntimeError("down")), \
              patch.object(main, "_enter_review_wait"):
             main.do_open_pr(state)

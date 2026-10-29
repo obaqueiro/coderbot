@@ -39,7 +39,7 @@ class Start(unittest.TestCase):
         self.calls = []
         patches = [
             patch.object(privatebin.shutil, "which", return_value="/usr/bin/x"),
-            patch.object(privatebin.subprocess, "run", side_effect=self.fake_run),
+            patch.object(privatebin.operations, "tool", side_effect=self.fake_run),
             patch.object(privatebin.subprocess, "Popen", side_effect=FakeTunnel),
             patch.object(privatebin.os, "killpg"),
             patch.object(privatebin.time, "sleep"),
@@ -114,7 +114,7 @@ class Start(unittest.TestCase):
             if args[:2] == ["docker", "start"]:
                 raise subprocess.CalledProcessError(1, args)
             return completed(args, "cid9\n")
-        with patch.object(privatebin.subprocess, "run", side_effect=failing), \
+        with patch.object(privatebin.operations, "tool", side_effect=failing), \
                 patch.object(privatebin, "_port_busy", return_value=False), \
                 self.assertRaises(Unavailable):
             privatebin.start("bot-1", self.dir)
@@ -123,7 +123,7 @@ class Start(unittest.TestCase):
 
 class StopAndCleanup(unittest.TestCase):
     def test_stop_and_cleanup_never_raise(self):
-        with patch.object(privatebin.subprocess, "run", side_effect=OSError("no docker")), \
+        with patch.object(privatebin.operations, "tool", side_effect=OSError("no docker")), \
                 patch.object(privatebin.shutil, "which", return_value="/usr/bin/docker"):
             privatebin.stop({"container_id": "c", "tunnel_pid": 999999})
             privatebin.stop(None)
@@ -135,7 +135,7 @@ class StopAndCleanup(unittest.TestCase):
         def run(args, **kwargs):
             calls.append(args)
             return completed(args, "a1\nb2\n" if args[:2] == ["docker", "ps"] else "")
-        with patch.object(privatebin.subprocess, "run", side_effect=run), \
+        with patch.object(privatebin.operations, "tool", side_effect=run), \
                 patch.object(privatebin.shutil, "which", return_value="/usr/bin/docker"):
             privatebin.cleanup_stale("bot-1")
         self.assertIn("label=codebot.privatebin=bot-1", calls[0])
@@ -144,7 +144,7 @@ class StopAndCleanup(unittest.TestCase):
     def test_a_reused_pid_is_neither_alive_nor_signalled(self):
         with patch.object(privatebin, "_is_tunnel", return_value=False), \
                 patch.object(privatebin.os, "kill") as kill, \
-                patch.object(privatebin.subprocess, "run", return_value=completed([])):
+                patch.object(privatebin.operations, "tool", return_value=completed([])):
             self.assertFalse(privatebin.running({"public_url": "https://x.lhr.life/", "tunnel_pid": 1234,
                                                  "expires_at": time.time() + 60}))
             privatebin.stop({"tunnel_pid": 1234})

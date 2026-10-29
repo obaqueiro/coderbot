@@ -1,10 +1,14 @@
 """Recovery plans describe ownership and preserve ambiguous work by isolation."""
 import json
 from pathlib import Path
-import subprocess
 import shutil
 
+import operations
 import repo_provenance
+
+
+def _git(cwd, *args, **kwargs):
+    return operations.tool(["git", *args], cwd=cwd, timeout=60, check=True, **kwargs).stdout
 
 
 def begin(store, state, repo, reason, resume):
@@ -61,16 +65,13 @@ def isolate(state, repo, directory, owned=()):
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
         isolated_branch = "codebot-recovery-" + task
-        subprocess.run(["git", "worktree", "add", "-b", isolated_branch, str(destination), "HEAD"],
-            cwd=repo, capture_output=True, check=True, timeout=60)
+        _git(repo, "worktree", "add", "-b", isolated_branch, str(destination), "HEAD")
         if owned:
             status = repo_provenance.inspect(repo)
             transferable = [name for name in owned if "U" not in status["files"][name]["status"]]
-            patch = subprocess.run(["git", "diff", "HEAD", "--binary", "--", *transferable],
-                cwd=repo, capture_output=True, check=True, timeout=60).stdout if transferable else b""
+            patch = _git(repo, "diff", "HEAD", "--binary", "--", *transferable, text=False) if transferable else b""
             if patch:
-                subprocess.run(["git", "apply", "--binary", "-"], input=patch,
-                    cwd=destination, capture_output=True, check=True, timeout=60)
+                _git(destination, "apply", "--binary", "-", input=patch)
             for name in owned:
                 if status["files"][name]["status"] != "??":
                     continue
@@ -80,13 +81,11 @@ def isolate(state, repo, directory, owned=()):
         operations = repo_provenance.inspect(repo)["operations"]
         if operations:
             # Preserve the original operation; carry its merge intent into isolation.
-            gitdir = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=repo,
-                capture_output=True, check=True, text=True, errors="replace", timeout=60).stdout.strip()
+            gitdir = _git(repo, "rev-parse", "--absolute-git-dir").strip()
             merge_head = Path(gitdir) / "MERGE_HEAD"
             if merge_head.is_file():
                 state["isolated_merge_heads"] = merge_head.read_text().splitlines()
-    isolated_branch = subprocess.run(["git", "branch", "--show-current"], cwd=destination,
-        capture_output=True, check=True, text=True, errors="replace", timeout=60).stdout.strip()
+    isolated_branch = _git(destination, "branch", "--show-current").strip()
     state.setdefault("remote_branch", state["branch"])
     state["branch"] = isolated_branch
     state.setdefault("original_workspace", str(repo))

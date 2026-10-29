@@ -1,6 +1,9 @@
 """Monotonic budgets and observable operations shared by retries and tools."""
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
+import os
+import tempfile
 import threading
 import time
 import uuid
@@ -9,6 +12,7 @@ import subprocess
 
 import turn_control
 import config
+import errors
 
 
 _budget: ContextVar = ContextVar("operation_budget", default=None)
@@ -179,7 +183,7 @@ def _run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cle
     operation = begin(kind, str(argv[0]), timeout)
     process = None
     try:
-        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input else None,
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
         turn_control.register(process)
         try:
@@ -201,3 +205,56 @@ def _run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cle
             finish(operation)
         if kicked:
             raise turn_control.TurnKicked("user requested KICK")
+
+
+STDERR_TAIL = 64 * 1024
+_NO_PROMPT = {"GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
+
+
+def tool(argv, *, cwd=None, env=None, timeout=None, input=None, text=True, check=False):
+    """A short git/gh/CLI call: own session with a group kill on timeout or shutdown,
+    output spooled to temp files (stderr keeps a bounded tail), never an interactive
+    prompt. Not interruptible by KICK: a user restart must not tear a commit apart.
+    A missing executable raises errors.MissingExecutable (a FileNotFoundError)."""
+    timeout = remaining(timeout or config.SUBPROCESS_TIMEOUT_SECONDS)
+    env = {**(os.environ if env is None else env), **_NO_PROMPT}
+    data = input.encode() if isinstance(input, str) else input
+    started = time.time()
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=out, stderr=err, start_new_session=True,
+                                       stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL)
+        except FileNotFoundError as error:
+            if cwd is not None and error.filename == str(cwd):
+                raise
+            raise errors.MissingExecutable(str(argv[0])) from error
+        try:
+            process.communicate(input=data, timeout=timeout)
+        except BaseException as error:
+            terminate(process)
+            _drop_stale_index_lock(argv, cwd, started)
+            if isinstance(error, subprocess.TimeoutExpired):
+                raise subprocess.TimeoutExpired(argv, timeout) from None
+            raise
+        out.seek(0)
+        stdout = out.read()
+        err.seek(max(0, err.seek(0, 2) - STDERR_TAIL))
+        stderr = err.read()
+    if text:
+        stdout, stderr = stdout.decode(errors="replace"), stderr.decode(errors="replace")
+    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    if check:
+        result.check_returncode()
+    return result
+
+
+def _drop_stale_index_lock(argv, cwd, started):
+    """A killed git leaves .git/index.lock behind, failing every later git call."""
+    if not argv or Path(str(argv[0])).name != "git":
+        return
+    lock = Path(cwd or ".") / ".git" / "index.lock"
+    try:
+        if lock.stat().st_mtime >= started - 1:
+            lock.unlink()
+    except OSError:
+        pass

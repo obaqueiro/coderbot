@@ -217,7 +217,7 @@ class EvidenceTests(unittest.TestCase):
 
             with patch.object(evidence, "E2E_DIR", e2e_dir), \
                  patch.object(evidence.config, "E2E_TIMEOUT_SECONDS", 1), \
-                 patch("evidence.subprocess.run", side_effect=fake_run), \
+                 patch("evidence.operations.tool", side_effect=fake_run), \
                  patch("evidence.operations.run", side_effect=fake_run):
                 passed, output = evidence.run_suite()
 
@@ -229,7 +229,7 @@ class EvidenceTests(unittest.TestCase):
     def test_teardown_is_noop_without_compose_file(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(evidence, "E2E_DIR", Path(tmp)), \
-             patch("evidence.subprocess.run") as run:
+             patch("evidence.operations.tool") as run:
             evidence._teardown_stack()
         run.assert_not_called()
 

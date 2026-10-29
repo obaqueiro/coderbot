@@ -1,10 +1,10 @@
 """Explicit, backed-up OpenSpec recovery; never reset application work or Git."""
 import json
 import re
-import subprocess
 import uuid
 from pathlib import Path
 
+import operations
 import proposal_package
 import task_phases
 
@@ -27,7 +27,7 @@ def restore(repo, slug, commit, data_dir):
     relative = root.relative_to(repo).as_posix()
 
     def git(*args):
-        result = subprocess.run(["git", *args], cwd=repo, capture_output=True, timeout=30)
+        result = operations.tool(["git", *args], cwd=repo, timeout=30, text=False)
         if result.returncode:
             raise ValueError("Cannot restore plan: " + result.stderr.decode(errors="replace").strip())
         return result.stdout

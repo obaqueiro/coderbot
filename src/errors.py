@@ -41,6 +41,16 @@ class Fatal(CoderbotError):
     kind = FATAL
 
 
+class MissingExecutable(FileNotFoundError):
+    """A required CLI is not installed. A FileNotFoundError, so `except OSError` call
+    sites keep working; kind() reports it as fatal."""
+    kind = FATAL
+
+    def __init__(self, name):
+        super().__init__(f"{name}: executable not found")
+        self.code, self.resource, self.retry_after = "MissingExecutable", name, None
+
+
 TRANSIENT_ERRNOS = {errno.ENOSPC, errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.EAGAIN,
                     errno.EBUSY, errno.EIO, errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNREFUSED,
                     errno.EHOSTUNREACH, errno.ENETUNREACH}
@@ -57,7 +67,7 @@ _FATAL_NAMES = {"MissingCredentials", "WorkspaceError", "TargetMismatch"}
 
 
 def kind(error: BaseException) -> str:
-    if isinstance(error, CoderbotError):
+    if isinstance(error, (CoderbotError, MissingExecutable)):
         return error.kind
     if isinstance(error, _TRANSIENT_TYPES) or type(error).__name__ == "MalformedPayload":
         return TRANSIENT
@@ -79,4 +89,4 @@ def kind(error: BaseException) -> str:
 
 def code(error: BaseException) -> str:
     """A stable incident code: the wrapper's code, else the exception type."""
-    return getattr(error, "code", "") if isinstance(error, CoderbotError) else type(error).__name__
+    return error.code if isinstance(error, (CoderbotError, MissingExecutable)) else type(error).__name__

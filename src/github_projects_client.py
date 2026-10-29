@@ -21,11 +21,11 @@ import json
 import logging
 import os
 import re
-import subprocess
 import urllib.parse
 import urllib.request
 
 import config
+import operations
 import ownership
 import safe_download
 import task_source
@@ -55,8 +55,7 @@ _cache: dict = {}
 def _gh(*args: str) -> str:
     """Run a gh command and return stdout; RuntimeError (with a token-scope hint when
     the error looks like one) on failure."""
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True, errors="replace",
-                          timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    proc = operations.tool(["gh", *args])
     if proc.returncode != 0:
         detail = (proc.stderr.strip() or proc.stdout.strip())[-2000:]
         message = f"gh {' '.join(args[:2])} failed (exit {proc.returncode}): {detail}"
@@ -96,9 +95,7 @@ def _target_repo() -> str:
         return _cache["repo"]
     repo = config.GH_ISSUE_REPO
     if not repo:
-        proc = subprocess.run(["git", "-C", str(config.REPO_PATH), "remote", "get-url", "origin"],
-                              capture_output=True, text=True, errors="replace",
-                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+        proc = operations.tool(["git", "-C", str(config.REPO_PATH), "remote", "get-url", "origin"])
         if proc.returncode != 0:
             raise RuntimeError("cannot determine the issue repository: no origin remote in "
                                f"{config.REPO_PATH} (set CODEBOT_GH_ISSUE_REPO=owner/repo)")

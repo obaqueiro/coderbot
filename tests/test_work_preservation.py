@@ -139,7 +139,7 @@ class ManyUntracked(Repo):
         self.assertIn("codebot: many", run(self.repo, "stash", "list").stdout)
 
     def test_git_quiet_never_raises_on_oserror(self):
-        with patch.object(main.subprocess, "run", side_effect=OSError("Argument list too long")):
+        with patch.object(main.operations, "tool", side_effect=OSError("Argument list too long")):
             self.assertFalse(main._git_quiet("status"))
 
 
