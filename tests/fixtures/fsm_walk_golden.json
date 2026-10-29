@@ -7,10 +7,12 @@
    "open",
    "--head",
    "walkbot-add-a-greeting-function",
+   "--base",
+   "main",
    "--json",
-   "url",
+   "number,url",
    "--limit",
-   "1"
+   "2"
   ],
   [
    "pr",

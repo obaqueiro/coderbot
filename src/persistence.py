@@ -2,6 +2,7 @@
 state schema (task-scoped vs global keys) that drives task reset and hold/restore."""
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -81,7 +82,7 @@ def quarantine(path, default):
 # Every task-scoped key: cleared whenever a task ends (merge, DONE, abort) so the next
 # pick starts from a clean slate, and saved/restored with a held task. Add new task
 # state here.
-TASK_KEYS = ("sent_messages", "declined_findings", "review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
+TASK_KEYS = ("repository", "sent_messages", "declined_findings", "review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
              "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
              "recovery_id", "replan", "approved_proposal", "approved_scope_fingerprint",
              "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
@@ -156,6 +157,53 @@ def forward(state: dict) -> dict:
     return state
 
 
+# Repo mode keeps its repository in the workspace record shape (lifecycle.py) under
+# "repository". The task scalars stay written as well: the old code (a rollback) and
+# most of main.py read them, so they win whenever the record is refreshed.
+def repository_record(state: dict) -> dict:
+    """Repo mode's one per-repository record, refreshed from the task scalars."""
+    branch = state.get("remote_branch") or state.get("branch")
+    if not isinstance(state.get("repository"), dict) or state["repository"].get("branch") not in (None, branch):
+        state["repository"] = {}  # absent, or left over from another task (an old-code rollback)
+    record = state["repository"]
+    draft_url, url = state.get("draft_pr_url"), state.get("pr_url") or state.get("draft_pr_url")
+    match = re.search(r"/pull/(\d+)$", url or "")
+    for key, value in {"pr_url": url, "pr_number": int(match[1]) if match else None,
+                       "draft": bool(draft_url) and not state.get("draft_pr_ready")
+                       and state.get("pr_url") in (None, draft_url) if url else None,
+                       "delivered_sha": state.get("delivered_sha"), "base_sha": state.get("base_sha"),
+                       "branch": branch,
+                       "draft_attempts": state.get("draft_pr_attempts")}.items():
+        if value is None:
+            record.pop(key, None)
+        else:
+            record[key] = value
+    return record
+
+
+def mirror_record(state: dict) -> None:
+    """Write what the shared lifecycle changed in the record back to the scalars."""
+    record = state.get("repository")
+    if not isinstance(record, dict):
+        return
+    url = record.get("pr_url")
+    if url and record.get("draft"):
+        state["draft_pr_url"] = url
+        state.pop("pr_url", None)
+    elif url:
+        state["pr_url"] = url
+        if state.get("draft_pr_url") == url:
+            state["draft_pr_ready"] = True
+    else:
+        state.pop("pr_url", None)
+        state.pop("draft_pr_url", None)
+    for key, scalar in (("delivered_sha", "delivered_sha"), ("draft_attempts", "draft_pr_attempts")):
+        if record.get(key) is None:
+            state.pop(scalar, None)
+        else:
+            state[scalar] = record[key]
+
+
 def read_state(path) -> dict | None:
     """Pure read of state.json: None when absent; corruption is quarantined and the
     default (IDLE) returned; removed state names are mapped forward."""
@@ -165,4 +213,6 @@ def read_state(path) -> dict | None:
     if not isinstance(state, dict):
         return quarantine(path, {"state": GLOBAL_KEYS["state"]})
     state.setdefault("state", GLOBAL_KEYS["state"])
+    if state.get("branch") and not isinstance(state.get("workspace"), dict):
+        repository_record(state)  # an old repo-mode state.json gains its record
     return forward(state)

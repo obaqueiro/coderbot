@@ -102,3 +102,42 @@ class ForwardStates(unittest.TestCase):
         self.assertEqual(persistence.forward({**archived, "state": "EVIDENCE_REVIEW",
                                               "push_context": {"continuation": "evidence"}})["state"], "PUSHING")
         self.assertEqual(persistence.forward({**archived, "state": "RECOVERING"})["state"], "OPEN_PR")
+
+
+class RepositoryRecord(unittest.TestCase):
+    URL = "https://github.com/acme/project/pull/7"
+
+    def load(self, value):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            path.write_text(json.dumps(value))
+            return persistence.read_state(path)
+
+    def test_old_repo_state_gains_its_record_on_load_and_keeps_the_scalars(self):
+        old = {"state": "IMPLEMENTING", "branch": "bot-x", "base_sha": "b" * 40, "draft_pr_url": self.URL,
+               "draft_pr_attempts": 1}
+        state = self.load(old)
+        self.assertEqual(state["repository"], {"pr_url": self.URL, "pr_number": 7, "draft": True,
+                                               "base_sha": "b" * 40, "branch": "bot-x", "draft_attempts": 1})
+        self.assertEqual({k: state[k] for k in old}, old)
+        self.assertNotIn("repository", self.load({"state": "IDLE"}))
+        self.assertNotIn("repository", self.load({"state": "IMPLEMENTING", "branch": "b", "workspace": {}}))
+
+    def test_mirroring_writes_what_the_old_code_reads(self):
+        state = {"branch": "bot-x", "draft_pr_url": self.URL}
+        record = persistence.repository_record(state)
+        record.update(draft=False, delivered_sha="c" * 40)  # published: ready and pushed
+        persistence.mirror_record(state)
+        self.assertEqual((state["pr_url"], state["draft_pr_ready"], state["delivered_sha"]),
+                         (self.URL, True, "c" * 40))
+        self.assertFalse(persistence.repository_record(state)["draft"])
+
+    def test_scalars_win_and_a_left_over_record_is_dropped(self):
+        state = {"branch": "bot-x", "pr_url": self.URL, "remote_branch": "original",
+                 "repository": {"branch": "bot-old", "merge": {"status": "MERGED"}}}
+        record = persistence.repository_record(state)
+        self.assertEqual(record["branch"], "original")
+        self.assertNotIn("merge", record)
+        state["delivered_sha"] = "d" * 40
+        self.assertEqual(persistence.repository_record(state)["delivered_sha"], "d" * 40)
+        self.assertIn("repository", persistence.TASK_KEYS)

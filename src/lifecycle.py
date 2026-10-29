@@ -8,7 +8,6 @@ fetches and pushes. Per-repository records live in state["workspace"]["repositor
 from dataclasses import dataclass
 import json
 import logging
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -16,6 +15,7 @@ import time
 
 import config
 import errors
+import operations
 
 log = logging.getLogger("coderbot")
 PR_FIELDS = "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository"
@@ -38,7 +38,6 @@ def run(argv, cwd, *, timeout=None):
 
 def call(argv, cwd, *, timeout=None):
     """The finished process, any exit status, of a bounded operations.tool call."""
-    import operations
     label = " ".join(argv[:2])
     try:
         return operations.tool(argv, cwd=cwd, timeout=timeout or config.SUBPROCESS_TIMEOUT_SECONDS)
@@ -241,7 +240,7 @@ def open_drafts(target, records, title, body, save):
             if not ops.ahead(record.get("base_sha")):
                 continue
             ops.push(record["branch"])
-            number, url = ops.open_pr(record["branch"], title, body(name), draft=True)
+            number, url = ops.open_pr(record["branch"], title(), body(name), draft=True)
         except Exception as error:  # noqa: BLE001 - the ready step opens it at the end
             record["draft_attempts"] = record.get("draft_attempts", 0) + 1
             log.warning("draft PR for %s failed (attempt %d): %s", name, record["draft_attempts"], error)
@@ -253,13 +252,25 @@ def open_drafts(target, records, title, body, save):
 
 
 def push_progress(target, records):
-    """Best-effort progress push to every open draft; the next turn retries a failure."""
+    """Best-effort progress push to every open draft; the next turn retries a failure.
+    A ready PR only receives verified heads (the publish step)."""
     for name, record in records.items():
-        if pr_number(record) and record.get("merge", {}).get("status") != "MERGED":
+        if pr_number(record) and record.get("draft") and record.get("merge", {}).get("status") != "MERGED":
             try:
                 target.repo(name).push(record["branch"])
             except Exception as error:  # noqa: BLE001
                 log.warning("progress push for %s failed: %s", name, error)
+
+
+def progress(target, records, title, body, save):
+    """The rails after a turn: push to open drafts, then open the missing ones; never raises.
+    Returns the names that got a draft PR now."""
+    try:
+        push_progress(target, records)
+        return open_drafts(target, records, title, body, save)
+    except Exception as error:  # noqa: BLE001 - never fail the turn; OPEN_PR publishes
+        log.warning("progress publication failed: %s", error)
+        return []
 
 
 def edit_bodies(target, records, body):
@@ -347,13 +358,12 @@ def rails(ws, state):
         return
     try:
         ops = Target.of(ws.target())
-        records = state["workspace"]["repositories"]
-        push_progress(ops, records)
-        opened = open_drafts(ops, records, main._pr_title(state),
-                             lambda name: pr_body(state, name, draft=True), lambda: main.save_state(state))
     except Exception as error:  # noqa: BLE001 - never fail the turn; OPEN_PR publishes
         log.warning("workspace progress publication failed: %s", error)
         return
+    records = state["workspace"]["repositories"]
+    opened = progress(ops, records, lambda: main._pr_title(state), lambda name: pr_body(state, name, draft=True),
+                      lambda: main.save_state(state))
     if opened:
         edit_bodies(ops, records, lambda name: pr_body(state, name, draft=True))
         main.email(state, "draft PR", "I opened draft PRs so you can follow the implementation; I push after "

@@ -162,6 +162,8 @@ def _validate_target_state(state: dict) -> dict:
 
 
 def save_state(state: dict) -> None:
+    if "repository" in state:
+        persistence.repository_record(state)
     persistence.write_json(config.STATE_PATH, state, indent=2)
     global _conversation_state
     # Rebinding is atomic: no lock, so a save never waits behind the status thread's I/O.
@@ -1348,53 +1350,49 @@ def do_approval_reply(state: dict, reply: str) -> None:
                           feedback=verdict.get("feedback", ""))
 
 
-def _open_draft_pr(state: dict) -> None:
-    """Best effort, before the first implementation turn: commit the approved OpenSpec
-    change, push the branch and open a draft PR so the work is visible while it
-    progresses. Any failure leaves today's behaviour (the PR is opened at OPEN_PR)."""
-    if (not config.DRAFT_PR or config.TARGET_MODE == "workspace" or state.get("draft_pr_url")
-            or state.get("pr_url") or state.get("draft_pr_attempts", 0) >= 2):
-        return
-    state["draft_pr_attempts"] = state.get("draft_pr_attempts", 0) + 1
-    try:
-        slug = _validated_slug(state.get("slug"))
-        change = f"openspec/changes/{slug}"
-        if git("status", "--porcelain", "--untracked-files=all", "--", change):
-            git("add", "--", change)
-            git("commit", "-m", f"Add approved OpenSpec change {slug}", "--", change)
-        git("push", "-u", "origin", state["branch"])
-        listed = json.loads(_run_checked(["gh", "pr", "list", "--state", "open", "--head", state["branch"],
-                                          "--json", "url", "--limit", "1"]) or "[]")
-        url = listed[0]["url"] if listed else _run_checked([
-            "gh", "pr", "create", "--draft", "--base", config.BASE_BRANCH, "--head", state["branch"],
-            "--title", _pr_title(state), "--body",
-            f"Work in progress: {state['item']}\n\nPlan: `{change}` (approved). Coderbot pushes as it "
-            "implements and marks this PR ready after verification and review."])
-        state["draft_pr_url"] = _https_url(url.strip())
-    except Exception as error:  # noqa: BLE001 - fall back to opening the PR at the end
-        log.warning("could not open the draft PR (attempt %d): %s", state["draft_pr_attempts"], error)
-        save_state(state)
-        return
+def _repo_target(state: dict) -> tuple[lifecycle.Target, dict]:
+    """Repo mode as the lifecycle's N=1 case: the checkout and its one record."""
+    record = persistence.repository_record(state)
+    ops = _pr_ops(record.get("pr_url"))
+    return lifecycle.Target(config.REPO_PATH, (ops,)), {ops.name: record}
+
+
+def _save_record(state: dict) -> None:
+    persistence.mirror_record(state)
     save_state(state)
-    log.info("draft PR opened: %s", state["draft_pr_url"])
-    email(state, "draft PR", f"I opened a draft PR so you can follow the implementation:\n{state['draft_pr_url']}\n\n"
-          "I push after each implementation step and mark it ready once it is verified and reviewed.")
 
 
-def _push_progress(state: dict) -> None:
-    """Best-effort push of the agent's commits to the draft PR; never fails the turn."""
-    if not state.get("draft_pr_url") or state.get("pr_url"):
+def _rails(state: dict, *, commit_plan: bool = False) -> None:
+    """Around implementation turns, best effort: commit the approved OpenSpec change
+    (before the first turn), then push progress and open the draft PR on the shared
+    seam. Any failure leaves today's behaviour (the PR is opened at OPEN_PR)."""
+    if not config.DRAFT_PR:
         return
-    try:
-        git("push", "origin", state["branch"])
-    except Exception as error:  # noqa: BLE001
-        log.warning("progress push failed; the next turn retries: %s", error)
+    target, records = _repo_target(state)
+    slug = state.get("slug") or ""
+    change = f"openspec/changes/{slug}"
+    if commit_plan and not records["."].get("pr_url"):
+        try:
+            if git("status", "--porcelain", "--untracked-files=all", "--", change):
+                git("add", "--", change)
+                git("commit", "-m", f"Add approved OpenSpec change {_validated_slug(slug)}", "--", change)
+        except Exception as error:  # noqa: BLE001 - the draft opens without the plan commit
+            log.warning("could not commit the approved change for the draft PR: %s", error)
+    draft = (f"Work in progress: {state['item']}\n\nPlan: `{change}` (approved). Coderbot pushes as it "
+             "implements and marks this PR ready after verification and review.")
+    opened = lifecycle.progress(target, records, lambda: _pr_title(state), lambda _: draft,
+                                lambda: _save_record(state))
+    persistence.mirror_record(state)
+    if opened:
+        log.info("draft PR opened: %s", state["draft_pr_url"])
+        email(state, "draft PR", f"I opened a draft PR so you can follow the implementation:\n{state['draft_pr_url']}\n\n"
+              "I push after each implementation step and mark it ready once it is verified and reviewed.")
 
 
 def do_implement(state: dict) -> None:
     if _scope_drift(state):
         return
-    _open_draft_pr(state)
+    _rails(state, commit_plan=True)
     feedback = state.get("implementation_feedback", "")
     plan = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "plan.md"
     if state.get("classification") == "architectural" and not plan.exists():
@@ -1406,7 +1404,7 @@ def do_implement(state: dict) -> None:
         state["session_id"],
         f"Implementation continuation: {state.get('implementation_turn', 0)}\n" + feedback + "\n\n" + prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
                        e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
-    _push_progress(state)
+    _rails(state)
     if handle_result(state, result, "IMPLEMENTING"):
         return
     _complete_implementation(state, result)
