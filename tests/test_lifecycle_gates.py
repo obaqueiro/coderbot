@@ -175,7 +175,7 @@ class LifecycleGateTests(unittest.TestCase):
             main.do_implement(state)
 
         self.assertEqual(state["state"], "VERIFYING")
-        self.assertEqual(state["verify_round"], 0)
+        self.assertEqual(state.get("verify_round", 0), 0)
 
     def test_verification_passes_to_internal_review(self):
         state = self.base_state(state="VERIFYING", verify_round=1)
@@ -338,7 +338,7 @@ class LifecycleGateTests(unittest.TestCase):
             main.do_e2e(state)
 
         self.assertEqual(state["state"], "VERIFYING")
-        self.assertEqual(state["verify_round"], 0)
+        self.assertEqual(state.get("verify_round", 0), 0)
 
     def test_e2e_repair_snapshot_is_saved_before_agent_resume(self):
         state = self.base_state(state="E2E", e2e_round=0)
@@ -411,7 +411,7 @@ class LifecycleGateTests(unittest.TestCase):
             main._handle_reply(state, "service is back")
 
         self.assertEqual(state["state"], "E2E")
-        self.assertEqual(state["e2e_round"], 0)
+        self.assertEqual(state.get("e2e_round", 0), 0)
         self.assertNotIn("return_state", state)
 
     def test_abort_cleanup_removes_new_context_from_old_state_safely(self):

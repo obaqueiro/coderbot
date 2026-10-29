@@ -4989,12 +4989,8 @@ def _clear_stuck(state: dict, failed_state: str) -> None:
     # phase whose question is pending, and handle_result refreshes it on new questions.
     if "failures" in state:
         state["failures"].pop(failed_state, None)
-    for counter in ("e2e_round", "verify_round", "review_gate_round", "archive_round",
-                    "pr_thread_round"):
-        if counter in state:
-            state[counter] = 0
-    state.pop("question_rounds", None)
-    state.pop("conflict_rounds", None)
+    _grant_budget(state, f"retry of {failed_state}", "e2e_round", "verify_round", "review_gate_round",
+                  "archive_round", "pr_thread_round", "question_rounds", "conflict_rounds")
     state.pop("stuck_return", None)
     state.pop("stuck_error", None)
     state.pop("failure_context", None)
@@ -5354,9 +5350,7 @@ def _request_verification(state: dict, note: str = "") -> None:
                 "verify_round_feedback", "review_gate_round_feedback"):
         state.pop(key, None)
     state["verification_guidance"] = note or "Verify the existing implementation and continue the normal verification gates."
-    state["verify_round"] = 0
-    state["review_gate_round"] = 0
-    state["implementation_return_round"] = 0
+    _grant_budget(state, "VERIFY command", "verify_round", "review_gate_round", "implementation_return_round")
     state["state"] = "VERIFYING"
     save_state(state)
 
@@ -5653,25 +5647,31 @@ def _continue_proposing(state: dict, result) -> None:
     _send_proposal_review(state, result.output, note)
 
 
+def _grant_budget(state: dict, reason: str, *counters: str) -> None:
+    """The one place a human decision resets per-task attempt counters. Counters only
+    reset on their own when the step they count succeeds; nothing else grants a budget."""
+    used = {counter: state.pop(counter) for counter in counters if state.get(counter)}
+    if used:
+        log.info("budget granted by %s: %s", reason, used)
+
+
 def _continue_implementing(state: dict, result) -> None:
     state.pop("implementation_no_progress", None)
     _complete_implementation(state, result)
 
 
 def _continue_verifying(state: dict, result) -> None:
-    state["verify_round"] = 0  # the user's guidance earns a fresh set of attempts
+    _grant_budget(state, "answer during VERIFYING", "verify_round")
     _complete_verify(state, result)
 
 
 def _continue_internal_review(state: dict, result) -> None:
-    state["review_gate_round"] = 0
+    _grant_budget(state, "answer during INTERNAL_REVIEW", "review_gate_round")
     _complete_internal_review(state, result)
 
 
 def _continue_e2e(state: dict, result) -> None:
-    state["e2e_round"] = 0  # the user's guidance earns a fresh set of attempts
-    state.pop("final_check_round", None)
-    state.pop("final_repair_round", None)
+    _grant_budget(state, "answer during E2E", "e2e_round", "final_check_round", "final_repair_round")
     if state.get("check_repair") and config.DETERMINISTIC_CHECKS:
         _complete_check_repair(state, result)
         return
@@ -5688,7 +5688,7 @@ def _continue_e2e(state: dict, result) -> None:
 
 
 def _continue_archiving(state: dict, result) -> None:
-    state["archive_round"] = 0
+    _grant_budget(state, "answer during ARCHIVING", "archive_round")
     state["state"] = "ARCHIVING"
 
 

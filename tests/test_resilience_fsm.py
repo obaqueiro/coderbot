@@ -68,7 +68,7 @@ class ClearStuck(unittest.TestCase):
               "return_state": "IMPLEMENTING", "question_rounds": 2, "stuck_error": "x"}
         main._clear_stuck(st, "E2E")
         self.assertEqual(st["failures"].get("E2E", 0), 0)
-        self.assertEqual(st["e2e_round"], 0)
+        self.assertEqual(st.get("e2e_round", 0), 0)
         self.assertNotIn("stuck_return", st)
         self.assertNotIn("stuck_error", st)
         self.assertNotIn("question_rounds", st)
@@ -128,7 +128,7 @@ class StuckReply(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=verdict(action="retry")):
             main.do_stuck_reply(state, "retry")
         self.assertEqual(state["state"], "E2E")
-        self.assertEqual(state["e2e_round"], 0)
+        self.assertEqual(state.get("e2e_round", 0), 0)
         self.assertNotIn("stuck_return", state)
 
     def test_instructions_are_applied_with_phase_rules(self):

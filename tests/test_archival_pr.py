@@ -384,7 +384,7 @@ class ArchivalTests(unittest.TestCase):
         self.assertIn("strict validation failed", prompt)
         self.assertIn("fix the malformed requirement", prompt)
         self.assertEqual(state["state"], "ARCHIVING")
-        self.assertEqual(state["archive_round"], 0)
+        self.assertEqual(state.get("archive_round", 0), 0)
         self.assertEqual(state["session_id"], "session-2")
         reset.assert_not_called()
 
@@ -723,7 +723,7 @@ class NativePullRequestTests(unittest.TestCase):
         git.assert_not_called()
         process.assert_not_called()
         self.assertEqual(state["state"], "VERIFYING")
-        self.assertEqual(state["verify_round"], 0)
+        self.assertEqual(state.get("verify_round", 0), 0)
         self.assertNotIn("review_gate_round", state)
 
     def test_open_pr_with_missing_archive_directory_returns_to_archiving(self):
