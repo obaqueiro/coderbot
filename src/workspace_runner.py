@@ -406,6 +406,9 @@ def verify(state):
     context = target()
     if not state.get("archive_path") and main._verify_preflight(state):
         return
+    ops = lifecycle.Target.of(context)
+    for name, record in state["workspace"]["repositories"].items():
+        lifecycle.on_branch(ops.repo(name), record)  # a held task's children were returned to base
     tasks = context.root / "openspec/changes" / state["slug"] / "tasks.md"
     if not state.get("archive_path") and tasks.is_file():
         pending = main.task_phases.inspect(context.root, state["slug"])

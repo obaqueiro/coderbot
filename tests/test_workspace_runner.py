@@ -424,6 +424,25 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual(len(branches), 2)
         self.assertTrue(all(b.startswith(main.config.INSTANCE_ID + "-feature-") for b in branches))
 
+    def test_resumed_task_verifies_its_branch_after_a_pick_returned_children_to_base(self):
+        branch = main.config.INSTANCE_ID + "-feature-abc123"
+        self.state["branch"] = branch
+        before = runner.inspect_repositories(self.context)
+        (self.api / "source.txt").write_text("feature")
+        git(self.api, "commit", "-am", "feature")
+        runner.record_changes(self.state, self.context, before)
+        branch_tree = snapshot(self.root)
+        main.task_source.list_pending_items.return_value = []
+        with patch.object(main, "_load_holds", return_value=[]):
+            runner.pick({"state": "IDLE"})  # another task's pick while this one is held
+        self.assertEqual(git(self.api, "branch", "--show-current"), "main")
+        self.state.update(state="VERIFYING", reported_check_plan=[{"id": "integration", "argv": ["true"], "cwd": "."}])
+        self.state["workspace"]["reviewed_snapshot"] = branch_tree
+        runner.verify(self.state)
+        self.assertEqual(git(self.api, "branch", "--show-current"), branch)
+        self.assertEqual(self.state["workspace"]["verified_snapshot"], branch_tree)
+        self.assertEqual(self.state["state"], "ARCHIVING")
+
     def test_agent_processes_get_no_push_credentials_in_workspace_mode(self):
         import tool_policy
         env = tool_policy.environment("IMPLEMENTING")
