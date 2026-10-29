@@ -184,3 +184,18 @@ class LargeReviewSplit(unittest.TestCase):
         self.assertIn("src/b.py tests/test_a.py", prompts_seen[1])
         self.assertEqual(state["state"], "APPLY_FEEDBACK")
         self.assertEqual(state["review_findings"], ["src/a.py: bug"])
+
+
+class ReviewCycle(unittest.TestCase):
+    def test_a_passed_review_closes_its_cycle(self):
+        state = {"state": "INTERNAL_REVIEW", "slug": "task", "item": "task", "review_fix_base": "h",
+                 "review_parts": [["a"], ["b"]], "review_part": 1, "review_part_open": 2}
+        clean = SimpleNamespace(output="r", attachments=[], session_id="rev", question=None, data={
+            "status": "done", "summary": "s", "review": {"critical": 0, "important": 1, "tests": ["t: pass"],
+                                                         "findings": ["a.py: naming"]}})
+        with patch.object(main, "content_snapshot", return_value="s"), patch.object(main, "trail"), \
+             patch.object(main.evidence_delivery, "register_verified"):
+            main._complete_internal_review(state, clean)
+        self.assertEqual(state["state"], "E2E")
+        for key in main.REVIEW_CYCLE_KEYS:
+            self.assertNotIn(key, state)

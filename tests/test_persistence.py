@@ -98,3 +98,7 @@ class ForwardStates(unittest.TestCase):
         self.assertEqual(state["check_repair"]["resume"], "VERIFYING")
         self.assertEqual(state["pending_decision"]["origin"], "VERIFYING")
         self.assertEqual(persistence.forward({"state": "RECOVERING"})["state"], "VERIFYING")
+        archived = {"archive_path": "openspec/changes/archive/x"}
+        self.assertEqual(persistence.forward({**archived, "state": "EVIDENCE_REVIEW",
+                                              "push_context": {"continuation": "evidence"}})["state"], "PUSHING")
+        self.assertEqual(persistence.forward({**archived, "state": "RECOVERING"})["state"], "OPEN_PR")

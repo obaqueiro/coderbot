@@ -411,8 +411,10 @@ class Supervisor:
         folder = record_path = record = None
         restart = True
         try:
-            # S7: the worker keeps running (its task is parked in WAIT_STUCK); it is
-            # stopped only to drain repair tools and to promote.
+            # S7: the worker (its task parked in WAIT_STUCK) is down only while the
+            # incident is admitted, while repair tools drain and while promoting. It holds
+            # state.lock for its whole life, so admission and promotion need it stopped.
+            self.stop()
             with exclusive(self.data / "state.lock"):
                 state = read_json(self.data / "state.json", {"state": "IDLE"})
                 if (incident.get("task_id") != state.get("execution_task_id") or
@@ -422,6 +424,8 @@ class Supervisor:
                 folder, record_path, record = self.repairs.admit(incident)
                 record["binding"] = state_binding(state)
             self.notify()
+            if not self.paused():
+                self.start()  # the parked task keeps answering while the agent works
             while True:
                 try:
                     self.agent(folder, record)
@@ -452,6 +456,7 @@ class Supervisor:
                 return
             if self.paused():
                 raise RepairCancelled("Operator paused the repair")
+            self.stop()
             with exclusive(self.data / "state.lock"):
                 if state_binding(read_json(self.data / "state.json", {"state": "IDLE"})) != record["binding"]:
                     raise RepairError("Task decision changed before promotion")

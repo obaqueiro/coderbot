@@ -223,15 +223,25 @@ def turn(state, prompt, *, fresh=False):
 
 
 def pick(state):
-    """A failed pick leaves the state as it found it: a half-bound task saved after an
-    error is a state no later tick can load."""
-    before = json.loads(json.dumps(state))
+    """A pick that fails before it saved anything leaves the state as it found it (a
+    half-bound task saved after an error is a state no later tick can load). Once it has
+    saved, the saved task is the truth and is kept."""
+    before, saved = json.loads(json.dumps(state)), _state_stamp()
     try:
         return _pick(state)
     except BaseException:
-        state.clear()
-        state.update(before)
+        if _state_stamp() == saved:
+            state.clear()
+            state.update(before)
         raise
+
+
+def _state_stamp():
+    try:
+        stat = config.STATE_PATH.stat()
+        return stat.st_mtime_ns, stat.st_size, stat.st_ino
+    except OSError:
+        return None
 
 
 def _pick(state):

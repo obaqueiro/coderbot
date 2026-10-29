@@ -721,7 +721,8 @@ def _branch_evidence_paths(branch: str, base_branch: str) -> list[str]:
     """Files added/changed on `branch` since it diverged from `base_branch` that look
     like recorded test evidence rather than application code — these must never be
     committed, only emailed (see agent_runner.EVIDENCE_CONTRACT)."""
-    diff = git("diff", "--name-only", "--diff-filter=d", f"{base_branch}...{branch}")
+    # Added by this branch only: evidence the base branch already tracks is not ours to move.
+    diff = git("diff", "--name-only", "--diff-filter=A", f"{base_branch}...{branch}")
     return [p for p in diff.splitlines() if _looks_like_evidence(p)]
 
 
@@ -743,7 +744,7 @@ def _scrub_evidence_from_repo(state: dict, phase: str) -> list[Path]:
             shutil.copy2(source, target)
             moved.append(target)
     # Removed from the working tree too, so a later `git add -A` cannot bring them back.
-    git("rm", "-q", "-f", "--", *paths)
+    git("rm", "-q", "-f", "--ignore-unmatch", "--", *paths)  # a retry after a failed commit
     git("commit", "-q", "-m", "chore: move test evidence out of the repository", "--", *paths)
     trail(state, "Committed evidence moved to the conversation", "\n".join(paths))
     return moved
@@ -1933,7 +1934,7 @@ def _complete_internal_review(state: dict, result) -> None:
             return
     review = (getattr(result, "data", None) or {}).get("review") or {}
     parts = state.get("review_parts") or []
-    if parts and not state.get("review_fix_base"):
+    if parts and not state.get("review_fix_base") and review:  # a turn without a review is no clean part
         # Collect the findings of every part; the fix wave and re-review cover them all.
         seen = state.setdefault("review_part_findings", [])
         seen.extend(f for f in review.get("findings") or [] if isinstance(f, str))
@@ -1961,6 +1962,8 @@ def _complete_internal_review(state: dict, result) -> None:
         return
     state.pop("review_gate_round", None)
     state.pop("review_gate_round_feedback", None)
+    for key in REVIEW_CYCLE_KEYS:  # this review cycle is over; a later one starts afresh
+        state.pop(key, None)
     state["internal_review_report"] = parsed
     state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
     evidence_delivery.register_verified(state, config.REPO_PATH, getattr(result, "attachments", []))
@@ -1969,6 +1972,10 @@ def _complete_internal_review(state: dict, result) -> None:
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
     if state["state"] == "ARCHIVING":
         announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
+
+
+REVIEW_CYCLE_KEYS = ("review_parts", "review_part", "review_part_findings", "review_part_open",
+                     "review_fix_base", "review_findings")
 
 
 def _review_with_leftovers(result) -> dict | None:
@@ -3075,11 +3082,13 @@ def _start_base_merge() -> list[str]:
     """coderbot fetches and merges the base itself (the agent has no remote credentials);
     returns the conflicted paths left for the agent. A merge already in progress (a
     retried turn) is kept as it is."""
-    if not (config.REPO_PATH / ".git/MERGE_HEAD").exists():
+    def merging():  # git-path: .git is a file in a worktree
+        return (config.REPO_PATH / git("rev-parse", "--git-path", "MERGE_HEAD")).exists()
+    if not merging():
         git("fetch", "origin", config.BASE_BRANCH)
         if _git_quiet("merge", "--no-edit", "origin/" + config.BASE_BRANCH):
             return []
-        if not (config.REPO_PATH / ".git/MERGE_HEAD").exists():
+        if not merging():
             raise RuntimeError(f"git could not start merging origin/{config.BASE_BRANCH}; see `git status`")
     return [path for path in git("diff", "--name-only", "--diff-filter=U").splitlines() if path] or \
         ["(merge in progress; see `git status`)"]

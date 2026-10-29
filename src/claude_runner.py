@@ -205,7 +205,6 @@ def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
     return "limit" in str(data.get("result", "")).lower()
 
 
-@operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def _phase_model() -> str:
     """CODEBOT_REVIEW_MODEL for the feature review; CODEBOT_ESCALATION_MODEL for the
     implementer once it has been escalated to a fresh session."""
@@ -218,10 +217,13 @@ def _phase_model() -> str:
     return ""
 
 
+@operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def _invoke(args: list[str], prompt: str, *, effort=None, structured=False, model=None) -> ClaudeResult:
     global _fallback_until
     options = {"effort": effort} if effort is not None else {}
-    proc, model = _invoke_with_model(args, prompt, model or _phase_model() or _active_model(), **options)
+    # The review/escalation model is for working turns, and yields to a usage fallback.
+    chosen = model or (_phase_model() if structured and time.monotonic() >= _fallback_until else "")
+    proc, model = _invoke_with_model(args, prompt, chosen or _active_model(), **options)
     if (proc.returncode != 0 and _is_usage_exhausted(proc) and _fallback_model()
             and model != _fallback_model()):
         log.warning("model %s is out of usage credits; falling back to %s for %ds",

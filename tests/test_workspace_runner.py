@@ -695,7 +695,13 @@ class PickFailure(unittest.TestCase):
             s.clear()
             s.update(state="EXPLORING", item="half")
             raise RuntimeError("claim failed")
-        with patch.object(runner, "_pick", side_effect=half_bind):
+        with patch.object(runner, "_pick", side_effect=half_bind), patch.object(runner, "_state_stamp", return_value=1):
             with self.assertRaises(RuntimeError):
                 runner.pick(state)
         self.assertEqual(state, {"state": "IDLE", "retire_thread_id": "C1:1.0", "workspace": {"baseline": "x"}})
+        stamps = iter([1, 2])  # the pick saved the resumed task before failing: keep it
+        with patch.object(runner, "_pick", side_effect=half_bind), \
+             patch.object(runner, "_state_stamp", side_effect=lambda: next(stamps)):
+            with self.assertRaises(RuntimeError):
+                runner.pick(state)
+        self.assertEqual(state, {"state": "EXPLORING", "item": "half"})

@@ -85,7 +85,14 @@ def environment(phase: str | None) -> dict:
 def no_push_credentials() -> dict:
     """The controller fetches and pushes (also the base merge for conflict resolution),
     so the agent's git and gh carry no credentials: a push the guard misses still fails."""
-    return {"GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_ENTERPRISE_TOKEN": "",
+    import secret_store
+    try:
+        supplied = secret_store.values(secret_store._active_task) if secret_store.enabled() else {}
+    except Exception:  # noqa: BLE001 - unreadable store: no task tokens to keep
+        supplied = {}
+    tokens = {name: "" for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+              if name not in supplied}  # a token the user gave this task for its tests stays
+    return {**tokens,
             "GH_CONFIG_DIR": str(config.DATA_DIR / "agent-gh"),
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
             "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "", "SSH_AUTH_SOCK": "",

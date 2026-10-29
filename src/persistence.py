@@ -131,17 +131,28 @@ _STATE_POINTERS = ("state", "stuck_return", "return_state", "conflict_return", "
                    "banner_state", "feedback_origin", "verification_requested_from")
 
 
+def _resumes_at(state: dict, name):
+    """A deleted phase resumes where its work belongs: verification before the change is
+    archived; afterwards the pending push, else the PR step (an archived change cannot
+    re-enter active-change verification)."""
+    if name not in FORWARD_STATES:
+        return name
+    if state.get("archive_path"):
+        return "PUSHING" if state.get("push_context") else "OPEN_PR"
+    return FORWARD_STATES[name]
+
+
 def forward(state: dict) -> dict:
     """Every key that names a phase, not only `state`: a WAIT_STUCK task whose
     stuck_return is a deleted phase must resume somewhere real."""
     for key in _STATE_POINTERS:
         if state.get(key) in FORWARD_STATES:
-            state[key] = FORWARD_STATES[state[key]]
+            state[key] = _resumes_at(state, state[key])
     repair = state.get("check_repair")
     if isinstance(repair, dict) and repair.get("resume") in FORWARD_STATES:
-        repair["resume"] = FORWARD_STATES[repair["resume"]]
+        repair["resume"] = _resumes_at(state, repair["resume"])
     if isinstance(state.get("pending_decision"), dict) and state["pending_decision"].get("origin") in FORWARD_STATES:
-        state["pending_decision"]["origin"] = FORWARD_STATES[state["pending_decision"]["origin"]]
+        state["pending_decision"]["origin"] = _resumes_at(state, state["pending_decision"]["origin"])
     return state
 
 

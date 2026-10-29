@@ -650,7 +650,6 @@ def converse(prompt: str, session_id: str | None = None, *, on_session=None):
             variable.reset(token)
 
 
-@operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def _with_facts(context, prompt):
     """The turn's facts lead the user turn; checkpoints stay keyed on the card alone."""
     return turns.request(context, tool_policy.current_phase()) + prompt if context else prompt
@@ -666,6 +665,7 @@ def read(prompt: str):
         tool_policy.reading.reset(token)
 
 
+@operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
     classifiers) whose only output instruction must be their own JSON contract."""

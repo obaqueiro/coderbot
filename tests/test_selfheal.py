@@ -1,4 +1,5 @@
 """Independent repair tests: no live agent, provider, data directory or daemon."""
+import contextlib
 import json
 import os
 import shutil
@@ -17,6 +18,17 @@ from scripts.selfheal import (Repairs, Runbooks, RepairError, atomic_json, eligi
 from scripts.supervisor import Supervisor, StopRequested, signal_owned, worker_event
 import selfheal_events
 
+
+
+@contextlib.contextmanager
+def lifecycle_fakes(supervisor):
+    """start/stop that track the worker the way the real ones do."""
+    def start():
+        supervisor.worker = Mock()
+    def stop():
+        supervisor.worker = None
+    with patch.object(supervisor, "start", side_effect=start), patch.object(supervisor, "stop", side_effect=stop):
+        yield
 
 class SelfHealingTests(unittest.TestCase):
     def setUp(self):
@@ -200,11 +212,11 @@ class SelfHealingTests(unittest.TestCase):
 
     def test_operator_shutdown_never_restarts_worker(self):
         supervisor = Supervisor(self.source, self.data, "auto")
-        with patch.object(supervisor, "stop"), patch.object(supervisor, "start") as start, \
+        with lifecycle_fakes(supervisor), \
              patch.object(supervisor, "agent", side_effect=StopRequested), patch.object(supervisor, "notify"):
             with self.assertRaises(StopRequested):
                 supervisor.handle(self.incident)
-        start.assert_not_called()
+        self.assertIsNone(supervisor.worker)  # stopped, and not restarted
 
     def test_runtime_epoch_changes_computational_keys_not_task_identity(self):
         import phase_checkpoint
@@ -315,8 +327,8 @@ class SelfHealingTests(unittest.TestCase):
              patch.object(supervisor, "start", side_effect=lambda: setattr(supervisor, "worker", Mock())) as start, \
              patch.object(supervisor, "stop", side_effect=stop), patch.object(supervisor, "notify"):
             supervisor.handle(self.incident)
-        # S7: up again while the candidate is validated, and after the proposal on the old code.
-        self.assertEqual(start.call_count, 2)
+        # S7: up during the agent turn, during validation, and after the proposal on the old code.
+        self.assertEqual(start.call_count, 3)
         self.assertIsNotNone(supervisor.worker)
         self.assertEqual(inventory(self.source), original)
         self.assertFalse((self.repairs.home / "promotion.json").exists())
@@ -341,9 +353,9 @@ class SelfHealingTests(unittest.TestCase):
     def test_pause_cancels_repair_without_restart(self):
         supervisor = Supervisor(self.source, self.data, "auto")
         with patch.object(supervisor, "agent", side_effect=RepairCancelled("paused")), \
-             patch.object(supervisor, "stop"), patch.object(supervisor, "start") as start, patch.object(supervisor, "notify"):
+             lifecycle_fakes(supervisor), patch.object(supervisor, "notify"):
             supervisor.handle(self.incident)
-        start.assert_not_called()
+        self.assertIsNone(supervisor.worker)  # stopped, and not restarted
         self.assertFalse((self.repairs.home / "promotion.json").exists())
 
     def test_stale_incident_does_not_call_agent(self):
@@ -449,10 +461,9 @@ class SelfHealingTests(unittest.TestCase):
             self.fake_agent(folder, record)
             (self.source / "src/bug.py").write_text("ESCAPED = True\n")  # wrote the live tree, not the candidate
             (self.source / "src/new.py").write_text("NEW = True\n")
-        with patch.object(supervisor, "agent", side_effect=escaping_agent), patch.object(supervisor, "stop"), \
-             patch.object(supervisor, "start") as start, patch.object(supervisor, "notify"):
+        with patch.object(supervisor, "agent", side_effect=escaping_agent), lifecycle_fakes(supervisor), patch.object(supervisor, "notify"):
             supervisor.handle(self.incident)
-        start.assert_not_called()
+        self.assertIsNone(supervisor.worker)  # stopped, and not restarted
         self.assertEqual(inventory(self.source), original)
         self.assertEqual(read_json(self.repairs.home / "control.json"), {"action": "pause"})
         self.assertFalse((self.repairs.home / "promotion.json").exists())
@@ -525,10 +536,10 @@ class SelfHealingTests(unittest.TestCase):
         supervisor = Supervisor(self.source, self.data, "observe")
         atomic_json(self.repairs.home / "control.json", {"action": "pause"})
         with patch("scripts.supervisor.sys.platform", "darwin"), patch("scripts.supervisor.time.sleep", side_effect=StopRequested), \
-             patch.object(supervisor, "stop"), patch.object(supervisor, "start") as start, patch.object(supervisor, "notify"):
+             lifecycle_fakes(supervisor), patch.object(supervisor, "notify"):
             with self.assertRaises(StopRequested):
                 supervisor.run()
-        start.assert_not_called()
+        self.assertIsNone(supervisor.worker)  # stopped, and not restarted
 
     def test_opencode_adapter_keeps_provider_settings_without_task_context(self):
         folder, _, record = self.candidate()
