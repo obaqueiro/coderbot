@@ -230,12 +230,19 @@ def adopt(ops, record, before):
         ops.git("branch", "--force", ops.base, before["head"])  # local commits now live on the feature branch
 
 
-def release(target, records):
-    """Return each clean child to its base branch so the next task starts from it."""
+def release(target, records, *, discard=False):
+    """Return each clean child to its base branch so the next task starts from it.
+    `discard` (repo mode's reset, once its work is preserved) forces the checkout, drops
+    untracked files and lands on the fetched origin base."""
     for name, record in records.items():
         try:
             ops = target.repo(name)
-            if ops.branch() != ops.base and ops.clean():
+            if discard:
+                ops.quiet("checkout", "-f", ops.base)
+                ops.quiet("clean", "-fd")  # .gitignore'd files (data/, .env) are kept
+                if ops.fetch():
+                    ops.quiet("reset", "--hard", f"origin/{ops.base}")
+            elif ops.branch() != ops.base and ops.clean():
                 ops.git("checkout", "--quiet", ops.base)
                 if ops.fetch():
                     ops.quiet("merge", "--ff-only", "--quiet", f"origin/{ops.base}")

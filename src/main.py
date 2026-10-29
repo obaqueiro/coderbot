@@ -4374,19 +4374,16 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
     if preserved:
         problems.append(preserved)
     _abort_in_progress_ops()  # a half-finished merge/rebase would block the checkout
-    _git_quiet("reset", "--hard")                            # drop staged/unstaged tracked changes
-    _git_quiet("checkout", "-f", config.BASE_BRANCH)         # leave whatever codebot branch we were on
-    _git_quiet("clean", "-fd")             # drop untracked files; .gitignore (data/, .env) is kept
-    # Branches may have merged/moved while we were away: fast-forward the local base branch to
-    # the remote. Best-effort — a network failure here doesn't block the reset (do_pick pulls too).
-    if _git_quiet("fetch", "origin", config.BASE_BRANCH):
-        _git_quiet("reset", "--hard", f"origin/{config.BASE_BRANCH}")
-    branch = operations.tool(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=config.REPO_PATH).stdout.strip()
+    _git_quiet("reset", "--hard")  # drop staged/unstaged tracked changes
+    # The shared release lands on the base; branches may have merged/moved while we were
+    # away, so it resets to the fetched origin base (best effort: do_pick pulls too).
+    target, records = _repo_target({})
+    lifecycle.release(target, records, discard=True)
+    ops = target.repos[0]
+    branch = ops.quiet("rev-parse", "--abbrev-ref", "HEAD")
     if branch != config.BASE_BRANCH:
         problems.append(f"could not switch to {config.BASE_BRANCH} (still on {branch or 'unknown'})")
-    dirty = operations.tool(["git", "status", "--porcelain", "--untracked-files=no"],
-                            cwd=config.REPO_PATH).stdout.strip()
-    if dirty:
+    if ops.quiet("status", "--porcelain", "--untracked-files=no"):
         problems.append("tracked changes remain after reset")
     return problems
 
