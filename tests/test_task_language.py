@@ -15,11 +15,11 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 class TaskLanguageTests(unittest.TestCase):
     def test_translation_timeout_preserves_report_and_uses_cached_fallback(self):
-        state = {'task_language': 'Spanish'}
+        state = {'task_language': 'French'}
         with patch.object(main.agent_runner, 'run', side_effect=TimeoutError('slow')) as run:
             first = main._localized_pair(state, 'PR ready for review', 'Original verified report')
             second = main._localized_pair(state, 'PR ready for review', 'Original verified report')
-        self.assertEqual(first, ('PR listo para revisión', 'Original verified report'))
+        self.assertEqual(first, ('PR ready for review', 'Original verified report'))
         self.assertEqual(second, first)
         self.assertEqual(run.call_count, 1)
     def tearDown(self):
@@ -91,20 +91,34 @@ class TaskLanguageTests(unittest.TestCase):
         classify.assert_called_once_with(state)
         self.assertIn("Use Spanish", agent_runner._language_prompt("continue"))
 
-    def test_sends_user_message_and_subject_in_language_of_ticket(self):
+    def test_spanish_fixed_messages_come_from_the_catalog_without_a_model(self):
         state: dict = {"item": "Seleccionar modelo", "slug": "modelo", "state": "WAIT_REPLY",
                        "thread_id": "C123:1.0", "task_language": "Spanish"}
-        with patch.object(main.agent_runner, "run", side_effect=[
-                SimpleNamespace(output='{"subject":"pregunta durante EXPLORING","body":"Tarea: Seleccionar modelo\\n\\nResponde en este hilo."}')]) as run, \
+        with patch.object(main.agent_runner, "run") as run, \
              patch.object(main.gmail_client, "send", return_value="C123:1.0") as send, \
              patch.object(main, "trail"), patch.object(main, "_note_contact"):
-            main.email(state, "question during EXPLORING",
-                       "Task: Seleccionar modelo\n\nReply in this Slack thread.")
+            main.email(state, "merge blocked — could not check the PR",
+                       "I did not merge: I couldn't query the PR's state just now.\nPR: https://x/1"
+                       "\n\nReply 'merge' to retry.")
+        run.assert_not_called()
+        self.assertIn("merge bloqueado: no pude consultar el PR", send.call_args.args[0])
+        self.assertIn("¿Qué hago con este PR?\n1. Pedir cambios; descríbelos", send.call_args.args[1])
+        self.assertTrue(send.call_args.args[1].endswith("No hice merge: no pude consultar el estado del PR ahora."
+                        "\nPR: https://x/1\n\nResponde 'merge' para reintentar."))
+        self.assertEqual(state["last_email"]["body"], send.call_args.args[1])
+
+    def test_other_languages_use_one_model_call_for_subject_and_body(self):
+        state: dict = {"item": "Choisir un modèle", "slug": "modele", "state": "WAIT_REPLY",
+                       "thread_id": "C123:1.0", "task_language": "French"}
+        with patch.object(main.agent_runner, "run", side_effect=[
+                SimpleNamespace(output='{"subject":"question pendant EXPLORING","body":"Répondez ici."}')]) as run, \
+             patch.object(main.gmail_client, "send", return_value="C123:1.0") as send, \
+             patch.object(main, "trail"), patch.object(main, "_note_contact"):
+            main.email(state, "question during EXPLORING", "Reply in this Slack thread.")
         self.assertEqual(run.call_count, 1)
         self.assertTrue(all(c.kwargs["contract"] is False for c in run.call_args_list))
-        self.assertIn("pregunta durante EXPLORING", send.call_args.args[0])
-        self.assertEqual(send.call_args.args[1], "Tarea: Seleccionar modelo\n\nResponde en este hilo.")
-        self.assertEqual(state["last_email"]["body"], send.call_args.args[1])
+        self.assertIn("question pendant EXPLORING", send.call_args.args[0])
+        self.assertEqual(send.call_args.args[1], "Répondez ici.")
 
     def test_english_task_does_not_add_translation_call(self):
         with patch.object(main.agent_runner, "run") as run:

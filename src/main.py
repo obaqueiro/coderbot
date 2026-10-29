@@ -203,9 +203,6 @@ def _localized_pair(state, phase, body):
     static_body = message_templates.translate(body, state["task_language"])
     if static_phase is not None and static_body is not None:
         return static_phase, static_body
-    if phase == "service unavailable":
-        return (message_templates.translate(phase, state.get("task_language", "English")) or phase,
-                message_templates.operational("unavailable", state.get("task_language", "English")))
     cache = state.setdefault("localized_messages", {})
     key = hashlib.sha256((phase + "\0" + body).encode()).hexdigest()
     if key in cache:

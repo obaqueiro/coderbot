@@ -6,3 +6,4 @@ __pycache__
 docker-compose.override.yml
 .codebot-supervisor.lock
 .walk-debug/
+.claude/worktrees/
