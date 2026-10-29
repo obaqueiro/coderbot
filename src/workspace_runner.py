@@ -507,7 +507,7 @@ def review(state):
     critical, important = int(value.get("critical") or 0), int(value.get("important") or 0)
     findings = [str(f) for f in value.get("findings") or []]
     if critical or important:
-        if rounds["review"] <= config.REVIEW_MAX_ROUNDS:
+        if rounds["review"] == 1:  # one fix wave, then one re-review (Superpowers' final-review rule)
             # The reviewer is coderbot's own agent: its findings are data for the fix wave.
             state["workspace"]["findings"] = findings or [result.output[-3000:]]
             state["state"] = "APPLY_FEEDBACK"
