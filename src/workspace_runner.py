@@ -272,6 +272,8 @@ def pick(state):
                  item_url=chosen.get("url"), item_key=chosen.get("key"), slug=slug,
                  branch=f"{config.INSTANCE_ID}-{slug}-{secrets.token_hex(3)}", state="EXPLORING", thread_id=None)
     state["workspace"]["baseline"] = baseline
+    if len(items) > 1 and (language := main._language_name(choice.get("language"))):
+        state["task_language"] = language  # PICK read the item already: no separate detection call
     main.task_records.migrate(state, main.phase_checkpoint.store(), context.root)
     main._ensure_task_language(state)
     main.save_state(state)

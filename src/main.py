@@ -175,6 +175,12 @@ def save_state(state: dict) -> None:
 TASK_LANGUAGE_ATTEMPTS = 3
 
 
+def _language_name(value) -> str | None:
+    if isinstance(value, str) and 2 <= len(value.strip()) <= 48 and value.strip().isprintable():
+        return value.strip()
+    return None
+
+
 def _ensure_task_language(state: dict) -> None:
     """Classify once from the source ticket, not from the conversation or agent output.
     Best effort: it runs before mailbox commands every tick, so a failure must never
@@ -186,11 +192,9 @@ def _ensure_task_language(state: dict) -> None:
         result = agent_runner.run(prompts.render(
             prompts.TASK_LANGUAGE, item=state["item"], detail=state.get("item_detail", "")),
             contract=False)
-        language = parse_json_reply(result.output).get("language")
-        if not isinstance(language, str) or not 2 <= len(language.strip()) <= 48 \
-                or not language.strip().isprintable():
-            raise ValueError(f"invalid task language: {language!r}")
-        language = language.strip()
+        language = _language_name(parse_json_reply(result.output).get("language"))
+        if not language:
+            raise ValueError("invalid task language")
     except turn_control.TurnKicked:
         raise
     except Exception as error:  # noqa: BLE001
@@ -1047,6 +1051,8 @@ def do_pick(state: dict) -> None:
                  item_id=chosen.get("id") or None, item_url=chosen.get("url") or None,
                  item_key=chosen.get("key") or None,
                  slug=choice["slug"], thread_id=None)
+    if (language := _language_name(choice.get("language"))):
+        state["task_language"] = language  # PICK read the item already: no separate detection call
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
     branch = f"{config.INSTANCE_ID}-{choice['slug']}"

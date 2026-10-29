@@ -139,3 +139,24 @@ class TaskLanguageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LanguageFromPick(unittest.TestCase):
+    def test_a_picked_task_takes_its_language_from_pick_without_another_call(self):
+        state = {"state": "IDLE"}
+        items = [{"text": "Exportar CSV", "detail": "", "id": "1"}, {"text": "Otra", "detail": "", "id": "2"}]
+        pick = SimpleNamespace(output='{"item": "Exportar CSV", "slug": "exportar-csv", "language": "Spanish"}')
+        with patch.object(main.task_source, "list_pending_items", return_value=items, create=True), \
+             patch.object(main, "prioritize_items", side_effect=lambda i: i), \
+             patch.object(main.task_source, "claim_task", return_value=True, create=True), \
+             patch.object(main.task_source, "normalize", side_effect=lambda t: t, create=True), \
+             patch.object(main.agent_runner, "run", return_value=pick) as run, \
+             patch.object(main, "_ensure_task_language", wraps=main._ensure_task_language), \
+             patch.object(main, "git", side_effect=lambda *a: "" if a[0] == "status" else "sha"), \
+             patch.object(main, "save_state"), \
+             patch.object(main.task_records, "migrate"), patch.object(main.repo_provenance, "record"), \
+             patch.object(main.config, "COMM_CHANNEL", "email"), patch.object(main, "_seed_self_healing_items"), \
+             patch.object(main, "email"), patch.object(main, "trail"):
+            main.do_pick(state)
+        self.assertEqual(state.get("task_language"), "Spanish")
+        self.assertEqual(run.call_count, 1)  # PICK only

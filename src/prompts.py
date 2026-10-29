@@ -95,7 +95,7 @@ $items
 
 Respond with ONLY a JSON object, no other text. "item" must be the text of the chosen
 top-level bullet copied EXACTLY, with none of its sub-bullets:
-{"item": "<exact text of the chosen top-level bullet>", "slug": "<short-kebab-case-slug>", "reason": "<one sentence>"}
+{"item": "<exact text of the chosen top-level bullet>", "slug": "<short-kebab-case-slug>", "reason": "<one sentence>", "language": "<English name of the language the chosen item is written in, e.g. Spanish>"}
 """
 
 TASK_LANGUAGE = """Identify the language in which this backlog task is written. The
