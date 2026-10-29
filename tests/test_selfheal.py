@@ -484,8 +484,23 @@ class RepairAgentScope(unittest.TestCase):
         import scripts.supervisor as supervisor_module
         denied = supervisor_module.REPAIR_DENIED_CLAUDE
         for rule in ("Bash(git push:*)", "Bash(git commit:*)", "Bash(gh:*)", "Bash(docker:*)",
-                     "Read(/app/.env)", "Read(/app/data/**)"):
+                     "Read(/app/.env)"):
             self.assertIn(rule, denied)
+
+    def test_repair_agent_reads_its_candidate_but_no_other_live_data(self):
+        import scripts.supervisor as supervisor_module
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            folder = data / "supervisor/repairs/inc-1"
+            (folder / "candidate").mkdir(parents=True)
+            (data / "supervisor/repairs/inc-0").mkdir()
+            (data / "state.json").write_text("{}")
+            (data / "supervisor/control.json").write_text("{}")
+            denied = supervisor_module.repair_denied_reads(data, folder)
+        self.assertIn(f"Read({data / 'state.json'})", denied)
+        self.assertIn(f"Read({data / 'supervisor/control.json'}/**)", denied)
+        self.assertIn(f"Read({data / 'supervisor/repairs/inc-0'}/**)", denied)
+        self.assertFalse(any("inc-1" in rule for rule in denied))
 
 
 class RunbookTests(unittest.TestCase):
@@ -550,6 +565,18 @@ class RunbookTests(unittest.TestCase):
         self.runbooks.run({"version": 2, "class": "transient", "code": "OSError", "errno": "ENOSPC"}, act=True)
         self.assertFalse(recent.exists())
         self.assertTrue(evidence.exists())
+
+    def test_retention_keeps_a_proposed_candidate_awaiting_review(self):
+        proposed = self.aged(self.repairs.home / "repairs/inc-1/candidate/src/x.py", age=40 * 86400).parent.parent
+        stale = self.aged(self.repairs.home / "repairs/inc-2/candidate/src/x.py", age=40 * 86400).parent.parent
+        for folder in (proposed, stale):
+            os.utime(folder, (time.time() - 40 * 86400,) * 2)
+        (self.repairs.home / "incidents").mkdir(parents=True, exist_ok=True)
+        (self.repairs.home / "incidents/inc-1.json").write_text(json.dumps(
+            {"status": "human_required", "candidate": str(proposed.parent)}))
+        self.runbooks.run(act=True)
+        self.assertTrue(proposed.exists())
+        self.assertFalse(stale.exists())
 
     def test_outage_is_deferred_not_repaired_and_a_failing_runbook_never_raises(self):
         supervisor = Supervisor(self.repairs.source, self.repairs.data, "observe")

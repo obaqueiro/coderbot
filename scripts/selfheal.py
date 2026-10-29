@@ -617,8 +617,13 @@ class Runbooks:
         active = Path(transaction.get("folder", "/nonexistent") if isinstance(transaction, dict) else "/nonexistent")
         entries = [*(self.data / "outbox/checks").glob("*"), *(self.data / "diagnostics").glob("*"),
                    *(self.home / "repairs").glob("*/*"), *self.home.rglob("*.corrupt-*")]
+        # A proposed candidate waits for its reviewer however old it gets.
+        proposed = {Path(record["candidate"]).resolve() for path in (self.home / "incidents").glob("*.json")
+                    if isinstance(record := read_json(path, {}), dict) and record.get("status") == "human_required"
+                    and record.get("candidate")}
         expired = [entry for entry in entries if not entry.is_symlink() and older_than(entry, keep)
-                   and entry.resolve().is_relative_to(self.data) and entry.resolve() != active.resolve()]
+                   and entry.resolve().is_relative_to(self.data) and entry.resolve() != active.resolve()
+                   and not ({entry.resolve(), *entry.resolve().parents} & proposed)]
         return sorted(expired, key=lambda entry: entry.lstat().st_mtime)
 
     @staticmethod

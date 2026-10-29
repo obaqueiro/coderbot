@@ -75,7 +75,25 @@ def signal_owned(owned, sig):
 REPAIR_DENIED_COMMANDS = ("git push", "git commit", "git reset", "git checkout", "git worktree",
                           "gh ", "docker", "sudo")
 REPAIR_DENIED_CLAUDE = ([f"Bash({command.strip()}{suffix})" for command in REPAIR_DENIED_COMMANDS for suffix in (":*", " *")]
-                        + ["Read(/app/.env)", "Read(/app/data/**)", "Read(/proc/*/environ)"])
+                        + ["Read(/app/.env)", "Read(/proc/*/environ)"])
+
+
+def repair_denied_reads(data, candidate):
+    """Live data stays unreadable except the candidate the agent repairs, which lives
+    inside it (deny rules win over allow rules, so deny every sibling instead)."""
+    denied, keep = [], Path(candidate).resolve()
+    def walk(folder):
+        for entry in sorted(Path(folder).iterdir()):
+            if keep == entry.resolve() or keep.is_relative_to(entry.resolve()):
+                if keep != entry.resolve():
+                    walk(entry)
+            else:
+                denied.extend([f"Read({entry})", f"Read({entry}/**)"])
+    try:
+        walk(data)
+    except OSError:
+        return [f"Read({data}/**)"]  # fail closed: without a listing, deny all of it
+    return denied
 
 # The worker writes its heartbeat once per poll interval; allow three missed beats.
 def _poll_interval():
@@ -329,7 +347,8 @@ class Supervisor:
                 if os.environ.get(name):
                     env[name] = os.environ[name]
             argv = ["claude", "-p", "--dangerously-skip-permissions", "--setting-sources", "",
-                    "--settings", json.dumps({"permissions": {"deny": REPAIR_DENIED_CLAUDE}}),
+                    "--settings", json.dumps({"permissions": {"deny": REPAIR_DENIED_CLAUDE
+                                                              + repair_denied_reads(self.data, folder)}}),
                     "--disallowedTools", "Task", "Agent", "--", prompt]
         else:
             raise RepairError("Unsupported repair coding CLI")
