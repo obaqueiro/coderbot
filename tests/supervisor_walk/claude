@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Fake repair `claude`: writes a canned patch into the candidate (its cwd) plus a
+RepairResult, and logs each call next to itself.
+
+The patch is correct under test, so it always passes validation; in the live worker
+WALK_PATCH=regress makes it fail again, and WALK_PATCH=gate fails once data/go exists."""
+import json
+from pathlib import Path
+import sys
+
+BUG = '''import os
+from pathlib import Path
+import time
+
+
+def parse(value):
+    mode = os.environ.get("WALK_PATCH", "")
+    if mode == "regress":
+        raise KeyError("still broken")
+    while mode == "gate":
+        (Path(os.environ["CODEBOT_DATA_DIR"]) / "gated").touch()
+        if (Path(os.environ["CODEBOT_DATA_DIR"]) / "go").exists():
+            raise KeyError("still broken")
+        time.sleep(0.1)
+    return value[0] if value else None
+'''
+REGRESSION = '''import unittest
+from bug import parse
+
+
+class Empty(unittest.TestCase):
+    def test_empty(self):
+        self.assertIsNone(parse([]))
+'''
+
+here = Path(__file__).resolve().parent
+with (here / "calls.log").open("a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
+Path("src/bug.py").write_text(BUG)
+Path("tests/test_selfheal_regression_empty.py").write_text(REGRESSION)
+Path(".repair-result.json").write_text(json.dumps({
+    "status": "fixed", "root_cause": "parse() indexes an empty list", "files": ["src/bug.py"],
+    "regression_test": "tests/test_selfheal_regression_empty.py", "risk": "low",
+    "summary": "Return None for empty input"}))

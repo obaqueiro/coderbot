@@ -1,10 +1,16 @@
 """Best-effort versioned worker events; no provider or application imports."""
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import time
+import traceback
 import uuid
+
+INCIDENT_VERSION = 2
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
 
 
 def emit(kind, state=None, **fields):
@@ -37,6 +43,47 @@ def emit(kind, state=None, **fields):
                 os.close(fd)
     except (OSError, TypeError, ValueError):
         pass  # Supervisor can still observe exits; telemetry never breaks tasks.
+
+
+def frames(error, limit=16):
+    """The innermost `file:line:function` frames, paths relative to the checkout (no values)."""
+    result = [f"{_relative(frame.filename)}:{frame.lineno}:{frame.name}"
+              for frame in traceback.extract_tb(error.__traceback__)[-limit:]]
+    if isinstance(error, SyntaxError) and error.filename:  # the offending file never runs
+        result.append(f"{_relative(error.filename)}:{error.lineno or 0}:<module>")
+    return result
+
+
+def _relative(filename):
+    try:
+        return Path(filename).resolve().relative_to(SOURCE_ROOT).as_posix()
+    except (OSError, ValueError):
+        return Path(filename).name
+
+
+def incident_fields(error):
+    """A typed incident: the supervisor dispatches on `class`/`code`, never on log text."""
+    try:
+        import errors
+        kind, code = errors.kind(error), errors.code(error)
+    except Exception:  # an import-time failure may predate the errors module
+        kind, code = "agent", type(error).__name__
+    if isinstance(error, SystemExit) and error.code not in (0, None):
+        kind = "fatal"
+    number = getattr(error, "errno", None)
+    message = re.sub(r"(?i)(bearer\s+|token[=:]\s*)\S+", r"\1[REDACTED]", str(error))
+    return {"version": INCIDENT_VERSION, "class": kind, "code": code,
+            "errno": errno.errorcode.get(number, "") if isinstance(number, int) else "",
+            "resource": str(getattr(error, "resource", "") or getattr(error, "filename", "") or "")[:300],
+            "retry_after": getattr(error, "retry_after", None), "message": message[:500],
+            "frames": frames(error)}
+
+
+def incident(state, error, **fields):
+    try:
+        emit("incident", state, **incident_fields(error), **fields)
+    except Exception:
+        pass  # A malformed error object must never break the worker's failure path.
 
 
 def runtime_epoch():

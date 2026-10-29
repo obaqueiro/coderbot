@@ -6314,6 +6314,7 @@ def _run_loop() -> None:
                     retry["notified"] = True
                     state["stuck_return"] = prev
                     state["state"] = "WAIT_STUCK"
+                    selfheal_events.incident({**state, "state": prev}, error)
                 if state["state"] == "WAIT_STUCK":
                     log.warning("cycle failed in %s on a transient network error (%s: %s); "
                                 "automatic retries paused after %d attempts; waiting for user reply",
@@ -6324,6 +6325,7 @@ def _run_loop() -> None:
             elif errors.kind(error) == errors.FATAL and state.get("item") and prev != "WAIT_STUCK":
                 # Retrying cannot fix a missing credential or a wrong target: ask now.
                 log.error("cycle failed in %s on a fatal error (%s: %s)", prev, type(error).__name__, error)
+                selfheal_events.incident({**state, "state": prev}, error)
                 try:
                     _enter_stuck(state, prev, f"This step cannot continue without your help: {error}")
                 except Exception:
@@ -6337,10 +6339,8 @@ def _run_loop() -> None:
                     if state["state"] != prev:
                         state["last_transition"] = time.time()
                     save_state(state)
-                    selfheal_events.emit("incident", {**state, "state": prev}, category="implementation",
-                        error_type=type(error).__name__, location=traceback.extract_tb(error.__traceback__)[-1].name,
-                        binding=selfheal_events.state_binding(state),
-                        diagnostic=diagnostics.redact(traceback.format_exc()))
+                    selfheal_events.incident({**state, "state": prev}, error,
+                                             binding=selfheal_events.state_binding(state))
                     _announce_state(state)
                     backoff = 1
                     time.sleep(config.POLL_INTERVAL_SECONDS)

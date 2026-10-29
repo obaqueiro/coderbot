@@ -1,6 +1,7 @@
 """Stable, stdlib-only repair machinery. Never import the application here."""
 from contextlib import contextmanager
 import ast
+import difflib
 import fcntl
 import hashlib
 import json
@@ -21,7 +22,11 @@ PROTECTED_FILES = {"src/config.py", "src/secret_store.py", "src/selfheal_events.
                    "src/repair_notifications.py", "src/turn_control.py"}
 PROTECTED_FUNCTIONS = {"do_approval_reply", "do_merge_reply", "_finish_task", "_abort_and_reset",
                        "_validate_target_state", "_clear_stuck", "_acquire_single_instance_lock"}
-IMPLEMENTATION_ERRORS = {"TypeError", "AttributeError", "KeyError", "IndexError", "JSONDecodeError", "SyntaxError"}
+# Codes that mean "the code is wrong", not "the world is": only these reach the LLM repair.
+IMPLEMENTATION_ERRORS = {"TypeError", "AttributeError", "KeyError", "IndexError", "JSONDecodeError", "SyntaxError",
+                         "NameError", "UnboundLocalError", "UnicodeDecodeError"}
+MAX_REPAIR_FILES, MAX_REPAIR_LINES = 4, 400  # a repair is a small fix, not a rewrite
+WAIT_PHASES = {"IDLE", "WAIT_REPLY", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_STUCK"}
 
 
 class RepairError(RuntimeError):
@@ -128,10 +133,24 @@ def redact(text, environ=None):
     return text[-32000:]
 
 
+def typed(incident):
+    """`class`, `code` and the innermost `src/` frame of an incident; version-1 incidents
+    (category/error_type/location) still load."""
+    kind = incident.get("class") or ("agent" if incident.get("category") == "implementation" else "")
+    code = incident.get("code") or incident.get("error_type") or ""
+    frame = next((value for value in reversed(incident.get("frames") or [])
+                  if isinstance(value, str) and value.startswith("src/")), "")
+    file, _, rest = frame.partition(":")
+    function = rest.rpartition(":")[2] if rest else incident.get("location", "")
+    return kind, code, file, function
+
+
 def eligible(incident):
-    return (incident.get("category") == "implementation" and
-            incident.get("error_type") in IMPLEMENTATION_ERRORS and
-            incident.get("phase") not in {"IDLE", "WAIT_REPLY", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_STUCK"})
+    """A code bug: an unexpected exception raised inside our own source."""
+    kind, code, file, function = typed(incident)
+    return (kind == "agent" and code in IMPLEMENTATION_ERRORS and incident.get("phase") not in WAIT_PHASES
+            and (bool(file) or incident.get("version", 1) == 1)
+            and file not in PROTECTED_FILES and function not in PROTECTED_FUNCTIONS)
 
 
 @contextmanager
@@ -241,6 +260,34 @@ def tests_executed(output):
     return bool(matches and int(matches[-1]) > 0)
 
 
+def failed_tests(output):
+    return set(re.findall(r"(?m)^(?:FAIL|ERROR): (\S+ \([^)]*\))", output))
+
+
+def raised_through(output, code, file):
+    """The old code fails the regression by raising the incident's exception in its file."""
+    if code and not re.search(rf"(?m)^(?:[\w.]+\.)?{re.escape(code)}(?::|$)", output):
+        return False
+    return not file or re.search(rf'File "[^"\n]*/{re.escape(file)}"', output) is not None
+
+
+def diff_stat(before, after, names):
+    """{file: [added, removed]} for the changed files."""
+    stat = {}
+    for name in names:
+        old, new = (Path(root) / name for root in (before, after))
+        lines = difflib.unified_diff(old.read_text(errors="replace").splitlines() if old.exists() else [],
+                                     new.read_text(errors="replace").splitlines() if new.exists() else [], n=0)
+        added = removed = 0
+        for line in lines:
+            if line.startswith("+") and not line.startswith("+++"):
+                added += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+        stat[name] = [added, removed]
+    return stat
+
+
 class Repairs:
     def __init__(self, source, data, *, attempts=2, daily_limit=3):
         self.source, self.data = Path(source).resolve(), Path(data).resolve()
@@ -259,11 +306,12 @@ class Repairs:
     def admit(self, incident):
         if not eligible(incident):
             raise RepairError("Incident is not eligible for automatic source repair")
+        _, code, file, function = typed(incident)
         fingerprint = hashlib.sha256(json.dumps([incident.get("epoch"), incident.get("task_id"),
-            incident.get("phase"), incident.get("error_type"), incident.get("location")]).encode()).hexdigest()
+            incident.get("phase"), code, file + ":" + function]).encode()).hexdigest()
         path = self.home / "incidents" / (fingerprint + ".json")
         previous = read_json(path, {})
-        if previous.get("status") in {"recovered", "promoting", "observing", "human_required"}:
+        if previous.get("status") in {"recovered", "promoting", "observing", "human_required", "rolled_back"}:
             raise RepairError("Incident already handled or awaiting recovery")
         used = previous.get("attempts", 0)
         today = time.strftime("%Y-%m-%d", time.gmtime())
@@ -289,10 +337,15 @@ class Repairs:
     def validate(self, folder, *, cancelled=None):
         folder = Path(folder)
         before, candidate = folder / "before", folder / "candidate"
-        before_values = read_json(folder / "record.json")["snapshot"]
+        record = read_json(folder / "record.json")
+        before_values = record["snapshot"]
         if inventory(before) != before_values:
             raise RepairError("Repair baseline changed after snapshot")
         changed, regression = validate_patch(before_values, candidate)
+        stat = diff_stat(before, candidate, changed)
+        if len(changed) > MAX_REPAIR_FILES or sum(map(sum, stat.values())) > MAX_REPAIR_LINES:
+            raise RepairError(f"Repair is too large for automatic promotion (at most {MAX_REPAIR_FILES} files "
+                              f"and {MAX_REPAIR_LINES} changed lines)")
         candidate_values = inventory(candidate)
         for name in changed:
             if name.startswith("src/"):
@@ -320,15 +373,40 @@ class Repairs:
                 root, env, 300, folder / (root.name + ".log"), cancelled=cancelled)
             if not tests_executed(output) or (code == 0) != expected or re.search(r"skipped=\d+", output):
                 raise RepairError("Regression must fail on old code and pass on repaired code")
-        env = safe_test_environment(folder / "validation" / "suite")
-        code, output = run_process([os.sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
-                                  candidate, env, 900, folder / "suite.log", cancelled=cancelled)
-        if code or not tests_executed(output):
+            if not expected and not raised_through(output, *typed(record)[1:3]):
+                raise RepairError("Regression must reproduce the incident: raise its exception through its frame")
+        code, output = self.suite(candidate, folder / "validation" / "suite", folder / "suite.log", cancelled)
+        failures = failed_tests(output)
+        # Failures that already stand on the old code do not burn the candidate.
+        if not tests_executed(output) or code and not (failures and failures <= self.baseline(folder, cancelled)):
             raise RepairError("Full candidate regression suite must pass without live credentials/data")
         if inventory(candidate) != candidate_values or inventory(before) != before_values:
             raise RepairError("Tests modified candidate source; refusing unvalidated promotion")
-        atomic_json(folder / "validated.json", {"inventory": candidate_values, "before": before_values, "files": changed})
+        atomic_json(folder / "validated.json", {"inventory": candidate_values, "before": before_values, "files": changed,
+                                                "stat": stat})
         return changed
+
+    @staticmethod
+    def suite(root, directory, log, cancelled):
+        return run_process([os.sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                           root, safe_test_environment(directory), 900, log, cancelled=cancelled)
+
+    def baseline(self, folder, cancelled):
+        """Tests failing on the old snapshot, run once per runtime epoch (empty when unknown)."""
+        path = self.home / "baseline" / (epoch(folder / "before") + ".json")
+        cached = read_json(path)
+        if isinstance(cached, dict) and isinstance(cached.get("failures"), list):
+            return set(cached["failures"])
+        root = folder / "baseline"
+        shutil.rmtree(root, ignore_errors=True)
+        snapshot(folder / "before", root)  # a copy: tests that write files cannot taint the backup
+        try:
+            code, output = self.suite(root, folder / "validation" / "baseline", folder / "baseline.log", cancelled)
+        except subprocess.TimeoutExpired:
+            return set()
+        failures = failed_tests(output) if tests_executed(output) and code else set()
+        atomic_json(path, {"failures": sorted(failures), "created": time.time()})
+        return failures
 
     def promote(self, folder, changed):
         folder = Path(folder)
@@ -410,3 +488,144 @@ class Repairs:
         if conflicts:
             raise RepairError("Rollback preserved concurrent user edits: " + ", ".join(conflicts))
         (self.home / "recovery.json").unlink(missing_ok=True)
+
+
+def git_running():
+    """True when any git process is alive, or when that cannot be known: never act blind."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return True
+    for comm in proc.glob("[0-9]*/comm"):
+        try:
+            if comm.read_text().strip() == "git":
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def valid_json(path):
+    try:
+        json.loads(Path(path).read_bytes())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def older_than(path, seconds):
+    try:
+        return time.time() - Path(path).lstat().st_mtime > seconds
+    except OSError:
+        return False
+
+
+class Runbooks:
+    """Deterministic remedies for operational incidents. Each re-checks its own condition
+    (so it is idempotent), touches only what this instance owns, is rate limited, and is
+    logged and notified. With `act=False` it only reports what it would do."""
+    PER_HOUR, REPEAT_SECONDS, DISK_FREE = 3, 6 * 3600, 0.05
+
+    def __init__(self, repairs):
+        self.repairs, self.home, self.data = repairs, repairs.home, repairs.data
+        self.registry = {"git_index_lock": (self.find_index_locks, self.remove),
+                         "claude_config": (self.find_claude_config, self.restore_claude_config),
+                         "corrupt_json": (self.find_quarantined, lambda target: None),
+                         "retention": (self.find_expired, self.remove),
+                         "outage_backoff": (self.find_outage, self.defer)}
+
+    def run(self, incident=None, *, act):
+        applied = []
+        for name, (find, fix) in self.registry.items():
+            try:
+                targets = [str(target) for target in find(incident)][:200]
+                if not targets or not self.allowed(name, targets):
+                    continue
+                if act:
+                    for target in targets:
+                        fix(target)
+                kind = "runbook_applied" if act else "runbook_dry_run"
+                detail = f"{name}: {'handled' if act else 'would handle'} " + ", ".join(targets[:10])
+                print(json.dumps({"supervisor": kind, "runbook": name, "targets": targets[:10]}), flush=True)
+                self.repairs.event(kind, incident or {}, runbook=name, detail=redact(detail))
+                applied.append(name)
+            except Exception as error:  # a remedy must never take the supervisor down
+                self.repairs.event("runbook_failed", incident or {}, runbook=name, detail=redact(f"{name}: {error}"))
+        return applied
+
+    def allowed(self, name, targets):
+        """At most PER_HOUR runs per runbook, and the same finding once per REPEAT_SECONDS."""
+        path = self.home / "runbooks.json"
+        history = read_json(path, {})
+        history = history if isinstance(history, dict) else {}
+        now, signature = time.time(), hashlib.sha256(json.dumps([name, targets]).encode()).hexdigest()
+        runs = [run for run in history.get(name, []) if isinstance(run, dict) and now - run.get("at", 0) < self.REPEAT_SECONDS]
+        if sum(now - run["at"] < 3600 for run in runs) >= self.PER_HOUR or any(run.get("signature") == signature for run in runs):
+            return False
+        atomic_json(path, {**history, name: runs + [{"at": now, "signature": signature}]})
+        return True
+
+    @staticmethod
+    def remove(target):
+        path = Path(target)
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
+    def find_index_locks(self, incident):
+        root = Path(os.environ.get("CODEBOT_REPO_PATH") or "/nonexistent")
+        if not root.is_dir():
+            return []
+        repositories = [root] + [child for child in root.iterdir() if (child / ".git").is_dir()]
+        locks = [lock for repository in repositories for lock in
+                 [repository / ".git/index.lock", *(repository / ".git/worktrees").glob("*/index.lock")]
+                 if lock.is_file() and older_than(lock, 300)]
+        return locks if locks and not git_running() else []
+
+    @staticmethod
+    def find_claude_config(incident):
+        path = Path(os.environ.get("CLAUDE_CONFIG_PATH") or Path.home() / ".claude.json")
+        return [path] if path.is_file() and older_than(path, 60) and not valid_json(path) else []
+
+    @staticmethod
+    def restore_claude_config(target):
+        """The newest parseable backup Claude wrote, else the seed copy, else an empty object."""
+        path = Path(target)
+        if valid_json(path):
+            return
+        backups = sorted((Path.home() / ".claude/backups").glob(".claude.json.backup.*"), reverse=True)
+        source = next((backup for backup in [*backups, Path("/seed/.claude.json")] if valid_json(backup)), None)
+        path.replace(path.with_name(f"{path.name}.corrupt-{int(time.time())}"))
+        temporary = path.with_name(path.name + ".restore.tmp")
+        temporary.write_bytes(source.read_bytes() if source else b"{}")
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+
+    def find_quarantined(self, incident):
+        """Supervisor state that read_json set aside; reported once, pruned by retention."""
+        return sorted(path for path in self.home.rglob("*.corrupt-*") if not older_than(path, 86400))
+
+    def find_expired(self, incident):
+        """Coderbot-owned history past retention; only a day's worth when the disk is nearly full."""
+        try:
+            usage = shutil.disk_usage(self.data)
+            pressure = usage.free < usage.total * self.DISK_FREE
+        except OSError:
+            pressure = False
+        keep = 86400 if pressure or (incident or {}).get("errno") == "ENOSPC" else 14 * 86400
+        transaction = read_json(self.home / "promotion.json", {})
+        active = Path(transaction.get("folder", "/nonexistent") if isinstance(transaction, dict) else "/nonexistent")
+        entries = [*(self.data / "outbox/checks").glob("*"), *(self.data / "diagnostics").glob("*"),
+                   *(self.home / "repairs").glob("*/*"), *self.home.rglob("*.corrupt-*")]
+        expired = [entry for entry in entries if not entry.is_symlink() and older_than(entry, keep)
+                   and entry.resolve().is_relative_to(self.data) and entry.resolve() != active.resolve()]
+        return sorted(expired, key=lambda entry: entry.lstat().st_mtime)
+
+    @staticmethod
+    def find_outage(incident):
+        incident = incident or {}
+        return [incident.get("code") or "outage"] if typed(incident)[0] == "transient" else []
+
+    def defer(self, target):
+        """Nothing to repair: the worker already backs off. Record it for the operator."""
+        atomic_json(self.home / "outage.json", {"code": target, "since": time.time()})

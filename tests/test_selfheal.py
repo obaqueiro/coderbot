@@ -1,6 +1,7 @@
 """Independent repair tests: no live agent, provider, data directory or daemon."""
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -10,7 +11,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.selfheal import (Repairs, RepairError, atomic_json, eligible, epoch, inventory,
+from scripts.selfheal import (Repairs, Runbooks, RepairError, atomic_json, eligible, epoch, inventory,
                               safe_test_environment, snapshot, state_binding, validate_patch, run_process,
                               RepairCancelled, read_json)
 from scripts.supervisor import Supervisor, StopRequested, signal_owned, worker_event
@@ -100,6 +101,60 @@ class SelfHealingTests(unittest.TestCase):
                 path.write_text("changed\n")
                 with self.assertRaises(RepairError):
                     validate_patch(before, folder)
+
+    def typed_candidate(self, **fields):
+        self.incident = {**self.incident, "version": 2, "class": "agent", "code": "IndexError",
+                         "frames": ["src/main.py:9:run", "src/bug.py:2:parse"], **fields}
+        return self.candidate()
+
+    def test_reproduction_must_raise_the_incident_exception_through_its_frame(self):
+        folder, _, _ = self.typed_candidate()
+        self.assertEqual(self.repairs.validate(folder), ["src/bug.py", "tests/test_selfheal_regression_empty.py"])
+        for number, (fields, test) in enumerate((
+                ({}, "self.assertEqual(parse([1]), 2)"),  # fails, but not by the incident
+                ({"code": "TypeError"}, "self.assertIsNone(parse([]))"),
+                ({"frames": ["src/other.py:1:load"]}, "self.assertIsNone(parse([]))"))):
+            with self.subTest(fields=fields):
+                (self.repairs.home / "budget.json").unlink(missing_ok=True)
+                folder, _, _ = self.typed_candidate(task_id=str(number), **fields)
+                regression = folder / "candidate/tests/test_selfheal_regression_empty.py"
+                regression.write_text(regression.read_text().replace("self.assertIsNone(parse([]))", test))
+                with self.assertRaisesRegex(RepairError, "reproduce|Regression"):
+                    self.repairs.validate(folder)
+
+    def test_oversized_repairs_are_rejected_before_tests_run(self):
+        folder, _, _ = self.candidate()
+        (folder / "candidate/src/bug.py").write_text("def parse(value):\n    return value[0] if value else None\n"
+                                                    + "X = 1\n" * 500)
+        with patch.object(self.repairs, "suite") as suite, self.assertRaisesRegex(RepairError, "too large"):
+            self.repairs.validate(folder)
+        suite.assert_not_called()
+
+    def test_standing_failures_on_old_code_do_not_burn_a_candidate(self):
+        (self.source / "tests/test_standing.py").write_text(
+            "import unittest\nfrom bug import parse\nclass Standing(unittest.TestCase):\n"
+            "    def test_broken(self):\n        self.fail('old')\n"
+            "    def test_first(self):\n        self.assertEqual(parse([5]), 5)\n")
+        folder, _, _ = self.candidate()
+        self.repairs.validate(folder)
+        [cached] = (self.repairs.home / "baseline").glob("*.json")
+        self.assertEqual(len(read_json(cached)["failures"]), 1)
+        shutil.rmtree(folder / "reproduction")
+        with patch.object(self.repairs, "suite", wraps=self.repairs.suite) as suite:
+            self.repairs.validate(folder)  # cached for this runtime epoch
+        self.assertEqual(suite.call_count, 1)
+        shutil.rmtree(folder / "reproduction")
+        (folder / "candidate/src/bug.py").write_text("def parse(value):\n    return None\n")  # a new failure
+        with self.assertRaisesRegex(RepairError, "suite must pass"):
+            self.repairs.validate(folder)
+
+    def test_protected_files_and_approval_code_are_refused_before_admission(self):
+        bug = {**self.incident, "version": 2, "class": "agent", "code": "KeyError"}
+        self.assertFalse(eligible({**bug, "frames": ["src/config.py:3:<module>"]}))
+        self.assertFalse(eligible({**bug, "frames": ["src/main.py:3:do_approval_reply"]}))
+        with self.assertRaisesRegex(RepairError, "not eligible"):
+            self.repairs.admit({**bug, "frames": ["src/main.py:3:do_merge_reply"]})
+        self.assertFalse((self.repairs.home / "budget.json").exists())
 
     def test_persistent_budgets_survive_recreating_supervisor(self):
         self.repairs.admit(self.incident)
@@ -431,3 +486,147 @@ class RepairAgentScope(unittest.TestCase):
         for rule in ("Bash(git push:*)", "Bash(git commit:*)", "Bash(gh:*)", "Bash(docker:*)",
                      "Read(/app/.env)", "Read(/app/data/**)"):
             self.assertIn(rule, denied)
+
+
+class RunbookTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repairs = Repairs(self.root / "source", self.root / "data")
+        self.runbooks = Runbooks(self.repairs)
+        for name, value in (("CODEBOT_REPO_PATH", str(self.root / "repo")), ("HOME", str(self.root / "home"))):
+            manager = patch.dict(os.environ, {name: value})
+            manager.start()
+            self.addCleanup(manager.stop)
+        manager = patch("scripts.selfheal.git_running", return_value=False)
+        self.git_running = manager.start()
+        self.addCleanup(manager.stop)
+
+    def aged(self, path, text="x", age=3600):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        os.utime(path, (time.time() - age, time.time() - age))
+        return path
+
+    def events(self, kind):
+        return [event for event in (json.loads(path.read_text()) for path in (self.repairs.home / "notifications").glob("*.json"))
+                if event["kind"] == kind]
+
+    def test_stale_index_lock_is_removed_only_when_no_git_runs_and_dry_run_reports(self):
+        lock = self.aged(self.root / "repo/.git/index.lock")
+        fresh = self.aged(self.root / "repo/child/.git/index.lock", age=10)
+        self.git_running.return_value = True
+        self.assertEqual(self.runbooks.run(act=True), [])
+        self.git_running.return_value = False
+        self.assertEqual(self.runbooks.run(act=False), ["git_index_lock"])
+        self.assertTrue(lock.exists())
+        self.assertEqual(self.runbooks.run(act=True), [])  # the same finding is not repeated within hours
+        (self.repairs.home / "runbooks.json").unlink()
+        self.assertEqual(self.runbooks.run(act=True), ["git_index_lock"])
+        self.assertFalse(lock.exists())
+        self.assertTrue(fresh.exists())
+        self.assertEqual(len(self.events("runbook_dry_run")), 1)
+        self.assertEqual(len(self.events("runbook_applied")), 1)
+
+    def test_corrupt_claude_config_is_restored_from_the_newest_valid_backup(self):
+        config = self.aged(self.root / "home/.claude.json", "{torn")
+        self.aged(self.root / "home/.claude/backups/.claude.json.backup.1", '{"old": 1}')
+        self.aged(self.root / "home/.claude/backups/.claude.json.backup.2", '{"new": 2}')
+        self.aged(self.root / "home/.claude/backups/.claude.json.backup.3", "{torn")
+        self.assertIn("claude_config", self.runbooks.run(act=True))
+        self.assertEqual(json.loads(config.read_text()), {"new": 2})
+        self.assertTrue(list((self.root / "home").glob(".claude.json.corrupt-*")))
+
+    def test_retention_prunes_only_owned_history_and_more_under_disk_pressure(self):
+        old = self.aged(self.root / "data/diagnostics/old.md", age=20 * 86400)
+        recent = self.aged(self.root / "data/diagnostics/recent.md", age=2 * 86400)
+        evidence = self.aged(self.root / "data/outbox/evidence/video.mp4", age=40 * 86400)
+        checks = self.aged(self.root / "data/outbox/checks/run/report.json", age=20 * 86400).parent
+        os.utime(checks, (time.time() - 20 * 86400,) * 2)
+        self.runbooks.run(act=True)
+        self.assertFalse(old.exists() or checks.exists())
+        self.assertTrue(recent.exists() and evidence.exists())
+        self.runbooks.run({"version": 2, "class": "transient", "code": "OSError", "errno": "ENOSPC"}, act=True)
+        self.assertFalse(recent.exists())
+        self.assertTrue(evidence.exists())
+
+    def test_outage_is_deferred_not_repaired_and_a_failing_runbook_never_raises(self):
+        supervisor = Supervisor(self.repairs.source, self.repairs.data, "observe")
+        outage = {"id": "x", "version": 2, "class": "transient", "code": "ConnectionError", "phase": "EXPLORING"}
+        with patch.object(supervisor, "notify"), patch.object(supervisor, "repair") as repair:
+            supervisor.handle(outage)
+        repair.assert_not_called()
+        self.assertEqual([event["runbook"] for event in self.events("runbook_dry_run")], ["outage_backoff"])
+        self.assertFalse(self.events("incident_detected"))
+        with patch.object(self.runbooks, "registry", {"broken": (Mock(side_effect=OSError("boom")), None)}):
+            self.assertEqual(self.runbooks.run(act=True), [])
+        self.assertEqual(len(self.events("runbook_failed")), 1)
+
+
+class TypedIncidents(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def raised(self, code, filename):
+        namespace = {}
+        exec(compile(code, str(filename), "exec"), namespace)
+        try:
+            namespace["step"]()
+        except BaseException as error:
+            return error
+
+    def test_worker_incident_carries_class_code_and_bounded_relative_frames(self):
+        error = self.raised("def step():\n    return None + 1\n", selfheal_events.SOURCE_ROOT / "src/fake_bug.py")
+        fields = selfheal_events.incident_fields(error)
+        self.assertEqual((fields["version"], fields["class"], fields["code"]), (2, "agent", "TypeError"))
+        self.assertEqual(fields["frames"][-1], "src/fake_bug.py:2:step")
+        self.assertFalse(any(str(selfheal_events.SOURCE_ROOT) in frame for frame in fields["frames"]))
+        deep = selfheal_events.incident_fields(self.raised(
+            "def step(depth=40):\n    return step(depth - 1) if depth else None + 1\n", self.root / "deep.py"))
+        self.assertEqual(len(deep["frames"]), 16)
+        disk = selfheal_events.incident_fields(OSError(28, "No space left on device", "/app/data/x"))
+        self.assertEqual((disk["class"], disk["errno"], disk["resource"]), ("transient", "ENOSPC", "/app/data/x"))
+        with patch.dict(os.environ, {"CODEBOT_SUPERVISOR_DIR": str(self.root)}):
+            selfheal_events.incident({"state": "EXPLORING"}, error, binding="b")
+        [event] = [json.loads(path.read_text()) for path in (self.root / "events").glob("*.json")]
+        self.assertEqual((event["kind"], event["version"], event["code"], event["binding"]), ("incident", 2, "TypeError", "b"))
+
+    def test_only_code_bugs_inside_src_reach_the_llm_repair(self):
+        bug = {"version": 2, "class": "agent", "code": "TypeError", "phase": "EXPLORING",
+               "frames": ["src/main.py:10:run", "src/bug.py:2:parse"]}
+        self.assertTrue(eligible(bug))
+        self.assertFalse(eligible({**bug, "frames": ["lib/python3.12/json/decoder.py:3:decode"]}))
+        self.assertFalse(eligible({**bug, "class": "transient", "code": "OSError"}))
+        self.assertFalse(eligible({**bug, "class": "fatal"}))
+        self.assertFalse(eligible({**bug, "code": "AgentFault"}))
+        legacy = {"category": "implementation", "error_type": "TypeError", "phase": "EXPLORING", "location": "parse"}
+        self.assertTrue(eligible(legacy))
+
+    def fixture(self, files):
+        source = self.root / "source"
+        for name, text in files.items():
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).write_text(text)
+        shutil.copy2(Path(selfheal_events.__file__), source / "src/selfheal_events.py")
+        return Supervisor(source, self.root / "data", "observe")
+
+    def crash_of(self, supervisor):
+        supervisor.start()
+        supervisor.worker.wait(timeout=30)
+        supervisor.stop()
+        return supervisor.crash()
+
+    def test_bootstrap_records_import_and_configuration_failures(self):
+        supervisor = self.fixture({"src/main.py": "import broken\n", "src/broken.py": "def parse(:\n"})
+        crash = self.crash_of(supervisor)
+        self.assertEqual((crash["code"], crash["class"], crash["phase"]), ("SyntaxError", "agent", "STARTUP"))
+        self.assertEqual(crash["frames"][-1], "src/broken.py:1:<module>")
+        self.assertTrue(eligible(crash))
+        self.assertIsNone(supervisor.crash())  # consumed once
+        (supervisor.source / "src/main.py").write_text("raise SystemExit('GH_TOKEN is missing')\n")
+        self.assertEqual(self.crash_of(supervisor)["class"], "fatal")
+        (supervisor.source / "src/main.py").write_text("import sys\nsys.exit(0)\n")
+        self.assertIsNone(self.crash_of(supervisor))
