@@ -313,6 +313,8 @@ SELF_HEAL_CODE_REVIEW = (os.environ.get("CODEBOT_SELF_HEAL_CODE_REVIEW") or "on"
 REVIEW_WAIT_TIMEOUT_SECONDS = _int("CODEBOT_REVIEW_WAIT_TIMEOUT", 45 * 60)
 # Cap the fix<->re-review loop so a comment codebot can't resolve doesn't stall the PR.
 REVIEW_MAX_ROUNDS = _int("CODEBOT_REVIEW_MAX_ROUNDS", 3)
+# Characters of per-repository diff stats a workspace feature review starts from.
+REVIEW_CONTEXT_CHARS = _int("CODEBOT_REVIEW_CONTEXT_CHARS", 12000)
 
 # While waiting on the user's merge decision, codebot also polls the PR for unresolved
 # review conversation threads (e.g. a human reviewer's) and fixes them proactively. Cap

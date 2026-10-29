@@ -70,7 +70,18 @@ def environment(phase: str | None) -> dict:
     return {"CODEBOT_POLICY": json.dumps(policy),
             # Subagents never spawn subagents; background jobs die with the turn anyway.
             "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+            **(no_push_credentials() if config.TARGET_MODE == "workspace" else {})}
+
+
+def no_push_credentials() -> dict:
+    """The controller fetches and pushes; the agent's git and gh carry no credentials.
+    (Single-repo agents still fetch for conflict resolution, so they keep theirs.)"""
+    return {"GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_ENTERPRISE_TOKEN": "",
+            "GH_CONFIG_DIR": str(config.DATA_DIR / "agent-gh"),
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "", "SSH_AUTH_SOCK": "",
+            "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=/dev/null"}
 
 
 def opencode_bash(phase: str | None) -> dict:

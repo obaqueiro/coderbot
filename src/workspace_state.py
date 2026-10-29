@@ -46,7 +46,9 @@ def bind_and_validate(state, workspace):
         repo = current.get(name)
         old = inventory.get(name, {})
         if repo is None or old.get("identity") != repo.identity:
-            raise TargetMismatch(f"Repository identity changed or missing: {name}; explicitly migrate state")
+            reason = dict(getattr(workspace, "skipped", ())).get(name)
+            raise TargetMismatch(f"Repository identity changed or missing: {name}"
+                                 + (f" ({reason})" if reason else "") + "; explicitly migrate state")
         if old.get("base_branch") != repo.base_branch:
             raise TargetMismatch(f"Repository base branch changed: {name}; explicitly migrate state")
         if name in records and records[name].get("identity") != repo.identity:

@@ -76,19 +76,20 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
         repo = repository(self.root / "api")
         git(repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
         git(repo, "checkout", "-b", "feature")
-        with self.assertRaisesRegex(WorkspaceError, "Cannot determine base"):
-            discover(self.root)
+        self.assertIn("Cannot determine base", dict(discover(self.root).skipped)["api"])
         context = discover(self.root, manifest_path=self.manifest({"base_branches": {"api": "main"}}))
         self.assertEqual(context.repository("api").base_branch, "main")
         self.assertEqual(git(repo, "branch", "--show-current"), "feature")
 
     def test_missing_remote_and_missing_base_actionable(self):
         repo = repository(self.root / "api")
-        with self.assertRaisesRegex(WorkspaceError, "not available"):
-            discover(self.root, manifest_path=self.manifest({"base_branches": {"api": "missing"}}))
+        repository(self.root / "ui")
+        context = discover(self.root, manifest_path=self.manifest({"base_branches": {"api": "missing"}}))
+        self.assertIn("not available", dict(context.skipped)["api"])
         git(repo, "remote", "remove", "origin")
-        with self.assertRaisesRegex(WorkspaceError, "no origin"):
-            discover(self.root)
+        context = discover(self.root)
+        self.assertIn("no origin", dict(context.skipped)["api"])
+        self.assertEqual([r.relative_path for r in context.repositories], ["ui"])  # the others still work
 
     def test_exclusions_and_legacy_depth_never_enable_recursion(self):
         repository(self.root / "group" / "deep")
@@ -147,7 +148,8 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
                    {"unknown": 1}, {"base_branches": {"api": "bad..branch"}},
                    {"checks": [{"id": "test", "argv": "sh run.sh"}]},
                    {"checks": [{"id": "test", "argv": ["true"], "cwd": "../"}]},
-                   {"docker": {"host_root": "relative"}}, {"docker": {"compose_files": ["/outside"]}}]
+                   {"docker": {"host_root": "relative"}}, {"docker": {"compose_files": ["/outside"]}},
+                   {"merge_order": "api"}, {"merge_order": ["../api"]}]
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(WorkspaceError):
                 load_manifest(self.root, self.manifest(value))

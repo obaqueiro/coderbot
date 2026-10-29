@@ -1,0 +1,302 @@
+"""The lifecycle over a list of repositories: Target{root, repos} plus RepoOps(repo).
+
+Workspace mode drives it today; single-repo is the N=1 case (`Target.of` a repo-mode
+context) and keeps its own handlers in main.py until it is ported behind golden tests.
+RepoOps is the only place that runs git/gh for a repository: every call is time-bounded,
+failures are typed (errors.py), PRs are pinned by number, and the controller alone
+fetches and pushes. Per-repository records live in state["workspace"]["repositories"]."""
+from dataclasses import dataclass
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import subprocess
+
+import config
+import errors
+
+log = logging.getLogger("coderbot")
+PR_FIELDS = "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository"
+FATAL_TOOL_ERROR = re.compile(r"authentication failed|could not read username|permission denied \(publickey\)|"
+                              r"bad credentials|http 401|gh auth login|not logged into", re.IGNORECASE)
+GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED", "COMPLETED", "EXPECTED"}
+
+
+def run(argv, cwd, *, timeout=None):
+    """stdout of a bounded command; a failure is Transient, Fatal or AgentFault by its cause."""
+    label = " ".join(argv[:2])
+    try:
+        process = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, errors="replace",
+                                 timeout=timeout or config.SUBPROCESS_TIMEOUT_SECONDS,
+                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except subprocess.TimeoutExpired as error:
+        raise errors.Transient(f"{label} timed out in {cwd}", code=argv[0] + "_timeout", resource=str(cwd)) from error
+    except OSError as error:
+        raise errors.Fatal(f"{label} cannot run: {error}", code=argv[0] + "_missing", resource=str(cwd)) from error
+    if process.returncode:
+        import diagnostics
+        text = diagnostics.redact(f"{label} failed in {cwd}: {process.stderr}{process.stdout}".strip())
+        kind = (errors.Fatal if FATAL_TOOL_ERROR.search(text) else
+                errors.Transient if errors.TRANSIENT_TOOL_ERROR.search(text) else errors.AgentFault)
+        raise kind(text, code=argv[0] + "_failed", resource=str(cwd))
+    return process.stdout.strip()
+
+
+def pr_number(record):
+    """The pinned PR number; older records only stored the URL."""
+    if record.get("pr_number"):
+        return int(record["pr_number"])
+    match = re.search(r"/pull/(\d+)$", record.get("pr_url") or "")
+    return int(match[1]) if match else None
+
+
+@dataclass(frozen=True)
+class RepoOps:
+    path: Path
+    name: str
+    remote: str
+    base: str
+
+    @property
+    def slug(self):
+        return self.remote.removeprefix("github.com/")
+
+    def git(self, *args, timeout=None):
+        return run(["git", *args], self.path, timeout=timeout)
+
+    def quiet(self, *args):
+        """git output, or "" when the command fails (probes such as rev-parse --verify)."""
+        try:
+            return self.git(*args)
+        except errors.CoderbotError:
+            return ""
+
+    def gh(self, *args):
+        if not self.remote.startswith("github.com/"):
+            raise errors.Fatal(f"PR publication requires a GitHub origin: {self.name}", code="not_github")
+        return run(["gh", *args, "--repo", self.slug], self.path)
+
+    def branch(self):
+        return self.quiet("branch", "--show-current")
+
+    def head(self):
+        return self.git("rev-parse", "HEAD")
+
+    def tracked_changes(self):
+        return self.git("status", "--porcelain", "--untracked-files=no")
+
+    def clean(self):
+        return not self.quiet("status", "--porcelain", "--untracked-files=all")
+
+    def fetch(self, ref=None):
+        """Best effort: an unreachable origin leaves the last fetched refs in place."""
+        try:
+            self.git("fetch", "--quiet", "origin", ref or self.base, timeout=max(config.SUBPROCESS_TIMEOUT_SECONDS, 120))
+            return True
+        except errors.CoderbotError as error:
+            log.warning("fetch %s failed in %s: %s", ref or self.base, self.name, error)
+            return False
+
+    def base_sha(self, head="HEAD"):
+        """merge-base of `head` and the freshly fetched origin base (the PR's real base)."""
+        self.fetch()
+        upstream = (self.quiet("rev-parse", "--verify", f"refs/remotes/origin/{self.base}^{{commit}}")
+                    or self.quiet("rev-parse", "--verify", f"refs/heads/{self.base}^{{commit}}"))
+        return (self.quiet("merge-base", head, upstream) if upstream else "") or upstream or self.quiet("rev-parse", head)
+
+    def ahead(self, base_sha):
+        return bool(base_sha) and int(self.quiet("rev-list", "--count", f"{base_sha}..HEAD") or 0) > 0
+
+    def is_ancestor(self, older, newer):
+        try:
+            self.git("merge-base", "--is-ancestor", older, newer)
+            return True
+        except errors.CoderbotError:
+            return False
+
+    def push(self, branch):
+        self.git("push", "--quiet", "origin", f"HEAD:refs/heads/{branch}", timeout=max(config.SUBPROCESS_TIMEOUT_SECONDS, 300))
+
+    def pr(self, number, fields=PR_FIELDS):
+        return json.loads(self.gh("pr", "view", str(number), "--json", fields))
+
+    def open_pr(self, branch, title, body, *, draft):
+        """The open PR of this attempt's unique branch, else a new one; its number."""
+        listed = json.loads(self.gh("pr", "list", "--state", "open", "--head", branch, "--base", self.base,
+                                    "--json", "number", "--limit", "2") or "[]")
+        if len(listed) > 1:
+            raise errors.Fatal(f"{self.name}: more than one open PR for {branch}", code="ambiguous_pr")
+        if listed:
+            return int(listed[0]["number"])
+        url = self.gh("pr", "create", *(["--draft"] if draft else []), "--base", self.base, "--head", branch,
+                      "--title", title, "--body", body)
+        return pr_number({"pr_url": url.strip().splitlines()[-1]})
+
+    def matches(self, record, value):
+        """The PR is the one this record pinned: number, branches and repository (any case)."""
+        expected = f"https://github.com/{self.slug}/pull/".casefold()
+        return (isinstance(value, dict) and value.get("number") == pr_number(record)
+                and str(value.get("url", "")).casefold().startswith(expected)
+                and value.get("headRefName") == record.get("branch") and value.get("baseRefName") == self.base
+                and value.get("isCrossRepository") is False)
+
+
+@dataclass(frozen=True)
+class Target:
+    root: Path
+    repos: tuple[RepoOps, ...]
+
+    @classmethod
+    def of(cls, context):
+        return cls(context.root, tuple(RepoOps(r.path, r.relative_path, r.remote, r.base_branch)
+                                       for r in context.repositories))
+
+    def repo(self, name):
+        for ops in self.repos:
+            if ops.name == name:
+                return ops
+        raise errors.Fatal(f"Not a discovered repository: {name}", code="missing_repository")
+
+
+def on_branch(ops, record):
+    """Put the repository back on its feature branch (after a hold/resume); never forces."""
+    branch = record.get("branch")
+    if not branch or ops.branch() == branch:
+        return
+    if not ops.quiet("rev-parse", "--verify", f"refs/heads/{branch}"):
+        return
+    if not ops.clean():
+        raise errors.Fatal(f"{ops.name} has uncommitted changes on {ops.branch() or 'a detached HEAD'}; "
+                           f"save them before I switch it back to {branch}", code="dirty_repository")
+    ops.git("checkout", "--quiet", branch)
+
+
+def adopt(ops, record, before):
+    """Move work the agent made on the base branch onto this attempt's feature branch."""
+    current = ops.branch()
+    if current != ops.base or not record.get("branch") or ops.quiet("rev-parse", "--verify", f"refs/heads/{record['branch']}"):
+        return
+    ops.git("checkout", "--quiet", "-b", record["branch"])
+    if before.get("branch") == ops.base and before.get("head") and ops.quiet("rev-parse", ops.base) != before["head"]:
+        ops.git("branch", "--force", ops.base, before["head"])  # local commits now live on the feature branch
+
+
+def release(target, records):
+    """Return each clean child to its base branch so the next task starts from it."""
+    for name, record in records.items():
+        try:
+            ops = target.repo(name)
+            if ops.branch() != ops.base and ops.clean():
+                ops.git("checkout", "--quiet", ops.base)
+                if ops.fetch():
+                    ops.quiet("merge", "--ff-only", "--quiet", f"origin/{ops.base}")
+        except errors.CoderbotError as error:
+            log.warning("could not return %s to %s: %s", name, record.get("base_branch"), error)
+
+
+def open_drafts(target, records, title, body, save):
+    """A draft PR per repository on its first commit past merge-base; best effort.
+    Returns the names that got a PR now (the caller announces and cross-links them)."""
+    opened = []
+    for name, record in records.items():
+        if pr_number(record) or record.get("merge", {}).get("status") == "MERGED" or record.get("draft_attempts", 0) >= 2:
+            continue
+        ops = target.repo(name)
+        try:
+            if not ops.ahead(record.get("base_sha")):
+                continue
+            ops.push(record["branch"])
+            number = ops.open_pr(record["branch"], title, body(name), draft=True)
+        except Exception as error:  # noqa: BLE001 - the ready step opens it at the end
+            record["draft_attempts"] = record.get("draft_attempts", 0) + 1
+            log.warning("draft PR for %s failed (attempt %d): %s", name, record["draft_attempts"], error)
+            continue
+        record.update(pr_number=number, pr_url=f"https://github.com/{ops.slug}/pull/{number}", draft=True)
+        save()
+        opened.append(name)
+    return opened
+
+
+def push_progress(target, records):
+    """Best-effort progress push to every open draft; the next turn retries a failure."""
+    for name, record in records.items():
+        if pr_number(record) and record.get("merge", {}).get("status") != "MERGED":
+            try:
+                target.repo(name).push(record["branch"])
+            except Exception as error:  # noqa: BLE001
+                log.warning("progress push for %s failed: %s", name, error)
+
+
+def edit_bodies(target, records, body):
+    for name, record in records.items():
+        if pr_number(record) and record.get("merge", {}).get("status") not in ("MERGED", "CLOSED"):
+            try:
+                target.repo(name).gh("pr", "edit", str(pr_number(record)), "--body", body(name))
+            except Exception as error:  # noqa: BLE001 - cross-links are informational
+                log.warning("could not update the PR body for %s: %s", name, error)
+
+
+def diff_summary(target, records, budget):
+    """Per-repository diff stats for the reviewer, within a shared character budget."""
+    names = [n for n, r in records.items() if r.get("base_sha")]
+    share = max(400, budget // max(1, len(names)))
+    parts = []
+    for name in names:
+        record = records[name]
+        stat = target.repo(name).quiet("diff", "--stat", f"{record['base_sha']}...HEAD")
+        if len(stat) > share:
+            stat = stat[:share] + "\n… (truncated; run the diff yourself)"
+        parts.append(f"- {name}: base {record['base_sha']}, branch {record.get('branch')}\n{stat}")
+    return "\n".join(parts)
+
+
+def merge_order(records, declared):
+    names = [n for n in records if pr_number(records[n])]
+    return [n for n in declared if n in names] + [n for n in names if n not in declared]
+
+
+def green(value):
+    rollup = value.get("statusCheckRollup") or []
+    return all((c.get("conclusion") or c.get("state") or "").upper() in GREEN for c in rollup)
+
+
+def precheck(target, records, order):
+    """Every PR still to merge is open, mergeable, green and at its verified head."""
+    problems = []
+    for name in order:
+        record = records[name]
+        if record.get("merge", {}).get("status") == "MERGED":
+            continue
+        value = target.repo(name).pr(pr_number(record), PR_FIELDS + ",statusCheckRollup")
+        if value.get("state") != "OPEN":
+            problems.append(f"{name}: PR is {value.get('state')}")
+        elif value.get("headRefOid") != record.get("delivered_sha"):
+            problems.append(f"{name}: PR head moved since verification")
+        elif value.get("mergeable") != "MERGEABLE":
+            problems.append(f"{name}: not mergeable ({value.get('mergeable')})")
+        elif not green(value):
+            problems.append(f"{name}: checks are not green")
+        elif value.get("isDraft"):
+            problems.append(f"{name}: PR is still a draft")
+    return problems
+
+
+def merge(target, records, order, save):
+    """Merge in order; returns the report (merged, failed, error, order)."""
+    report = {"order": order, "merged": [], "failed": None, "error": None}
+    for name in order:
+        record = records[name]
+        if record.get("merge", {}).get("status") == "MERGED":
+            report["merged"].append(name)
+            continue
+        try:
+            target.repo(name).gh("pr", "merge", str(pr_number(record)), "--squash",
+                                 "--match-head-commit", record["delivered_sha"])
+        except errors.CoderbotError as error:
+            report.update(failed=name, error=str(error)[:500])
+            break
+        record["merge"] = {"status": "MERGED"}
+        report["merged"].append(name)
+        save()
+    return report
