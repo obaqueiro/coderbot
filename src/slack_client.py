@@ -72,7 +72,11 @@ def web():
     global _web
     if _web is None:
         from slack_sdk import WebClient
+        from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
         _web = WebClient(token=config.SLACK_BOT_TOKEN, timeout=30)
+        # Honour Slack's Retry-After before the error reaches the loop (errors.kind
+        # then types what is left: ratelimited -> transient, invalid_auth -> fatal).
+        _web.retry_handlers.append(RateLimitErrorRetryHandler(max_retry_count=2))
     return _web
 
 

@@ -179,7 +179,7 @@ def git(*args: str) -> str:
     log.debug("git %s", " ".join(args))
     proc = operations.tool(["git", *args], cwd=config.REPO_PATH)
     if proc.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}")
+        raise errors.from_tool(f"git {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}", code="git_failed")
     if proc.stdout.strip():
         log.debug("git %s -> %s", args[0], proc.stdout.strip()[:300])
     return proc.stdout.strip()
@@ -2062,7 +2062,7 @@ def _run_checked(command: list[str]) -> str:
     proc = operations.tool(command, cwd=config.REPO_PATH)
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip()
-        raise RuntimeError(f"{' '.join(command)} exited {proc.returncode}: {detail}")
+        raise errors.from_tool(f"{' '.join(command)} exited {proc.returncode}: {detail}", code=f"{command[0]}_failed")
     return proc.stdout.strip()
 
 
@@ -6475,7 +6475,7 @@ def _run_loop() -> None:
                     state["technical_retry"] = {"attempts": 0, "phase": prev}
                 retry = state["technical_retry"]
                 retry["attempts"] += 1
-                backoff = min(2 ** min(retry["attempts"] - 1, 12), 3600)
+                backoff = min(max(2 ** min(retry["attempts"] - 1, 12), getattr(error, "retry_after", None) or 0), 3600)
                 retry["next_at"] = time.time() + backoff
                 if retry["attempts"] >= config.MAX_STATE_FAILURES and not retry.get("notified"):
                     path = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,

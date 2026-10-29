@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 import config
+import errors
 import ownership
 import safe_download
 import task_source
@@ -41,17 +42,19 @@ def _request(method: str, path: str, payload: dict | None = None) -> dict | list
             return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", "replace")[:500]
+            try:
+                delay = min(30, max(1, int(error.headers.get("Retry-After", "1"))))
+            except (ValueError, TypeError, AttributeError):
+                delay = 1
             if error.code in (429, 500, 502, 503, 504) and attempt < 2:
-                try:
-                    delay = min(30, max(1, int(error.headers.get("Retry-After", "1"))))
-                except ValueError:
-                    delay = 1
                 time.sleep(delay)
                 continue
-            raise RuntimeError(f"Jira {method} {path}: HTTP {error.code}: {detail}") from error
+            raise errors.from_http(error.code, f"Jira {method} {path}: HTTP {error.code}: {detail}",
+                                   resource="jira", retry_after=delay) from error
         except urllib.error.URLError as error:
-            raise RuntimeError(f"Jira {method} {path}: connection failed: {error.reason}") from error
-    raise RuntimeError(f"Jira {method} {path}: retry budget exhausted")
+            raise errors.Transient(f"Jira {method} {path}: connection failed: {error.reason}",
+                                   code="jira_unreachable", resource="jira") from error
+    raise errors.Transient(f"Jira {method} {path}: retry budget exhausted", resource="jira")
 
 
 def _jql_quote(value: str) -> str:

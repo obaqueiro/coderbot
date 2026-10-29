@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 
 import config
+import errors
 import operations
 import ownership
 import safe_download
@@ -58,11 +59,15 @@ def _gh(*args: str) -> str:
     proc = operations.tool(["gh", *args])
     if proc.returncode != 0:
         detail = (proc.stderr.strip() or proc.stdout.strip())[-2000:]
-        message = f"gh {' '.join(args[:2])} failed (exit {proc.returncode}): {detail}"
-        if any(marker in detail for marker in _SCOPE_MARKERS):
-            message += _SCOPE_HINT
-        raise RuntimeError(message)
+        raise _failure(f"gh {' '.join(args[:2])} failed (exit {proc.returncode}): {detail}", detail)
     return proc.stdout
+
+
+def _failure(message: str, detail: str) -> errors.CoderbotError:
+    """Fatal (with the token-scope hint) for a scope/permission error, else by the text."""
+    if any(marker in detail for marker in _SCOPE_MARKERS):
+        return errors.Fatal(message + _SCOPE_HINT, code="gh_project_scope", resource="github")
+    return errors.from_tool(message, code="gh_failed", resource="github")
 
 
 def _graphql(query: str, **variables) -> dict:
@@ -81,10 +86,7 @@ def _graphql(query: str, **variables) -> dict:
         raise RuntimeError(f"gh api graphql returned non-JSON output: {out[:500]!r}") from err
     if payload.get("errors"):
         detail = json.dumps(payload["errors"])[:2000]
-        message = f"GraphQL errors: {detail}"
-        if any(marker in detail for marker in _SCOPE_MARKERS):
-            message += _SCOPE_HINT
-        raise RuntimeError(message)
+        raise _failure(f"GraphQL errors: {detail}", detail)
     return payload.get("data") or {}
 
 

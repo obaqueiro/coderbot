@@ -59,11 +59,40 @@ TRANSIENT_TOOL_ERROR = re.compile(
     r"operation timed out|network is unreachable|temporary failure in name resolution|"
     r"tls handshake|gnutls|ssl_|early eof|the remote end hung up|"
     r"(?:http|status|error)[ :/]*(?:429|500|502|503|504)\b|"
-    r"bad gateway|service unavailable|gateway time-?out|rate limit|secondary rate|"
+    r"bad gateway|service unavailable|gateway time-?out|rate ?limit|secondary rate|"
     r"api rate|overloaded", re.IGNORECASE)
+# Credentials or access the user must fix; retrying cannot.
+FATAL_TOOL_ERROR = re.compile(
+    r"authentication failed|bad credentials|requires authentication|http 401|"
+    r"could not read username|permission denied \(publickey\)|gh auth login|"
+    r"insufficient_scopes|token (?:has )?(?:expired|been revoked)", re.IGNORECASE)
 _TRANSIENT_TYPES = (ssl.SSLError, ConnectionError, TimeoutError, socket.gaierror, socket.herror,
                     subprocess.TimeoutExpired)
 _FATAL_NAMES = {"MissingCredentials", "WorkspaceError", "TargetMismatch"}
+_SLACK_FATAL = {"invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired",
+                "missing_scope", "not_in_channel", "channel_not_found", "is_archived"}
+
+
+def http_kind(status, text="") -> str:
+    if status in (408, 429) or (status or 0) >= 500 or TRANSIENT_TOOL_ERROR.search(text):
+        return TRANSIENT
+    return FATAL if status in (401, 403) else AGENT
+
+
+def _typed(kind_name, message, **details):
+    return {TRANSIENT: Transient, FATAL: Fatal}.get(kind_name, AgentFault)(message, **details)
+
+
+def from_tool(message, *, code="", resource="") -> CoderbotError:
+    """The typed error for a failed git/gh/CLI call, from its message and stderr."""
+    found = TRANSIENT if TRANSIENT_TOOL_ERROR.search(message) else \
+        FATAL if FATAL_TOOL_ERROR.search(message) else AGENT
+    return _typed(found, message, code=code, resource=resource)
+
+
+def from_http(status, message, *, code="", resource="", retry_after=None) -> CoderbotError:
+    return _typed(http_kind(status, message), message, code=code or f"http_{status}",
+                  resource=resource, retry_after=retry_after)
 
 
 def kind(error: BaseException) -> str:
@@ -80,8 +109,17 @@ def kind(error: BaseException) -> str:
             TRANSIENT_TOOL_ERROR.search(f"{error} {getattr(error, 'stderr', '') or ''}"):
         return TRANSIENT
     status = getattr(getattr(error, "resp", None), "status", None)  # googleapiclient HttpError
-    if status in (429, 500, 502, 503, 504):
-        return TRANSIENT
+    if isinstance(status, int):
+        return http_kind(status, str(error))
+    if type(error).__name__ == "RefreshError":  # google-auth: revoked/expired grant
+        return TRANSIENT if getattr(error, "retryable", False) else FATAL
+    if type(error).__name__ == "SlackApiError":
+        response = getattr(error, "response", None) or {}
+        slack_code = response.get("error", "") if hasattr(response, "get") else ""
+        if slack_code in _SLACK_FATAL:
+            return FATAL
+        return TRANSIENT if slack_code == "ratelimited" else \
+            http_kind(getattr(response, "status_code", 0), slack_code)
     if any(cls.__name__ in _FATAL_NAMES for cls in type(error).__mro__):
         return FATAL
     return AGENT
