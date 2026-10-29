@@ -856,7 +856,7 @@ class PushPhaseTests(unittest.TestCase):
 
     def test_review_push_continues_to_review_wait_without_agent_resume(self):
         state = self.state("review") | {"review_threads": [{"id": "T1", "body": "fix"}]}
-        with patch.object(main, "git") as git, \
+        with patch.object(main, "git"), \
              patch.object(main.agent_runner, "resume") as resume, \
              patch.object(main, "_resolve_review_threads") as resolve, \
              patch.object(main, "_enter_review_wait") as enter:
@@ -908,7 +908,7 @@ class PushPhaseTests(unittest.TestCase):
 
     def test_restart_in_pushing_retries_only_push_then_continuation(self):
         state = self.state("feedback", output="fixed", attachments=[])
-        with patch.object(main, "git") as git, \
+        with patch.object(main, "git"), \
              patch.object(main.agent_runner, "resume") as resume, patch.object(main, "email"):
             main.PHASES[state["state"]](state)
 

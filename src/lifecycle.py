@@ -1,11 +1,16 @@
 """The lifecycle over a list of repositories: Target{root, repos} plus RepoOps(repo).
 
-Workspace mode drives it today; single-repo is the N=1 case (`Target.of` a repo-mode
-context) and keeps its own handlers in main.py until it is ported behind golden tests.
+Workspace mode drives the handlers below; repo mode is the N=1 case (main._repo_target:
+`RepoOps.checkout` plus its one record) and shares the mechanics — draft PR and progress
+pushes, delivery, merge, review threads, release — while keeping its own policies (the
+WAIT_REVIEW/WAIT_MERGE decision flow, the destructive reset after its work is preserved).
 RepoOps is the only place that runs git/gh for a repository: every call is time-bounded,
 failures are typed (errors.py), PRs are pinned by number, and the controller alone
-fetches and pushes. Per-repository records live in state["workspace"]["repositories"]."""
+fetches and pushes. Per-repository records live in state["workspace"]["repositories"]
+(workspace) or state["repository"] (repo mode, kept in step with the old scalars by
+persistence.repository_record / mirror_record)."""
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -361,6 +366,176 @@ def merge(target, records, order, save):
     return report
 
 
+# ---- review threads, both modes: fetched, answered and resolved through RepoOps
+THREADS_QUERY = """
+    query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+      viewer { login }
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              id isResolved isOutdated path line
+              opener: comments(first: 1) { nodes { ...c } }
+              comments(last: 100) { totalCount nodes { ...c } } } } } } }
+    fragment c on PullRequestReviewComment { author { login __typename } body databaseId createdAt }"""
+
+
+def review_threads(ops, number):
+    """All unresolved review threads on the PR — ANY author, not just the OCR bot — via
+    GraphQL (REST doesn't expose thread resolution). Returns None when the query fails,
+    which callers must treat as "could not verify", never as "no threads": this gates an
+    irreversible merge, so it fails closed. The WHOLE thread is fetched, not just the
+    opener: a reviewer's follow-up lives in later comments, and the agent must see both it
+    and its own earlier reply. `viewer` is the bot's own login, used to label those replies."""
+    owner, repo = ops.slug.split("/", 1)
+    threads, cursor = [], None
+    while True:
+        # -f passes raw strings; only $number (an Int in the query) uses -F's type
+        # coercion. An all-digit cursor or owner under -F would coerce to Int and make
+        # the GraphQL call fail its String! variable types.
+        cmd = ["api", "graphql", "-f", f"query={THREADS_QUERY}", "-f", f"owner={owner}",
+               "-f", f"repo={repo}", "-F", f"number={number}"]
+        if cursor:
+            cmd += ["-f", f"cursor={cursor}"]
+        proc = ops.gh_quiet(*cmd)
+        if proc is None or proc.returncode != 0:
+            log.warning("gh api graphql (review threads) failed: %s", proc.stderr[-300:] if proc else "")
+            return None
+        try:
+            data = json.loads(proc.stdout)["data"]
+            conn = data["repository"]["pullRequest"]["reviewThreads"]
+        except (json.JSONDecodeError, KeyError, TypeError) as err:
+            log.warning("unexpected review-threads payload (%s): %s", err, proc.stdout[:300])
+            return None
+        bot_login = ((data.get("viewer") or {}).get("login") or "").strip()
+        for node in conn.get("nodes") or []:
+            if node.get("isResolved"):
+                continue
+            # A long thread keeps its opener (the reply target) and its latest 100
+            # comments, where the follow-ups that need an answer are.
+            recent = (node.get("comments") or {}).get("nodes") or []
+            opener = [c for c in ((node.get("opener") or {}).get("nodes") or [])
+                      if c and c.get("databaseId") not in {r.get("databaseId") for r in recent if r}]
+            comments = [{"author": (c.get("author") or {}).get("login", "?"),
+                         "author_type": (c.get("author") or {}).get("__typename", ""),
+                         "body": c.get("body", ""), "comment_id": c.get("databaseId"),
+                         "created_at": c.get("createdAt")} for c in opener + recent if c]
+            first = comments[0] if comments else {}
+            # The REST reply endpoint takes the OPENING comment's id: replies to it land at
+            # the bottom of the thread whatever its depth.
+            threads.append({"id": node.get("id"), "comment_id": first.get("comment_id"),
+                            "path": node.get("path"), "line": node.get("line"),
+                            "outdated": bool(node.get("isOutdated")), "author": first.get("author", "?"),
+                            "author_type": first.get("author_type", ""), "body": first.get("body", ""),
+                            "comments": comments, "bot_login": bot_login,
+                            "comment_count": (node.get("comments") or {}).get("totalCount") or len(comments)})
+        page = conn.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            break
+        cursor = page.get("endCursor")
+    log.info("PR has %d unresolved review thread(s)", len(threads))
+    return threads
+
+
+def comment_count(thread):
+    return thread.get("comment_count") or len(thread.get("comments") or [])
+
+
+def has_new_comments(thread, seen):
+    """True unless the bot already replied on this thread and nothing was posted since.
+    `seen` maps thread id -> number of comments at the time of the bot's last reply."""
+    n_seen = seen.get(thread.get("id"))
+    return n_seen is None or comment_count(thread) > n_seen
+
+
+def is_bot_thread(thread):
+    """True when the thread was opened by the OCR workflow's bot account (GraphQL says
+    'github-actions', REST says 'github-actions[bot]' — accept both)."""
+    return (thread.get("author") or "").strip().removesuffix("[bot]") == "github-actions"
+
+
+def finding_key(thread):
+    """Identity of a reviewer finding across runs: file plus the opening comment with
+    whitespace, case and line numbers normalized away."""
+    body = re.sub(r"\d+", "#", " ".join(str(thread.get("body", "")).lower().split()))
+    return hashlib.sha256(f"{thread.get('path')}\0{body}".encode()).hexdigest()[:20]
+
+
+def resolve_thread(ops, thread_id):
+    proc = ops.gh_quiet("api", "graphql", "-f",
+                        "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
+                        "-f", f"id={thread_id}")
+    if proc is None or proc.returncode != 0:
+        log.warning("gh api graphql (resolveReviewThread %s) failed: %s", thread_id, proc.stderr[-300:] if proc else "")
+        return False
+    return True
+
+
+def _remember_bot_comment(memory, reply_json):
+    """Record the id of a reply coderbot posted, so the thread view can tell its own
+    words from the operator's (they may share the GitHub account)."""
+    try:
+        cid = json.loads(reply_json).get("id")
+    except (json.JSONDecodeError, AttributeError):
+        return
+    ids = memory.setdefault("bot_comment_ids", [])
+    if cid is not None and cid not in ids:
+        ids.append(cid)
+
+
+def answer_threads(ops, number, threads, output, memory, seen, save):
+    """Act on the worker's `RESOLVE: <thread_id> <reason>` lines: post the reason as a
+    reply on the thread and mark the thread resolved. Only thread ids the controller
+    itself fetched (`threads`) are honored — model output cannot resolve arbitrary
+    threads. Failures are logged and skipped; an unresolved thread is caught again by
+    the next round or the merge gate. Reply receipts, declined findings and the bot's
+    comment ids live in `memory` (the task state); `seen` is the PR's thread watermark.
+    Returns the number resolved."""
+    from execution_identity import digest
+    known = {t["id"]: t for t in threads if t.get("id")}
+    if not known:
+        return 0
+    resolved = 0
+    for line in output.splitlines():
+        if not line.startswith("RESOLVE:"):
+            continue
+        thread_id, _, reason = line[len("RESOLVE:"):].strip().partition(" ")
+        thread = known.get(thread_id)
+        if thread is None:
+            log.warning("ignoring RESOLVE for unknown thread %r", thread_id[:80])
+            continue
+        reason = reason.strip() or "Resolved by codebot."
+        if is_bot_thread(thread) and reason.lower().startswith("declined"):
+            # Remember the verdict: the bot re-raising the same finding gets it again
+            # without another agent turn.
+            memory.setdefault("declined_findings", {})[finding_key(thread)] = reason
+        receipt = digest([thread_id, reason])[:16]
+        posted = memory.setdefault("thread_replies", [])
+        if thread.get("comment_id") and receipt not in posted:  # a retried step never replies twice
+            reply = ops.gh_quiet("api", f"repos/{ops.slug}/pulls/{number}/comments/{thread['comment_id']}/replies",
+                                 "-f", f"body={reason}")
+            if reply is None or reply.returncode != 0:
+                log.warning("could not reply on thread %s: %s", thread_id, reply.stderr[-300:] if reply else "")
+            else:
+                _remember_bot_comment(memory, reply.stdout)
+                posted.append(receipt)
+                del posted[:-200]
+                save()
+        if not is_bot_thread(thread) and not reason.lower().startswith("fixed"):
+            # A human's thread that got an answer but no code change stays open: closing
+            # it over the reviewer's head is their call, not the bot's. It is not picked
+            # up again until the reviewer posts something new.
+            seen[thread_id] = comment_count(thread) + 1
+            log.info("answered human thread %s without resolving it (%s)", thread_id, reason[:100])
+            continue
+        if resolve_thread(ops, thread_id):
+            resolved += 1
+            seen.pop(thread_id, None)
+            log.info("resolved review thread %s (%s)", thread_id, reason[:100])
+    log.info("resolved %d/%d review thread(s) from RESOLVE lines", resolved, len(known))
+    return resolved
+
 # ---- handlers over a target; `ws` adapts the mode (workspace_runner today)
 def rails(ws, state):
     """After each implementation turn: progress pushes and lazy draft PRs (best effort)."""
@@ -516,7 +691,7 @@ def publish(ws, state):
             return closed(state, name, record)
         record.update(state="WAIT_MERGE", merge={"status": value["state"]})
         main.save_state(state)
-    resolve_threads(state)
+    answer_wave(ops, state)
     fresh = [name for name, record in records.items() if record.get("pr_url") and not record.get("announced")]
     state["state"] = "WAIT_MERGE"
     if fresh:
@@ -541,18 +716,17 @@ def publish(ws, state):
             main._finish_task(state, "Verified local-only workspace changes.\n" + status_body(state), reset_repo=False)
 
 
-def resolve_threads(state):
-    """Reply to and resolve the threads the last ADDRESS_PR_THREADS turn answered."""
+def answer_wave(ops, state):
+    """Reply to and resolve the threads the last ADDRESS_PR_THREADS turn answered, per PR."""
     import main
     output = state["workspace"].pop("review_output", None)
     review_data = state.pop("workspace_review", {})
     records = state["workspace"]["repositories"]
     for name, threads in threads_by_repo(review_data).items() if output else ():
-        if name in records and records[name].get("pr_url"):
-            reviewed = {"pr_url": records[name]["pr_url"], "pr_threads": threads,
-                        "pr_threads_seen": records[name].setdefault("review", {}).get("seen", {})}
-            main._resolve_review_threads(reviewed, output, key="pr_threads")
-            records[name]["review"]["seen"] = reviewed.get("pr_threads_seen", {})
+        if name in records and pr_number(records[name]):
+            seen = records[name].setdefault("review", {}).setdefault("seen", {})
+            answer_threads(ops.repo(name), pr_number(records[name]), threads, output, state, seen,
+                           lambda: main.save_state(state))
 
 
 def poll_prs(ws, state):
@@ -585,9 +759,8 @@ def poll_prs(ws, state):
         if value.get("mergeable") == "CONFLICTING":
             conflicts.append(name)
             continue
-        listed = main.unresolved_review_threads(record["pr_url"])
         seen = record.setdefault("review", {}).get("seen", {})
-        fresh = [thread for thread in listed or [] if main.thread_has_new_comments(thread, seen)]
+        fresh = [thread for thread in review_threads(repo, number) or [] if has_new_comments(thread, seen)]
         if fresh:
             threads[name] = fresh
     if conflicts:
@@ -640,7 +813,7 @@ def merge_all(ws, state, force=False):
     problems = precheck(ops, records, order)
     for name in order:
         if records[name].get("merge", {}).get("status") != "MERGED":
-            threads = main.unresolved_review_threads(records[name]["pr_url"])
+            threads = review_threads(ops.repo(name), pr_number(records[name]))
             if threads is None or threads and not force:
                 problems.append(f"{name}: review threads remain or could not be checked")
     if problems:

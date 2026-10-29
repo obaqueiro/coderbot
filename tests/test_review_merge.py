@@ -44,10 +44,10 @@ def human_thread(tid="H1"):
 
 class ThreadHelpers(unittest.TestCase):
     def test_is_ocr_thread_accepts_both_spellings(self):
-        self.assertTrue(main._is_ocr_thread({"author": "github-actions"}))
-        self.assertTrue(main._is_ocr_thread({"author": "github-actions[bot]"}))
-        self.assertFalse(main._is_ocr_thread({"author": "alice"}))
-        self.assertFalse(main._is_ocr_thread({}))
+        self.assertTrue(main.lifecycle.is_bot_thread({"author": "github-actions"}))
+        self.assertTrue(main.lifecycle.is_bot_thread({"author": "github-actions[bot]"}))
+        self.assertFalse(main.lifecycle.is_bot_thread({"author": "alice"}))
+        self.assertFalse(main.lifecycle.is_bot_thread({}))
 
     def test_format_with_ids_for_the_worker(self):
         text = main.format_unresolved_threads([ocr(), human()], ids=True)
@@ -90,9 +90,9 @@ class ThreadHelpers(unittest.TestCase):
 
     def test_thread_has_new_comments(self):
         t = human_thread()
-        self.assertTrue(main.thread_has_new_comments(t, {}))
-        self.assertFalse(main.thread_has_new_comments(t, {"H1": 3}))
-        self.assertTrue(main.thread_has_new_comments(t, {"H1": 2}))
+        self.assertTrue(main.lifecycle.has_new_comments(t, {}))
+        self.assertFalse(main.lifecycle.has_new_comments(t, {"H1": 3}))
+        self.assertTrue(main.lifecycle.has_new_comments(t, {"H1": 2}))
 
     def test_query_failure_returns_none(self):
         proc = subprocess.CompletedProcess([], 1, "", "boom")
@@ -519,13 +519,13 @@ class RepeatedFindings(unittest.TestCase):
         again = dict(bot, id="T2", body="Consider  handling None at line 40")
         other = dict(bot, id="T3", body="Rename this variable")
         state = {"pr_url": PR, "review_threads": [bot]}
-        with patch.object(main, "_is_ocr_thread", return_value=True), \
+        with patch.object(main.lifecycle, "is_bot_thread", return_value=True), \
              patch.object(main.operations, "tool", return_value=Mock(returncode=0, stdout="{}")), \
-             patch.object(main, "resolve_review_thread", return_value=True) as resolve:
+             patch.object(main.lifecycle, "resolve_thread", return_value=True) as resolve:
             main._resolve_review_threads(state, "RESOLVE: T1 declined: None is impossible here")
             left = main._resolve_repeated_findings(state, [again, other])
         self.assertEqual(left, [other])
-        self.assertEqual([c.args[0] for c in resolve.call_args_list], ["T1", "T2"])
+        self.assertEqual([c.args[1] for c in resolve.call_args_list], ["T1", "T2"])
         self.assertEqual(state["review_threads"], [bot])
 
 

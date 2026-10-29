@@ -40,8 +40,8 @@ class ReviewThreads(unittest.TestCase):
         self.assertEqual(thread["comment_id"], 1)  # replies still target the opener
         self.assertEqual(thread["comments"][-1]["body"], "c150")
         self.assertEqual(len(thread["comments"]), 101)
-        self.assertTrue(main.thread_has_new_comments(thread, {"T1": 149}))
-        self.assertFalse(main.thread_has_new_comments(thread, {"T1": 150}))
+        self.assertTrue(main.lifecycle.has_new_comments(thread, {"T1": 149}))
+        self.assertFalse(main.lifecycle.has_new_comments(thread, {"T1": 150}))
 
     def test_bot_comments_read_every_page(self):
         page1 = [{"user": {"login": "github-actions[bot]"}, "body": f"p1-{n}"} for n in range(100)]

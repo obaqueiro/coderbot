@@ -503,7 +503,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
 
     def test_poll_is_throttled_and_covers_every_repository(self):
         self.publish()
-        with patch.object(main, "unresolved_review_threads", return_value=[]), patch.object(main, "handle_wait") as wait, \
+        with patch.object(lifecycle, "review_threads", return_value=[]), patch.object(main, "handle_wait") as wait, \
              patch.object(main, "_finish_task") as finish:
             self.github.calls.clear()
             lifecycle.poll_prs(runner, self.state)
@@ -562,8 +562,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.publish()
         threads = {"https://github.com/example/api/pull/1": [{"id": "T1", "comments": [{"body": "fix api"}]}],
                    "https://github.com/example/ui/pull/2": [{"id": "T2", "comments": [{"body": "fix ui"}]}]}
-        with patch.object(main, "unresolved_review_threads", side_effect=lambda url: threads[url]), \
-             patch.object(main, "thread_has_new_comments", return_value=True):
+        with patch.object(lifecycle, "review_threads", side_effect=lambda ops, number: threads[ops.url(number)]):
             lifecycle.poll_prs(runner, self.state)
         self.assertEqual(self.state["state"], "ADDRESS_PR_THREADS")
         result = SimpleNamespace(session_id="session", output="RESOLVE: T1 fixed: done\nRESOLVE: T2 fixed: done",
@@ -574,9 +573,10 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertIn("T2", turn.call_args.args[1])
         self.assertEqual(self.state["state"], "VERIFYING")
         self.verified()
-        with patch.object(main, "_resolve_review_threads") as resolve:
+        with patch.object(lifecycle, "answer_threads") as answer:
             lifecycle.publish(runner, self.state)
-        self.assertEqual(sorted(call.args[0]["pr_url"] for call in resolve.call_args_list), sorted(threads))
+        self.assertEqual(sorted(call.args[0].url(call.args[1]) for call in answer.call_args_list), sorted(threads))
+        self.assertIs(answer.call_args.args[4], self.state)  # receipts live on the task, not a scratch dict
 
     def test_feature_review_findings_are_data_for_one_fix_wave(self):
         self.edit(self.api)
@@ -613,7 +613,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.github.prs[("api", 1)]["checks"] = [{"conclusion": "FAILURE"}]
         verdict = SimpleNamespace(output=json.dumps({"action": "merge"}))
         with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main, "unresolved_review_threads", return_value=[]):
+             patch.object(lifecycle, "review_threads", return_value=[]):
             runner.reply(self.state, "merge")
             self.assertIn("api: checks are not green", main.email.call_args.args[2])
             self.assertEqual([p["state"] for p in self.github.prs.values()], ["OPEN", "OPEN"])
@@ -637,7 +637,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.github.prs[("ui", 2)]["state"] = "MERGED"
         verdict = SimpleNamespace(output=json.dumps({"action": "merge"}))
         with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main, "unresolved_review_threads", return_value=[]):
+             patch.object(lifecycle, "review_threads", return_value=[]):
             runner.reply(self.state, "merge")
         self.assertNotIn("merge blocked", [call.args[1] for call in main.email.call_args_list])
         merges = [c[0] for c in self.github.calls if c[1:3] == ("pr", "merge")]

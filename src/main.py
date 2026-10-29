@@ -2754,8 +2754,8 @@ def finalize_pr(state: dict, note: str = "") -> None:
         counts = {kind: sum(review_intent.provenance(t) == kind for t in threads)
                   for kind in ("human", "automated", "unknown")}
         body += "Reviewer provenance: " + ", ".join(f"{count} {kind}" for kind, count in counts.items() if count) + ".\n"
-        human = [t for t in threads if not _is_ocr_thread(t)]
-        ocr = [t for t in threads if _is_ocr_thread(t)]
+        human = [t for t in threads if not lifecycle.is_bot_thread(t)]
+        ocr = [t for t in threads if lifecycle.is_bot_thread(t)]
         if human:
             body += (f"Heads up: the PR has {len(human)} unresolved review comment(s); "
                      "I'll address them while waiting, and I will "
@@ -2827,7 +2827,7 @@ def handle_review_wait(state: dict) -> None:
             # push IS expected (await_new_run), never conclude from the old run: the
             # fixes still need their re-review.
             threads = unresolved_review_threads(state["pr_url"])
-            if threads is not None and not [t for t in threads if _is_ocr_thread(t)]:
+            if threads is not None and not [t for t in threads if lifecycle.is_bot_thread(t)]:
                 log.info("no unresolved OCR threads on the processed run; PR is clean")
                 finalize_pr(state)
                 return
@@ -2853,7 +2853,7 @@ def handle_review_wait(state: dict) -> None:
         state["review_head"] = git("rev-parse", "HEAD")
     except Exception:  # noqa: BLE001
         state.pop("review_head", None)
-    ocr = _resolve_repeated_findings(state, [t for t in threads if _is_ocr_thread(t)])
+    ocr = _resolve_repeated_findings(state, [t for t in threads if lifecycle.is_bot_thread(t)])
     if not ocr:
         log.info("no unresolved OCR threads; PR is clean")
         finalize_pr(state)
@@ -2907,7 +2907,7 @@ def _finish_address_review(state: dict, result, head_before: str | None) -> None
         # wait's clean-check retries the query each tick (bounded by its timeout).
         _enter_review_wait(state, expect_new_run=False)
         return
-    ocr = [t for t in remaining if _is_ocr_thread(t)]
+    ocr = [t for t in remaining if lifecycle.is_bot_thread(t)]
     # A resolution-only lap is a review round too; uncounted, it re-entered itself forever.
     state["review_round"] = state.get("review_round", 0) + 1
     if ocr and state["review_round"] < config.REVIEW_MAX_ROUNDS:
@@ -3062,85 +3062,8 @@ def _leave_conflict_resolution(state: dict) -> None:
 # ---------------------------------------------------------------- pre-merge thread resolution
 
 def unresolved_review_threads(pr_url: str) -> list[dict] | None:
-    """All unresolved review threads on the PR — ANY author, not just the OCR bot — via
-    GraphQL (REST doesn't expose thread resolution). Returns None when the query fails,
-    which callers must treat as "could not verify", never as "no threads": this gates an
-    irreversible merge, so it fails closed."""
-    owner_repo, number = _pr_owner_number(pr_url)
-    owner, repo = owner_repo.split("/", 1)
-    # The WHOLE thread is fetched, not just the opener: a reviewer's follow-up ("no, do
-    # it this way") lives in later comments, and the agent must see both it and its own
-    # earlier reply. `viewer` is the bot's own login, used to label those replies.
-    query = """
-    query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-      viewer { login }
-      repository(owner: $owner, name: $repo) {
-        pullRequest(number: $number) {
-          reviewThreads(first: 100, after: $cursor) {
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              id isResolved isOutdated path line
-              opener: comments(first: 1) { nodes { ...c } }
-              comments(last: 100) { totalCount nodes { ...c } } } } } } }
-    fragment c on PullRequestReviewComment { author { login __typename } body databaseId createdAt }"""
-    threads: list[dict] = []
-    cursor = None
-    while True:
-        # -f passes raw strings; only $number (an Int in the query) uses -F's type
-        # coercion. An all-digit cursor or owner under -F would coerce to Int and make
-        # the GraphQL call fail its String! variable types.
-        cmd = ["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
-               "-f", f"repo={repo}", "-F", f"number={number}"]
-        if cursor:
-            cmd += ["-f", f"cursor={cursor}"]
-        proc = _pr_ops().gh_quiet(*cmd)
-        if proc is None or proc.returncode != 0:
-            log.warning("gh api graphql (review threads) failed: %s", proc.stderr[-300:] if proc else "")
-            return None
-        try:
-            data = json.loads(proc.stdout)["data"]
-            conn = data["repository"]["pullRequest"]["reviewThreads"]
-        except (json.JSONDecodeError, KeyError, TypeError) as err:
-            log.warning("unexpected review-threads payload (%s): %s", err, proc.stdout[:300])
-            return None
-        bot_login = ((data.get("viewer") or {}).get("login") or "").strip()
-        for node in conn.get("nodes") or []:
-            if node.get("isResolved"):
-                continue
-            # A long thread keeps its opener (the reply target) and its latest 100
-            # comments, where the follow-ups that need an answer are.
-            recent = (node.get("comments") or {}).get("nodes") or []
-            opener = [c for c in ((node.get("opener") or {}).get("nodes") or [])
-                      if c and c.get("databaseId") not in {r.get("databaseId") for r in recent if r}]
-            comments = [{
-                "author": (c.get("author") or {}).get("login", "?"),
-                "author_type": (c.get("author") or {}).get("__typename", ""),
-                "body": c.get("body", ""),
-                "comment_id": c.get("databaseId"),
-                "created_at": c.get("createdAt"),
-            } for c in opener + recent if c]
-            first = comments[0] if comments else {}
-            threads.append({
-                "id": node.get("id"),
-                # The REST reply endpoint takes the OPENING comment's id: replies to it
-                # land at the bottom of the thread whatever its depth.
-                "comment_id": first.get("comment_id"),
-                "path": node.get("path"),
-                "line": node.get("line"),
-                "outdated": bool(node.get("isOutdated")),
-                "author": first.get("author", "?"),
-                "author_type": first.get("author_type", ""),
-                "body": first.get("body", ""),
-                "comments": comments,
-                "comment_count": (node.get("comments") or {}).get("totalCount") or len(comments),
-                "bot_login": bot_login,
-            })
-        page = conn.get("pageInfo") or {}
-        if not page.get("hasNextPage"):
-            break
-        cursor = page.get("endCursor")
-    log.info("PR has %d unresolved review thread(s)", len(threads))
-    return threads
+    """The PR's unresolved review threads (lifecycle.review_threads); None when unknown."""
+    return lifecycle.review_threads(_pr_ops(pr_url), _pr_owner_number(pr_url)[1])
 
 
 def _comment_label(comment: dict, thread: dict, bot_ids: set) -> tuple[str, bool]:
@@ -3196,89 +3119,13 @@ def format_unresolved_threads(threads: list[dict], ids: bool = False,
     return "\n\n".join(lines)
 
 
-def thread_has_new_comments(thread: dict, seen: dict) -> bool:
-    """True unless the bot already replied on this thread and nothing was posted since.
-    `seen` maps thread id -> number of comments at the time of the bot's last reply
-    (state["pr_threads_seen"])."""
-    n_seen = seen.get(thread.get("id"))
-    if n_seen is None:
-        return True
-    return _comment_count(thread) > n_seen
-
-
-def _comment_count(thread: dict) -> int:
-    return thread.get("comment_count") or len(thread.get("comments") or [])
-
-
-def _is_ocr_thread(thread: dict) -> bool:
-    """True when the thread was opened by the OCR workflow's bot account (GraphQL says
-    'github-actions', REST says 'github-actions[bot]' — accept both)."""
-    author = (thread.get("author") or "").strip()
-    return author.removesuffix("[bot]") == "github-actions"
-
-
 def _resolve_review_threads(state: dict, output: str, key: str = "review_threads") -> int:
-    """Act on the worker's `RESOLVE: <thread_id> <reason>` lines: post the reason as a
-    reply on the thread and mark the thread resolved. Only thread ids the orchestrator
-    itself fetched (state[key]) are honored — model output cannot resolve arbitrary
-    threads. Failures are logged and skipped; an unresolved thread is caught again by
-    the next round or the merge gate. Returns the number resolved."""
-    known = {t["id"]: t for t in state.get(key, []) if t.get("id")}
-    if not known:
+    """Answer and resolve the threads state[key] holds from the worker's RESOLVE lines
+    (lifecycle.answer_threads), with the task's receipts and thread watermark."""
+    if not state.get(key):
         return 0
-    owner_repo, number = _pr_owner_number(state["pr_url"])
-    seen = state.setdefault("pr_threads_seen", {})
-    resolved = 0
-    for line in output.splitlines():
-        if not line.startswith("RESOLVE:"):
-            continue
-        thread_id, _, reason = line[len("RESOLVE:"):].strip().partition(" ")
-        thread = known.get(thread_id)
-        if thread is None:
-            log.warning("ignoring RESOLVE for unknown thread %r", thread_id[:80])
-            continue
-        reason = reason.strip() or "Resolved by codebot."
-        if _is_ocr_thread(thread) and reason.lower().startswith("declined"):
-            # Remember the verdict: the bot re-raising the same finding gets it again
-            # without another agent turn (see handle_review_wait).
-            state.setdefault("declined_findings", {})[_finding_key(thread)] = reason
-        receipt = digest([thread_id, reason])[:16]
-        posted = state.setdefault("thread_replies", [])
-        try:
-            if thread.get("comment_id") and receipt not in posted:  # a retried step never replies twice
-                reply = _pr_ops().gh_quiet("api", f"repos/{owner_repo}/pulls/{number}/comments/"
-                                           f"{thread['comment_id']}/replies", "-f", f"body={reason}")
-                if reply is None or reply.returncode != 0:
-                    log.warning("could not reply on thread %s: %s",
-                                thread_id, reply.stderr[-300:] if reply else "")
-                else:
-                    _remember_bot_comment(state, reply.stdout)
-                    posted.append(receipt)
-                    del posted[:-200]
-                    save_state(state)
-            if _answered_only(thread, reason):
-                # A human's thread that got an answer but no code change stays open:
-                # closing it over the reviewer's head is their call, not the bot's. It is
-                # not picked up again until the reviewer posts something new.
-                seen[thread_id] = _comment_count(thread) + 1
-                log.info("answered human thread %s without resolving it (%s)",
-                         thread_id, reason[:100])
-                continue
-            if resolve_review_thread(thread_id):
-                resolved += 1
-                seen.pop(thread_id, None)
-                log.info("resolved review thread %s (%s)", thread_id, reason[:100])
-        except (subprocess.TimeoutExpired, TimeoutError, OSError):
-            log.warning("resolving thread %s timed out", thread_id)
-    log.info("resolved %d/%d review thread(s) from RESOLVE lines", resolved, len(known))
-    return resolved
-
-
-def _finding_key(thread: dict) -> str:
-    """Identity of a reviewer finding across runs: file plus the opening comment with
-    whitespace, case and line numbers normalized away."""
-    body = re.sub(r"\d+", "#", " ".join(str(thread.get("body", "")).lower().split()))
-    return hashlib.sha256(f"{thread.get('path')}\0{body}".encode()).hexdigest()[:20]
+    return lifecycle.answer_threads(_pr_ops(state["pr_url"]), _pr_owner_number(state["pr_url"])[1], state[key],
+                                    output, state, state.setdefault("pr_threads_seen", {}), lambda: save_state(state))
 
 
 def _resolve_repeated_findings(state: dict, threads: list[dict]) -> list[dict]:
@@ -3288,8 +3135,8 @@ def _resolve_repeated_findings(state: dict, threads: list[dict]) -> list[dict]:
     declined = state.get("declined_findings") or {}
     reasons = {}
     for t in threads:
-        if _finding_key(t) in declined:
-            reasons[t["id"]] = declined[_finding_key(t)] + " (already evaluated in an earlier round)"
+        if lifecycle.finding_key(t) in declined:
+            reasons[t["id"]] = declined[lifecycle.finding_key(t)] + " (already evaluated in an earlier round)"
         elif t.get("outdated"):
             reasons[t["id"]] = "fixed: the code this comment refers to has changed since (outdated)."
     if not reasons:
@@ -3305,36 +3152,6 @@ def _resolve_repeated_findings(state: dict, threads: list[dict]) -> list[dict]:
             state["review_threads"] = saved
     log.info("resolved %d repeated or outdated bot finding(s) without an agent turn", len(reasons))
     return [t for t in threads if t["id"] not in reasons]
-
-
-def _remember_bot_comment(state: dict, reply_json: str) -> None:
-    """Record the id of a reply coderbot posted, so the thread view can tell its own
-    words from the operator's (they may share the GitHub account)."""
-    try:
-        cid = json.loads(reply_json).get("id")
-    except (json.JSONDecodeError, AttributeError):
-        return
-    if cid is not None:
-        ids = state.setdefault("bot_comment_ids", [])
-        if cid not in ids:
-            ids.append(cid)
-
-
-def _answered_only(thread: dict, reason: str) -> bool:
-    """A RESOLVE reason on a human-opened thread that reports no code change (anything
-    not starting with "fixed")."""
-    return not _is_ocr_thread(thread) and not reason.lower().startswith("fixed")
-
-
-def resolve_review_thread(thread_id: str) -> bool:
-    proc = _pr_ops().gh_quiet("api", "graphql",
-                     "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
-                     "-f", f"id={thread_id}")
-    if proc is None or proc.returncode != 0:
-        log.warning("gh api graphql (resolveReviewThread %s) failed: %s", thread_id,
-                    proc.stderr[-300:] if proc else "")
-        return False
-    return True
 
 
 def do_merge_reply(state: dict, reply: str) -> None:
@@ -4084,7 +3901,7 @@ def handle_merge_wait(state: dict) -> None:
         # A human thread the bot already answered (without a code change) is left open
         # for the reviewer to close; it re-enters the queue only once they post again.
         seen = state.get("pr_threads_seen") or {}
-        threads = [t for t in threads if thread_has_new_comments(t, seen)]
+        threads = [t for t in threads if lifecycle.has_new_comments(t, seen)]
     if threads is None:
         log.warning("could not fetch review threads; checking the inbox only this tick")
     elif not threads:
