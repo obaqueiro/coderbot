@@ -239,7 +239,7 @@ def run_process(argv, cwd, env, timeout, log, *, cancelled=None):
         except BaseException:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):  # macOS: EPERM for a group of zombies
                 pass
             process.wait()
             raise
@@ -247,7 +247,7 @@ def run_process(argv, cwd, env, timeout, log, *, cancelled=None):
             # Even a successful CLI/test can leave background tools in its group.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
     with Path(log).open("rb") as stream:
         stream.seek(max(0, stream.seek(0, os.SEEK_END) - 64000))

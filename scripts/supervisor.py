@@ -212,7 +212,7 @@ class Supervisor:
         elif self.worker is not None:
             try:
                 os.killpg(self.worker.pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):  # macOS: EPERM for a group of zombies
                 pass
         if self.worker is not None:
             try:
@@ -244,7 +244,7 @@ class Supervisor:
         elif self.worker is not None:
             try:
                 os.killpg(self.worker.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
             self.worker.wait(timeout=5)
         self.worker = None

@@ -76,21 +76,40 @@ class SupervisorWalk(unittest.TestCase):
             self.log.close()
         self.log = (self.data / "supervisor.log").open("a")
         self.process = subprocess.Popen(
-            [sys.executable, *([str(FIXTURE / "stall_promotion.py")] if stall else []), str(ROOT / "scripts/supervisor.py"),
+            [sys.executable, "-X", "faulthandler", *([str(FIXTURE / "stall_promotion.py")] if stall else []), str(ROOT / "scripts/supervisor.py"),
              "--source", str(self.source), "--data", str(self.data), "--mode", mode],
             env=environment, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
 
     def shutdown(self):
+        ignored = False
         if self.process and self.process.poll() is None:
             self.process.send_signal(signal.SIGTERM)
             try:
                 self.process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGKILL)
+                ignored = True
+                os.kill(self.process.pid, signal.SIGABRT)  # faulthandler: every thread's stack into the log
+                time.sleep(2)
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except PermissionError:
+                    pass
                 self.process.wait()
         if self.log:
             self.log.close()
-        self.assertEqual(self.orphans(), [], "orphan worker/agent processes")
+        if ignored:
+            for pid in self.pids():
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            self.fail("the supervisor ignored SIGTERM for 30 s:\n" + (self.data / "supervisor.log").read_text()[-6000:])
+        orphans = self.orphans()
+        if orphans:
+            processes = subprocess.run(["ps", "-o", "pid,ppid,pgid,stat,etime,command", "-p", ",".join(map(str, orphans))],
+                                       capture_output=True, text=True).stdout
+            self.fail(f"orphan worker/agent processes {orphans}:\n{processes}\nexit={self.process.returncode}\n"
+                      + (self.data / "supervisor.log").read_text()[-3000:])
 
     def pids(self):
         """Every worker and repair-agent process the walk ever started."""

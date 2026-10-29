@@ -487,6 +487,19 @@ class SelfHealingTests(unittest.TestCase):
         kinds = [read_json(p)["kind"] for p in (self.repairs.home / "notifications").glob("*.json")]
         self.assertIn("repair_rolled_back", kinds)
 
+    def test_a_stop_during_a_process_wait_survives_killpg_eperm(self):
+        # macOS returns EPERM from killpg when the group holds only a zombie; a PermissionError
+        # there replaced StopRequested, notify() swallowed it and SIGTERM was lost for good.
+        stops = iter([False, True])
+        def cancelled():
+            if next(stops):
+                raise StopRequested()
+            return False
+        with patch("scripts.selfheal.os.killpg", side_effect=PermissionError(1, "Operation not permitted")):
+            with self.assertRaises(StopRequested):
+                run_process([sys.executable, "-c", "import time; time.sleep(1.5)"], self.root, {"PATH": os.environ["PATH"]},
+                            30, self.root / "wait.log", cancelled=cancelled)
+
     def test_stop_signal_while_spawning_the_worker_is_deferred_until_it_is_tracked(self):
         import scripts.supervisor as module
         supervisor = Supervisor(self.source, self.data, "observe")
