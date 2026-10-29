@@ -1644,8 +1644,40 @@ def _internal_review_prompt(state: dict) -> str:
             + (prompts.fenced_authoritative("verification scope", state["verification_guidance"]) + "\n"
                if state.get("verification_guidance") else "")
             + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"], review_guide=_review_guide(state),
-                             scope=prompts.render(prompts.RE_REVIEW_SCOPE if state.get("review_fix_base") else prompts.REVIEW_SCOPE,
-                                                  slug=state["slug"], base=state.get("review_fix_base") or state.get("base_sha", "HEAD~1"))))
+                             scope=_review_scope(state)))
+
+
+def _review_scope(state: dict) -> str:
+    base = state.get("review_fix_base") or state.get("base_sha", "HEAD~1")
+    if state.get("review_fix_base"):
+        return prompts.render(prompts.RE_REVIEW_SCOPE, slug=state["slug"], base=base)
+    parts = state.get("review_parts")
+    if parts:
+        n = state.get("review_part", 0)
+        return prompts.render(prompts.PART_SCOPE, slug=state["slug"], base=base, part=n + 1, parts=len(parts),
+                              files=" ".join(parts[n]))
+    return prompts.render(prompts.REVIEW_SCOPE, slug=state["slug"], base=base)
+
+
+def _review_parts(state: dict) -> list[list[str]] | None:
+    """Two halves of the changed files by changed lines, when the diff is too big for
+    one review; None otherwise (or when the diff cannot be read)."""
+    try:
+        rows = [line.split("\t", 2) for line in git("diff", "--numstat", f"{state['base_sha']}...HEAD").splitlines()]
+        sizes = [(path, (int(a) if a.isdigit() else 0) + (int(d) if d.isdigit() else 0)) for a, d, path in rows]
+    except (KeyError, ValueError, RuntimeError):
+        return None
+    total = sum(size for _, size in sizes)
+    if total <= config.REVIEW_SPLIT_LINES or len(sizes) < 2:
+        return None
+    first, running = [], 0
+    for path, size in sizes:
+        if running >= total / 2 and first:
+            break
+        first.append(path)
+        running += size
+    rest = [path for path, _ in sizes if path not in first]
+    return [first, rest] if rest else None
 
 
 def _verification_blocked(state: dict, kind: str, detail: str) -> None:
@@ -1898,6 +1930,17 @@ def _complete_internal_review(state: dict, result) -> None:
             _begin_check_repair(state, report, resume="INTERNAL_REVIEW")
             return
     review = (getattr(result, "data", None) or {}).get("review") or {}
+    parts = state.get("review_parts") or []
+    if parts and not state.get("review_fix_base"):
+        # Collect the findings of every part; the fix wave and re-review cover them all.
+        seen = state.setdefault("review_part_findings", [])
+        seen.extend(f for f in review.get("findings") or [] if isinstance(f, str))
+        state["review_part_open"] = state.get("review_part_open", 0) + int(review.get("critical") or 0) \
+            + int(review.get("important") or 0)
+        if state.get("review_part", 0) + 1 < len(parts):
+            state["review_part"] = state.get("review_part", 0) + 1
+            return  # next part
+        review = {"critical": state["review_part_open"], "important": 0, "findings": seen}
     if (review.get("critical") or review.get("important")) and not state.get("review_fix_base"):
         # One fix wave in the implementer's session, then one re-review of its commits.
         state["review_fix_base"] = git("rev-parse", "HEAD")
@@ -1951,6 +1994,8 @@ def _review_concerns(state: dict) -> str:
 def do_internal_review(state: dict) -> None:
     if _scope_drift(state):
         return
+    if not state.get("review_fix_base") and "review_parts" not in state:
+        state["review_parts"] = _review_parts(state)
     before = (git("rev-parse", "HEAD"), content_snapshot(config.REPO_PATH))
     result = agent_runner.resume(state["session_id"], _internal_review_prompt(state))
     if (git("rev-parse", "HEAD"), content_snapshot(config.REPO_PATH)) != before:

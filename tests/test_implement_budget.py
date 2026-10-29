@@ -158,3 +158,29 @@ class FeatureReviewWave(unittest.TestCase):
             main.do_internal_review(state)
         preserve.assert_called_once()
         gate.assert_called_once()
+
+
+class LargeReviewSplit(unittest.TestCase):
+    def test_a_large_diff_is_reviewed_in_two_parts_then_one_fix_wave(self):
+        numstat = "1500\t0\tsrc/a.py\n900\t100\tsrc/b.py\n10\t0\ttests/test_a.py"
+        state = {"state": "INTERNAL_REVIEW", "slug": "task", "item": "task", "session_id": "s", "base_sha": "base"}
+        def git(*args):
+            return numstat if args[0] == "diff" else "head"
+        def reviewed(findings):
+            return SimpleNamespace(output="r", attachments=[], session_id="rev", question=None, data={
+                "status": "done", "summary": "s", "review": {"critical": len(findings), "important": 0,
+                                                             "findings": findings, "tests": ["t: pass"]}})
+        prompts_seen = []
+        with patch.object(main, "git", side_effect=git), patch.object(main, "trail"), \
+             patch.object(main.config, "REVIEW_SPLIT_LINES", 2000), \
+             patch.object(main, "content_snapshot", return_value="same"):
+            for findings in (["src/a.py: bug"], []):
+                with patch.object(main.agent_runner, "resume", return_value=reviewed(findings)) as resume:
+                    main.do_internal_review(state)
+                prompts_seen.append(resume.call_args.args[1])
+        self.assertIn("part 1 of 2", prompts_seen[0])
+        self.assertIn("-- src/a.py", prompts_seen[0])
+        self.assertIn("part 2 of 2", prompts_seen[1])
+        self.assertIn("src/b.py tests/test_a.py", prompts_seen[1])
+        self.assertEqual(state["state"], "APPLY_FEEDBACK")
+        self.assertEqual(state["review_findings"], ["src/a.py: bug"])

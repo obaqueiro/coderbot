@@ -173,3 +173,18 @@ class OverlongPaths(unittest.TestCase):
         # Python 3.12's Path.is_file() raises ENAMETOOLONG for a >255-byte component.
         line = "ATTACH: " + str(claude_runner.OUTBOX_DIR / ("captura de la pantalla final " * 20))
         self.assertEqual(claude_runner.ClaudeResult("s", "done\n" + line).attachments, [])
+
+
+class PhaseModels(unittest.TestCase):
+    def test_review_and_escalation_can_use_their_own_models(self):
+        import agent_runner
+        import claude_runner
+        for state, expected in (({"state": "INTERNAL_REVIEW"}, "opus"), ({"state": "IMPLEMENTING"}, ""),
+                                ({"state": "IMPLEMENTING", "fresh_retries": 1}, "sonnet")):
+            token = agent_runner._task_context.set(state)
+            try:
+                with self.subTest(state=state), patch.object(claude_runner.config, "REVIEW_MODEL", "opus"), \
+                     patch.object(claude_runner.config, "ESCALATION_MODEL", "sonnet"):
+                    self.assertEqual(claude_runner._phase_model(), expected)
+            finally:
+                agent_runner._task_context.reset(token)

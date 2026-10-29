@@ -206,10 +206,22 @@ def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
 
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
+def _phase_model() -> str:
+    """CODEBOT_REVIEW_MODEL for the feature review; CODEBOT_ESCALATION_MODEL for the
+    implementer once it has been escalated to a fresh session."""
+    import agent_runner
+    phase, state = tool_policy.current_phase(), agent_runner._task_context.get() or {}
+    if phase == "INTERNAL_REVIEW":
+        return config.REVIEW_MODEL
+    if phase == "IMPLEMENTING" and state.get("fresh_retries"):
+        return config.ESCALATION_MODEL
+    return ""
+
+
 def _invoke(args: list[str], prompt: str, *, effort=None, structured=False, model=None) -> ClaudeResult:
     global _fallback_until
     options = {"effort": effort} if effort is not None else {}
-    proc, model = _invoke_with_model(args, prompt, model or _active_model(), **options)
+    proc, model = _invoke_with_model(args, prompt, model or _phase_model() or _active_model(), **options)
     if (proc.returncode != 0 and _is_usage_exhausted(proc) and _fallback_model()
             and model != _fallback_model()):
         log.warning("model %s is out of usage credits; falling back to %s for %ds",

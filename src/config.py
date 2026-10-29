@@ -194,6 +194,11 @@ TOOL_POLICY = (os.environ.get("CODEBOT_TOOL_POLICY") or "on").strip().lower() !=
 # Model for one-shot utility calls (reply classification, PR title, task language).
 # Empty uses CLAUDE_MODEL. Claude Code only; OpenCode keeps its role models.
 UTILITY_MODEL = (os.environ.get("CODEBOT_UTILITY_MODEL") or "").strip()
+# Optional stronger models for the feature review and for the one fresh-session
+# escalation of a stalled implementer. Empty uses CLAUDE_MODEL. Claude Code only.
+REVIEW_MODEL = (os.environ.get("CODEBOT_REVIEW_MODEL") or "").strip()
+ESCALATION_MODEL = (os.environ.get("CODEBOT_ESCALATION_MODEL") or "").strip()
+
 # Open a draft PR as soon as the proposal is approved and push after every implementation
 # turn, so the work is visible while it progresses; "off" opens the PR at the end.
 DRAFT_PR = (os.environ.get("CODEBOT_DRAFT_PR") or "on").strip().lower() != "off"
@@ -311,6 +316,9 @@ SELF_HEAL_CODE_REVIEW = (os.environ.get("CODEBOT_SELF_HEAL_CODE_REVIEW") or "on"
 REVIEW_WAIT_TIMEOUT_SECONDS = _int("CODEBOT_REVIEW_WAIT_TIMEOUT", 45 * 60)
 # Cap the fix<->re-review loop so a comment codebot can't resolve doesn't stall the PR.
 REVIEW_MAX_ROUNDS = _int("CODEBOT_REVIEW_MAX_ROUNDS", 3)
+# A feature diff above this many changed lines is reviewed in two passes (plus the
+# one re-review): at most three reviews per task.
+REVIEW_SPLIT_LINES = _int("CODEBOT_REVIEW_SPLIT_LINES", 2000)
 # Characters of per-repository diff stats a workspace feature review starts from.
 REVIEW_CONTEXT_CHARS = _int("CODEBOT_REVIEW_CONTEXT_CHARS", 12000)
 

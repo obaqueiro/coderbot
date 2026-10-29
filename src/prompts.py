@@ -200,6 +200,7 @@ Done when: the change is reviewed. Fill review: critical, important and minor = 
 """
 
 REVIEW_SCOPE = "Review `git diff $base...HEAD` against openspec/changes/$slug/ (or its archive): spec compliance first, then code quality."
+PART_SCOPE = "This change is large, so it is reviewed in parts; this is part $part of $parts. Review `git diff $base...HEAD -- $files` against openspec/changes/$slug/ (or its archive): spec compliance first, then code quality. Other parts are reviewed separately."
 RE_REVIEW_SCOPE = "Re-review only the fix commits, `git diff $base...HEAD`: do they resolve your earlier findings without new problems?"
 
 FIX_REVIEW = """The feature review of $slug found the issues below. Task: handle them with receiving-code-review.
