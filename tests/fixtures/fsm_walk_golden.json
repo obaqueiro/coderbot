@@ -1,0 +1,166 @@
+{
+ "gh": [
+  [
+   "pr",
+   "list",
+   "--state",
+   "open",
+   "--head",
+   "walkbot-add-a-greeting-function",
+   "--json",
+   "url",
+   "--limit",
+   "1"
+  ],
+  [
+   "pr",
+   "create",
+   "--draft",
+   "--base",
+   "main",
+   "--head",
+   "walkbot-add-a-greeting-function",
+   "--title",
+   "Add greeting",
+   "--body",
+   "<body>"
+  ],
+  [
+   "pr",
+   "view",
+   "https://github.com/acme/walk/pull/1",
+   "--json",
+   "state,headRefName,headRefOid,baseRefName,isCrossRepository"
+  ],
+  [
+   "pr",
+   "edit",
+   "https://github.com/acme/walk/pull/1",
+   "--title",
+   "Add greeting",
+   "--body",
+   "<body>"
+  ],
+  [
+   "pr",
+   "ready",
+   "https://github.com/acme/walk/pull/1"
+  ],
+  [
+   "pr",
+   "view",
+   "https://github.com/acme/walk/pull/1",
+   "--json",
+   "state,headRefName,headRefOid,baseRefName,isCrossRepository"
+  ],
+  [
+   "api",
+   "graphql",
+   "-f",
+   "query=<reviewThreads>",
+   "-f",
+   "owner=acme",
+   "-f",
+   "repo=walk",
+   "-F",
+   "number=1"
+  ],
+  [
+   "api",
+   "graphql",
+   "-f",
+   "query=<reviewThreads>",
+   "-f",
+   "owner=acme",
+   "-f",
+   "repo=walk",
+   "-F",
+   "number=1"
+  ],
+  [
+   "pr",
+   "view",
+   "https://github.com/acme/walk/pull/1",
+   "--json",
+   "state,mergeable"
+  ],
+  [
+   "pr",
+   "view",
+   "https://github.com/acme/walk/pull/1",
+   "--json",
+   "state,mergeable"
+  ],
+  [
+   "api",
+   "graphql",
+   "-f",
+   "query=<reviewThreads>",
+   "-f",
+   "owner=acme",
+   "-f",
+   "repo=walk",
+   "-F",
+   "number=1"
+  ],
+  [
+   "pr",
+   "view",
+   "https://github.com/acme/walk/pull/1",
+   "--json",
+   "state,headRefName,headRefOid,baseRefName,isCrossRepository"
+  ],
+  [
+   "pr",
+   "merge",
+   "https://github.com/acme/walk/pull/1",
+   "--squash",
+   "--match-head-commit",
+   "<sha>"
+  ]
+ ],
+ "pushes": [
+  {
+   "ref": "refs/heads/walkbot-add-a-greeting-function",
+   "op": "create"
+  },
+  {
+   "ref": "refs/heads/walkbot-add-a-greeting-function",
+   "op": "update"
+  },
+  {
+   "ref": "refs/heads/walkbot-add-a-greeting-function",
+   "op": "update"
+  }
+ ],
+ "sent": [
+  "Exploration",
+  "Proposal",
+  "proposal for review",
+  "Awaiting approval",
+  "Implementation",
+  "draft PR",
+  "Verification",
+  "Verification",
+  "Verification",
+  "Archiving",
+  "Archiving",
+  "PR ready for review",
+  "PR ready for review",
+  "task complete"
+ ],
+ "states": [
+  "IDLE",
+  "EXPLORING",
+  "PROPOSING",
+  "WAIT_APPROVAL",
+  "IMPLEMENTING",
+  "VERIFYING",
+  "INTERNAL_REVIEW",
+  "E2E",
+  "ARCHIVING",
+  "OPEN_PR",
+  "WAIT_MERGE",
+  "IDLE"
+ ]
+}
