@@ -1,6 +1,5 @@
 """Codebot orchestrator: works the Google Doc backlog one task at a time,
 communicating with the user exclusively by email."""
-import errno
 import fcntl
 import os
 import copy
@@ -12,8 +11,6 @@ import logging
 import re
 import secrets
 import signal
-import socket
-import ssl
 import subprocess
 import threading
 import time
@@ -28,6 +25,7 @@ import phase_checkpoint
 import task_records
 import repo_provenance
 import diagnostics
+import errors
 import feedback
 import parallel_conversation
 import replanning
@@ -53,7 +51,6 @@ import milestones
 import task_phases
 import proposal_package
 import task_source
-from task_text import MalformedPayload
 import turn_control
 import conversation as gmail_client
 import privatebin
@@ -5308,37 +5305,8 @@ def _resume_held_task(state: dict, hold: dict) -> None:
 
 
 def _is_transient_network_error(error: BaseException) -> bool:
-    """A network blip talking to Gmail/GitHub (TLS EOF, connection reset, DNS, timeout,
-    5xx/429), as opposed to a fault in the state being executed."""
-    if isinstance(error, (ssl.SSLError, ConnectionError, TimeoutError,
-                          socket.gaierror, socket.herror, MalformedPayload)):
-        return True
-    if type(error).__module__.startswith("httplib2"):  # ServerNotFoundError & co.
-        return True
-    if isinstance(error, subprocess.TimeoutExpired):  # a git/gh call outlived its timeout
-        return True
-    # Resource exhaustion and I/O errors are environment problems: retry with backoff
-    # and tell the user, instead of burning the failure budget as if the phase were wrong.
-    if isinstance(error, OSError) and error.errno in _TRANSIENT_ERRNOS:
-        return True
-    # git/gh/CLI wrappers raise RuntimeError with the tool's stderr in the message.
-    if isinstance(error, (RuntimeError, subprocess.CalledProcessError)) and \
-            _TRANSIENT_TOOL_ERROR.search(f"{error} {getattr(error, 'stderr', '') or ''}"):
-        return True
-    status = getattr(getattr(error, "resp", None), "status", None)  # googleapiclient HttpError
-    return status in (429, 500, 502, 503, 504)
-
-
-_TRANSIENT_ERRNOS = {errno.ENOSPC, errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.EAGAIN,
-                     errno.EBUSY, errno.EIO, errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNREFUSED,
-                     errno.EHOSTUNREACH, errno.ENETUNREACH}
-_TRANSIENT_TOOL_ERROR = re.compile(
-    r"could not resolve host|unable to access|connection (?:timed out|reset|refused)|"
-    r"operation timed out|network is unreachable|temporary failure in name resolution|"
-    r"tls handshake|gnutls|ssl_|early eof|the remote end hung up|"
-    r"(?:http|status|error)[ :/]*(?:429|500|502|503|504)\b|"
-    r"bad gateway|service unavailable|gateway time-?out|rate limit|secondary rate|"
-    r"api rate|overloaded", re.IGNORECASE)
+    """A service or environment outage, as opposed to a fault in the step (see errors.kind)."""
+    return errors.kind(error) == errors.TRANSIENT
 
 
 def _request_verification(state: dict, note: str = "") -> None:
@@ -6562,6 +6530,13 @@ def _run_loop() -> None:
                 else:
                     log.warning("cycle failed in %s on a transient network error (%s: %s); "
                                 "retrying in %ss", prev, type(error).__name__, error, backoff)
+            elif errors.kind(error) == errors.FATAL and state.get("item") and prev != "WAIT_STUCK":
+                # Retrying cannot fix a missing credential or a wrong target: ask now.
+                log.error("cycle failed in %s on a fatal error (%s: %s)", prev, type(error).__name__, error)
+                try:
+                    _enter_stuck(state, prev, f"This step cannot continue without your help: {error}")
+                except Exception:
+                    log.exception("failed to report fatal error in %s", prev)
             else:
                 failures = state.setdefault("failures", {})
                 failures[prev] = failures.get(prev, 0) + 1
