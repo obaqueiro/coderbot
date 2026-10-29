@@ -14,10 +14,10 @@ import uuid
 
 if __package__:
     from .selfheal import (Repairs, Runbooks, RepairError, RepairCancelled, atomic_json, read_json, exclusive, epoch, eligible,
-                          redact, run_process, safe_test_environment, state_binding, typed)
+                          redact, run_process, safe_test_environment, state_binding, typed, PROTECTED_FILES)
 else:
     from selfheal import (Repairs, Runbooks, RepairError, RepairCancelled, atomic_json, read_json, exclusive, epoch, eligible,
-                         redact, run_process, safe_test_environment, state_binding, typed)
+                         redact, run_process, safe_test_environment, state_binding, typed, PROTECTED_FILES)
 
 
 class StopRequested(BaseException):
@@ -367,9 +367,19 @@ class Supervisor:
             for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
                 if os.environ.get(name):
                     env[name] = os.environ[name]
+            # S5: the same PreToolUse guard as the worker's agent limits writes to the
+            # candidate's src/ and tests/, never its protected files (fails open; the
+            # patch validation and live-tree check still apply after the agent).
+            env["CODEBOT_POLICY"] = json.dumps({"phase": "REPAIR", "repo": str(candidate), "denied": [],
+                "write_scope": ["src", "tests"], "outbox": str(folder / "agent"),
+                "protected": [str(candidate / name) for name in sorted(PROTECTED_FILES)]})
+            guard = self.source / "agent-plugin/runtime/guard.py"
+            hooks = {"PreToolUse": [{"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [
+                {"type": "command", "command": f"python3 {guard} || true", "timeout": 5}]}]}
             argv = ["claude", "-p", "--dangerously-skip-permissions", "--setting-sources", "",
                     "--settings", json.dumps({"permissions": {"deny": REPAIR_DENIED_CLAUDE
-                                                              + repair_denied_reads(self.data, folder)}}),
+                                                              + repair_denied_reads(self.data, folder)},
+                                              "hooks": hooks}),
                     "--disallowedTools", "Task", "Agent", "--", prompt]
         else:
             raise RepairError("Unsupported repair coding CLI")

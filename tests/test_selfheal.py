@@ -752,3 +752,23 @@ class TypedIncidents(unittest.TestCase):
         self.assertEqual(self.crash_of(supervisor)["class"], "fatal")
         (supervisor.source / "src/main.py").write_text("import sys\nsys.exit(0)\n")
         self.assertIsNone(self.crash_of(supervisor))
+
+
+class RepairGuard(unittest.TestCase):
+    def test_the_repair_policy_keeps_writes_in_the_candidates_src_and_tests(self):
+        import json as _json
+        import subprocess as _subprocess
+        guard = Path(__file__).resolve().parent.parent / "agent-plugin/runtime/guard.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = Path(tmp) / "candidate"
+            policy = {"phase": "REPAIR", "repo": str(candidate), "denied": [], "write_scope": ["src", "tests"],
+                      "outbox": str(Path(tmp) / "agent"), "protected": [str(candidate / "src/config.py")]}
+            def decide(path):
+                out = _subprocess.run([sys.executable, str(guard)], input=_json.dumps(
+                    {"tool_name": "Write", "tool_input": {"file_path": str(candidate / path)}, "cwd": str(candidate)}),
+                    capture_output=True, text=True, env={**os.environ, "CODEBOT_POLICY": _json.dumps(policy)}).stdout
+                return "deny" if '"deny"' in out else "allow"
+            self.assertEqual(decide("src/bug.py"), "allow")
+            self.assertEqual(decide("tests/test_selfheal_regression_x.py"), "allow")
+            self.assertEqual(decide("src/config.py"), "deny")
+            self.assertEqual(decide("Dockerfile"), "deny")
