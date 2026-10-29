@@ -184,3 +184,34 @@ class StagedChecksTests(unittest.TestCase):
         check_plan.remember(self.state, 'CHECK_PLAN: {"version":1,"checks":[{"id":"full","argv":["playwright","test"]}]}')
         check_plan.remember(self.state, 'CHECK_PLAN: {"version":1,"checks":[{"id":"unit","argv":["pytest"]}]}')
         self.assertEqual({c["id"] for c in self.state["reported_check_plan"]}, {"full", "unit"})
+
+
+class ChangedSpecSelection(unittest.TestCase):
+    def run_plan(self, specs):
+        import tempfile
+        import staged_checks
+        from pathlib import Path
+        from unittest.mock import Mock, patch
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "e2e").mkdir()
+            (repo / "e2e/run.sh").write_text("#!/bin/sh\n")
+            full = check_plan.Check("e2e", ["./run.sh"], cwd="e2e", kind="e2e", reporter="playwright")
+            ran = []
+            def execute_plan(selected, *args, **kwargs):
+                ran.extend(selected)
+                return [{"status": "pass", "test_count": 2} for _ in selected]
+            store = Mock(list=Mock(return_value=[]))
+            with patch.object(staged_checks.config, "REPO_PATH", repo), \
+                 patch("evidence.detect_branch_specs", return_value=specs), \
+                 patch.object(staged_checks.checks, "execute_plan", side_effect=execute_plan):
+                return staged_checks.run({}, [full], repo, store), ran
+
+    def test_full_harness_runs_only_the_specs_the_branch_changed(self):
+        report, ran = self.run_plan(["e2e/tests/export.spec.ts"])
+        self.assertEqual(report["stage"], "complete")
+        self.assertEqual([(c.id, c.argv, c.scope) for c in ran], [("e2e:changed", ["./run.sh", "export.spec.ts"], "focused")])
+
+    def test_no_changed_specs_needs_no_e2e(self):
+        report, ran = self.run_plan([])
+        self.assertEqual((report["stage"], ran), ("complete", []))

@@ -1,6 +1,10 @@
 """Cheap checks and selected E2E gate features; full audits require a separate call."""
+from dataclasses import replace
+from pathlib import Path
+
 import check_plan
 import checks
+import config
 
 
 def _audit_history(full, repo, store, task):
@@ -20,6 +24,16 @@ def _audit_history(full, repo, store, task):
                             "historical": True})
     return history or [{"check": c.id, "status": "not_run", "required": False,
                         "historical": False, "reason": "full_suite_not_required_for_feature"} for c in full]
+
+
+def _changed_specs(full, repo):
+    """The harness run selected to the spec files this branch changed; [] when it
+    changed none (then no E2E is needed), None when the diff cannot tell."""
+    if Path(repo).resolve() != config.REPO_PATH.resolve() or len(full) != 1:
+        return None
+    import evidence
+    specs = sorted({Path(spec).name for spec in evidence.detect_branch_specs(None)})
+    return [replace(full[0], id="e2e:changed", argv=[*full[0].argv, *specs], scope="focused", kind="e2e")] if specs else []
 
 
 def run(state, plan, repo, store, *, evaluate=None, audit=False):
@@ -56,6 +70,13 @@ def run(state, plan, repo, store, *, evaluate=None, audit=False):
     if not execute(cheap):
         return report("unit_functional")
     invalid = [c for c in focused if not check_plan.has_e2e_selection(c)]
+    if full and not focused and not invalid and not audit:
+        # No repair lap just to name the specs the diff already names.
+        derived = _changed_specs(full, repo)
+        if derived == []:
+            full = []  # the branch changed no specs: E2E is not required
+        elif derived:
+            focused = derived
     if (full and not focused) or invalid:
         issues = [{"check": c.id, "argv": c.argv, "cwd": c.cwd,
                    "reason": "unfiltered_e2e_registered_as_focused"} for c in invalid]
