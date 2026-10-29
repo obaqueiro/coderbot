@@ -16,7 +16,7 @@ CARDS = {"EXPLORE": prompts.EXPLORE, "PROPOSE": prompts.PROPOSE, "REVISE_PROPOSA
          "IMPLEMENT": prompts.IMPLEMENT, "VERIFY": prompts.VERIFY, "INTERNAL_REVIEW": prompts.INTERNAL_REVIEW,
          "FIX_ARCHIVE": prompts.FIX_ARCHIVE, "ADDRESS_REVIEW": prompts.ADDRESS_REVIEW,
          "ADDRESS_PR_THREADS": prompts.ADDRESS_PR_THREADS, "APPLY_PR_FEEDBACK": prompts.APPLY_PR_FEEDBACK,
-         "RESOLVE_CONFLICTS": prompts.RESOLVE_CONFLICTS, "REMOVE_EVIDENCE_FROM_REPO": prompts.REMOVE_EVIDENCE_FROM_REPO}
+         "RESOLVE_CONFLICTS": prompts.RESOLVE_CONFLICTS}
 SKILLS = {"EXPLORE": "brainstorming", "PROPOSE": "openspec-propose", "IMPLEMENT": "openspec-apply-change",
           "VERIFY": "verification-before-completion", "INTERNAL_REVIEW": "requesting-code-review",
           "ADDRESS_REVIEW": "receiving-code-review",

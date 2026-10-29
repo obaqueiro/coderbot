@@ -297,15 +297,6 @@ Done when: every thread above is handled. Fill threads with one entry per thread
 """
 
 
-REMOVE_EVIDENCE_FROM_REPO = """Evidence files were committed on branch $branch; evidence belongs in the conversation, not in git:
-
-$paths
-
-Task: remove each from git (`git rm`, or `git rm --cached` to keep the local file) and commit the removal. Save the files under $outbox_dir/ and list their absolute paths in attachments.
-Done when: the branch no longer tracks them. Return status done.
-"""
-
-
 APPLY_PR_FEEDBACK = """The user reviewed the PR and requested changes (below).
 
 """ + fenced_authoritative("user feedback", "$feedback") + """

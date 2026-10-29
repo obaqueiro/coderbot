@@ -86,3 +86,34 @@ class ReviewLeftovers(unittest.TestCase):
         self.assertIsNone(main._review_with_leftovers(self.result(critical=1, important=0, tests=["t: pass"])))
         self.assertIsNone(main._review_with_leftovers(self.result(critical=0, important=2)))
         self.assertIsNone(main._review_with_leftovers(SimpleNamespace(output="x", data=None)))
+
+
+class EvidenceScrub(unittest.TestCase):
+    def test_committed_evidence_moves_to_the_outbox_without_an_agent_turn(self):
+        import subprocess
+        def run(cwd, *args):
+            subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, data = Path(tmp) / "repo", Path(tmp) / "data"
+            repo.mkdir()
+            run(repo, "init", "-q", "-b", "main")
+            run(repo, "config", "user.email", "t@t"); run(repo, "config", "user.name", "t")
+            (repo / "README.md").write_text("x\n")
+            run(repo, "add", "."); run(repo, "commit", "-qm", "base")
+            run(repo, "checkout", "-qb", "feature")
+            (repo / "src").mkdir()
+            (repo / "src/evidence_parser.py").write_text("code\n")
+            (repo / "demo.webm").write_bytes(b"video")
+            (repo / "evidence-shot.png").write_bytes(b"png")
+            run(repo, "add", "."); run(repo, "commit", "-qm", "feature")
+            state = {"branch": "feature", "slug": "task", "session_id": "s"}
+            with patch.object(main.config, "REPO_PATH", repo), patch.object(main.config, "DATA_DIR", data), \
+                 patch.object(main.config, "BASE_BRANCH", "main"), patch.object(main, "trail"), \
+                 patch.object(main.agent_runner, "resume") as resume:
+                moved = main._scrub_evidence_from_repo(state, "IMPLEMENTING")
+            resume.assert_not_called()
+            self.assertEqual(sorted(p.name for p in moved), ["demo.webm", "evidence-shot.png"])
+            self.assertTrue(all(p.is_file() for p in moved))
+            tracked = subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True, text=True).stdout.split()
+            self.assertEqual(sorted(tracked), ["README.md", "src/evidence_parser.py"])
+            self.assertFalse((repo / "demo.webm").exists())

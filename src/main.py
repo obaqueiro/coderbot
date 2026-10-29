@@ -684,11 +684,15 @@ def parse_internal_review(output: str) -> tuple[dict | None, str | None]:
 # evidence-ish directory/filename, to avoid flagging ordinary repo images/reports.
 _EVIDENCE_EXTENSIONS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
 _EVIDENCE_PATH_HINTS = ("evidence", "recording")
+_EVIDENCE_MEDIA = (".png", ".jpg", ".jpeg", ".gif", ".html", ".zip")
 
 
 def _looks_like_evidence(path: str) -> bool:
+    """Videos, and screenshots/reports with an evidence-ish name; never source files
+    such as src/evidence_parser.py."""
     lower = path.lower()
-    return lower.endswith(_EVIDENCE_EXTENSIONS) or any(h in lower for h in _EVIDENCE_PATH_HINTS)
+    return lower.endswith(_EVIDENCE_EXTENSIONS) or (
+        lower.endswith(_EVIDENCE_MEDIA) and any(h in lower for h in _EVIDENCE_PATH_HINTS))
 
 
 _SECRET_FILE_RE = re.compile(
@@ -707,27 +711,32 @@ def _branch_evidence_paths(branch: str, base_branch: str) -> list[str]:
     """Files added/changed on `branch` since it diverged from `base_branch` that look
     like recorded test evidence rather than application code — these must never be
     committed, only emailed (see agent_runner.EVIDENCE_CONTRACT)."""
-    diff = git("diff", "--name-only", f"{base_branch}...{branch}")
+    diff = git("diff", "--name-only", "--diff-filter=d", f"{base_branch}...{branch}")
     return [p for p in diff.splitlines() if _looks_like_evidence(p)]
 
 
-def _scrub_evidence_from_repo(state: dict, phase: str) -> list[Path] | None:
-    """Safety net for when the prompt-level rule against committing evidence still gets
-    missed: if evidence-looking files were committed to the branch, have the working
-    session remove them from git and re-route them through ATTACH:/email instead.
-    Returns extra attachment paths from that corrective turn (possibly empty), or None
-    if it asked the user a question instead (caller should treat like handle_result)."""
+def _scrub_evidence_from_repo(state: dict, phase: str) -> list[Path]:
+    """Evidence belongs in the conversation, not in git. coderbot moves any committed
+    evidence file to the outbox and commits the removal itself; the moved files are
+    returned as attachments."""
     paths = _branch_evidence_paths(state["branch"], config.BASE_BRANCH)
     if not paths:
         return []
-    log.warning("[%s] evidence-looking file(s) were committed to the repo; asking "
-                "the coding agent to remove them and re-route via email instead: %s", phase, paths)
-    result = agent_runner.resume(state["session_id"], prompts.render(
-        prompts.REMOVE_EVIDENCE_FROM_REPO, branch=state["branch"],
-        paths="\n".join(f"- {p}" for p in paths), outbox_dir=str(agent_runner.OUTBOX_DIR)))
-    if handle_result(state, result, phase):
-        return None
-    return [Path(p) for p in result.attachments]
+    log.warning("[%s] evidence file(s) were committed; moving them to the outbox: %s", phase, paths)
+    destination = config.DATA_DIR / "outbox" / "evidence-from-repo" / _validated_slug(state["slug"])
+    moved = []
+    for path in paths:
+        source = config.REPO_PATH / path
+        if source.is_file():
+            target = destination / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            moved.append(target)
+    # Removed from the working tree too, so a later `git add -A` cannot bring them back.
+    git("rm", "-q", "-f", "--", *paths)
+    git("commit", "-q", "-m", "chore: move test evidence out of the repository", "--", *paths)
+    trail(state, "Committed evidence moved to the conversation", "\n".join(paths))
+    return moved
 
 
 def _collect_attachments(result, e2e_specs: list[str],
@@ -1422,8 +1431,7 @@ def _complete_implementation(state: dict, result) -> None:
     """A completed agent turn is not a completed plan. Both entry paths use this gate."""
     if _scope_drift(state):
         return
-    if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
-        return
+    _scrub_evidence_from_repo(state, "IMPLEMENTING")
     state["implementation_summary"] = "\n".join(
         line for line in result.output.splitlines() if not line.startswith("E2E_SPEC:"))[:1800]
     state["e2e_specs"] = list(dict.fromkeys([
@@ -2853,8 +2861,7 @@ def do_address_review(state: dict) -> None:
 def _finish_address_review(state: dict, result, head_before: str | None) -> None:
     """Success tail of ADDRESS_REVIEW: new commits are pushed (via PUSHING) and re-reviewed;
     a resolution-only round resolves the threads right away and re-checks the PR."""
-    if _scrub_evidence_from_repo(state, "ADDRESS_REVIEW") is None:
-        return
+    _scrub_evidence_from_repo(state, "ADDRESS_REVIEW")
     committed = head_before is None or git("rev-parse", state["branch"]) != head_before
     if committed:
         # The RESOLVE lines are acted on after the push lands (see do_push), so the
@@ -3334,8 +3341,6 @@ def do_merge_reply(state: dict, reply: str) -> None:
         if handle_result(state, r, "APPLY_PR_FEEDBACK"):
             return
         extra_attachments = _scrub_evidence_from_repo(state, "APPLY_PR_FEEDBACK")
-        if extra_attachments is None:
-            return
         attachments = _collect_attachments(r, state.get("e2e_specs", []), state.get("e2e_kind"))
         attachments += [a for a in extra_attachments if a.resolve() not in {p.resolve() for p in attachments}]
         _queue_push(state, "feedback", r.output, attachments,
@@ -3492,8 +3497,7 @@ def do_address_pr_threads(state: dict) -> None:
     if handle_result(state, result, "ADDRESS_PR_THREADS"):
         return
     state["pr_thread_round"] = round
-    if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
-        return
+    _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS")
     _queue_push(state, "threads", result.output)
 
 
@@ -5396,16 +5400,13 @@ def _continue_resolve_conflicts(state: dict, result) -> None:
 
 
 def _continue_address_pr_threads(state: dict, result) -> None:
-    if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
-        return
+    _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS")
     state["pr_thread_round"] = state.get("pr_thread_round", 0) + 1
     _queue_push(state, "threads", result.output)
 
 
 def _continue_apply_pr_feedback(state: dict, result) -> None:
     extra_attachments = _scrub_evidence_from_repo(state, "APPLY_PR_FEEDBACK")
-    if extra_attachments is None:
-        return
     attachments = _collect_attachments(
         result, state.get("e2e_specs", []), state.get("e2e_kind"))
     existing = {path.resolve() for path in attachments}
