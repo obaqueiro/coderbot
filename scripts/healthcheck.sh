@@ -34,4 +34,9 @@ if [ "$age" -ge "$STALE" ]; then
   echo "heartbeat stale ${age}s >= ${STALE}s" >&2
   exit 1
 fi
+# A paused supervisor is alive but not doing the work: unhealthy for visibility, never killed.
+if [ "${CODEBOT_SELF_HEAL:-off}" != "off" ] && grep -q '"action": *"pause"' "$DATA_DIR/supervisor/control.json" 2>/dev/null; then
+  echo "supervisor paused; reply or run --control resume" >&2
+  exit 1
+fi
 exit 0

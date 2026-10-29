@@ -138,13 +138,16 @@ class SupervisorWalk(unittest.TestCase):
                 pass
         self.assertEqual(self.orphans(), [])
 
-    def healthy(self):
-        """The supervisor heartbeat is fresh; in the image also the container healthcheck."""
+    def healthy(self, paused=False):
+        """The supervisor heartbeat is fresh; in the image also the container healthcheck,
+        which reports a paused supervisor unhealthy (alive, not killed)."""
         self.assertLess(time.time() - read_json(self.data / "supervisor/heartbeat.json")["time"], 30)
         if sys.platform == "linux":  # GNU stat
             result = subprocess.run(["bash", str(ROOT / "scripts/healthcheck.sh")], capture_output=True, text=True,
                                     env={**os.environ, "CODEBOT_DATA_DIR": str(self.data), "CODEBOT_SELF_HEAL": "auto"})
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 1 if paused else 0, result.stderr)
+            if paused:
+                self.assertIn("paused", result.stderr)
 
     def workers(self):
         return len(list((self.data / "workers").glob("*"))) if (self.data / "workers").exists() else 0
@@ -304,7 +307,7 @@ class SupervisorWalk(unittest.TestCase):
         self.assertEqual(inventory(self.source), self.original)
         self.assertFalse((self.data / "supervisor/promotion.json").exists())
         self.assertEqual(self.incident()["status"], "human_required")
-        self.healthy()  # paused, not dead
+        self.healthy(paused=True)  # paused, not dead
         workers = self.workers()
         subprocess.run([sys.executable, str(ROOT / "scripts/supervisor.py"), "--data", str(self.data),
                         "--control", "resume"], check=True, timeout=30)
@@ -367,7 +370,8 @@ class SupervisorWalk(unittest.TestCase):
         time.sleep(2)
         self.assertEqual(self.workers(), workers)  # held stopped while paused
         self.assertEqual(self.orphans(), [])
-        self.healthy()
+        self.healthy(paused=True)
+
 
 if __name__ == "__main__":
     unittest.main()
