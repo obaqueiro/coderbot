@@ -5695,7 +5695,7 @@ def _dispatch_conversation(state):
         return False
     row = rows[0]
     if row["data"].get("queued_pr_url"):
-        if row["data"]["queued_pr_url"] != state.get("pr_url"):
+        if row["data"]["queued_pr_url"] != parallel_conversation._prs(state):
             store.update("conversation", row, status="complete", outcome="stale PR; not authorized")
             email(state, "PR instruction needs confirmation", "The PR changed. Please send your instruction again; I did not merge.")
             return True

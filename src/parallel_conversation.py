@@ -268,6 +268,8 @@ def snapshot(store, state, repo):
             "archive_path", "pr_url", "execution_checkpoint_id", "workspace_path",
             "last_effective_progress", "quality_report", "proposal_snapshot")
     view = _safe(copy.deepcopy({k: state[k] for k in keys if k in state}))
+    if not state.get("pr_url") and (prs := _prs(state)):  # workspace: one PR per repository
+        view["workspace"] = {"repositories": {str(n): {"pr_url": url} for n, url in enumerate(prs)}}
     if state.get("stuck_error") or state.get("reported_check_plan_error") or state.get("provider_block"):
         import diagnostics
         view["failure_context"] = _safe(copy.deepcopy(state.get("failure_context") or
@@ -403,18 +405,31 @@ def deterministic(state, text):
     return None
 
 
+def _prs(state):
+    """The task's PR, or every repository's PR in workspace mode."""
+    repositories = (state.get("workspace") or {}).get("repositories") or {}
+    return state.get("pr_url") or sorted(r["pr_url"] for r in repositories.values()
+                                         if isinstance(r, dict) and r.get("pr_url")) or None
+
+
 def pr_decision_key(state):
     """Stable across repair phases, never across another displayed PR decision."""
     decision = state.get("pending_decision", {})
-    if decision.get("wait_state") != "WAIT_MERGE" or decision.get("task") != state.get("slug") or not state.get("pr_url"):
+    if decision.get("wait_state") != "WAIT_MERGE" or decision.get("task") != state.get("slug") or not _prs(state):
         return None
-    return hashlib.sha256(json.dumps([state["pr_url"], decision], sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([_prs(state), decision], sort_keys=True).encode()).hexdigest()
+
+
+# Steps between showing a PR decision and waiting on it again (review fixes, pushes and
+# the re-verification of new commits): a decision sent meanwhile waits for the PR.
+PR_DETOURS = ("ADDRESS_PR_THREADS", "ADDRESS_REVIEW", "PUSHING", "WAIT_REVIEW", "VERIFYING",
+              "INTERNAL_REVIEW", "REPAIR_CHECKS", "E2E", "RESOLVE_CONFLICTS", "APPLY_FEEDBACK")
 
 
 def deferred_pr_reply(view, text):
     if parse_btw(text) is not None or not pr_decision_key(view):
         return False
-    if view.get("state") not in ("ADDRESS_PR_THREADS", "ADDRESS_REVIEW", "PUSHING", "WAIT_REVIEW"):
+    if view.get("state") not in PR_DETOURS:
         return False
     if re.fullmatch(r"(?i)\s*merge(?: anyway)?[.!]?\s*", text):
         return True
@@ -437,12 +452,12 @@ def save_classification(store, row, value):
     # waits. Bind an early merge to this PR, not to whichever PR exists later.
     merge = (re.fullmatch(r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?)[.!]?\s*",
                          row["data"]["original_text"]) or value.get("requested_action") == "merge")
-    if (merge and view.get("pr_url") and not row["data"]["explicit_btw"]
+    if (merge and _prs(view) and not row["data"]["explicit_btw"]
             and not value.get("inputs") and not value.get("action_depends_on_change")
             and len(row["data"]["text"]) <= 5000):
         return store.update("conversation", row, status="classified", route="flow",
             classification={**value, "intent": "answer", "resolves_pending_question": True},
-            queued_pr_url=view["pr_url"], deferred_pr_decision=pr_decision_key(view))
+            queued_pr_url=_prs(view), deferred_pr_decision=pr_decision_key(view))
     if (value.get("requested_action") and not value.get("inputs") and not row["data"]["explicit_btw"]
             and not (value["intent"] == "answer" and value["resolves_pending_question"]
                      and view.get("state") in {"WAIT_REPLY", "WAIT_STUCK", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_CLEAN"})):

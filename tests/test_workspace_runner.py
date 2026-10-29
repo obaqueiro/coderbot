@@ -686,3 +686,16 @@ class SameDayArchive(unittest.TestCase):
             self.assertEqual(state["archive_path"], f"openspec/changes/archive/{today}-export")
             self.assertTrue((root / f"openspec/changes/archive/{today}-export-1").is_dir())
             self.assertEqual(state["state"], "OPEN_PR")
+
+
+class PickFailure(unittest.TestCase):
+    def test_a_failed_pick_restores_the_state_it_was_given(self):
+        state = {"state": "IDLE", "retire_thread_id": "C1:1.0", "workspace": {"baseline": "x"}}
+        def half_bind(s):
+            s.clear()
+            s.update(state="EXPLORING", item="half")
+            raise RuntimeError("claim failed")
+        with patch.object(runner, "_pick", side_effect=half_bind):
+            with self.assertRaises(RuntimeError):
+                runner.pick(state)
+        self.assertEqual(state, {"state": "IDLE", "retire_thread_id": "C1:1.0", "workspace": {"baseline": "x"}})

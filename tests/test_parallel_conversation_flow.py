@@ -292,3 +292,18 @@ class ParallelFlowTests(unittest.TestCase):
             self.assertTrue(main._queue_conversation(self.state, "always-on", "/btw Explain"))
         rows = self.store.list("conversation", "task", identity="always-on")
         self.assertEqual(len(rows), 1)
+
+
+class EarlyPrDecisions(unittest.TestCase):
+    def test_a_merge_sent_during_re_verification_waits_for_the_pr(self):
+        import parallel_conversation
+        decision = {"wait_state": "WAIT_MERGE", "task": "t", "question": "q", "options": []}
+        workspace = {"slug": "t", "pending_decision": decision, "state": "VERIFYING",
+                     "workspace": {"repositories": {"api": {"pr_url": "https://github.com/o/api/pull/1"},
+                                                    "ui": {"pr_url": "https://github.com/o/ui/pull/2"}}}}
+        single = {"slug": "t", "pending_decision": decision, "state": "INTERNAL_REVIEW",
+                  "pr_url": "https://github.com/o/r/pull/3"}
+        for state in (workspace, single):
+            with self.subTest(state=state["state"]):
+                self.assertTrue(parallel_conversation.deferred_pr_reply(state, "merge"))
+        self.assertFalse(parallel_conversation.deferred_pr_reply({**single, "state": "IMPLEMENTING"}, "merge"))

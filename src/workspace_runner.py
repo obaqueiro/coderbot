@@ -223,6 +223,18 @@ def turn(state, prompt, *, fresh=False):
 
 
 def pick(state):
+    """A failed pick leaves the state as it found it: a half-bound task saved after an
+    error is a state no later tick can load."""
+    before = json.loads(json.dumps(state))
+    try:
+        return _pick(state)
+    except BaseException:
+        state.clear()
+        state.update(before)
+        raise
+
+
+def _pick(state):
     import main
     context = target()
     requested = sorted((hold for hold in main._load_holds() if hold.get("requested")),
