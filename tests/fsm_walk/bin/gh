@@ -31,13 +31,15 @@ def ref(name):
     return out.stdout.strip() if out.returncode == 0 else None
 
 
-def find(url):
-    number = int(re.search(r"/pull/(\d+)", url)[1])
+def find(pr_ref):
+    """A PR named by URL (the old calls) or by number (pinned calls)."""
+    number = int(pr_ref) if pr_ref.isdigit() else int(re.search(r"/pull/(\d+)", pr_ref)[1])
     return next(pr for pr in db["prs"] if pr["number"] == number)
 
 
 def view(pr, fields):
-    value = {"state": pr["state"], "headRefName": pr["head"], "headRefOid": ref(pr["head"]) or "",
+    value = {"number": pr["number"], "statusCheckRollup": [],
+             "state": pr["state"], "headRefName": pr["head"], "headRefOid": ref(pr["head"]) or "",
              "baseRefName": pr["base"], "isCrossRepository": False, "body": pr["body"],
              "mergeable": "MERGEABLE", "url": pr["url"], "title": pr["title"], "isDraft": pr.get("draft", False)}
     return {key: value[key] for key in fields.split(",")}

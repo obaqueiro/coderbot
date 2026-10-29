@@ -26,22 +26,26 @@ GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED", "COMPLETED", "EXPECTED"}
 
 def run(argv, cwd, *, timeout=None):
     """stdout of a bounded command; a failure is Transient, Fatal or AgentFault by its cause."""
-    label = " ".join(argv[:2])
-    try:
-        process = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, errors="replace",
-                                 timeout=timeout or config.SUBPROCESS_TIMEOUT_SECONDS,
-                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-    except subprocess.TimeoutExpired as error:
-        raise errors.Transient(f"{label} timed out in {cwd}", code=argv[0] + "_timeout", resource=str(cwd)) from error
-    except OSError as error:
-        raise errors.Fatal(f"{label} cannot run: {error}", code=argv[0] + "_missing", resource=str(cwd)) from error
+    process = call(argv, cwd, timeout=timeout)
     if process.returncode:
         import diagnostics
-        text = diagnostics.redact(f"{label} failed in {cwd}: {process.stderr}{process.stdout}".strip())
+        text = diagnostics.redact(f"{' '.join(argv[:2])} failed in {cwd}: {process.stderr}{process.stdout}".strip())
         kind = (errors.Fatal if FATAL_TOOL_ERROR.search(text) else
                 errors.Transient if errors.TRANSIENT_TOOL_ERROR.search(text) else errors.AgentFault)
         raise kind(text, code=argv[0] + "_failed", resource=str(cwd))
     return process.stdout.strip()
+
+
+def call(argv, cwd, *, timeout=None):
+    """The finished process, any exit status, of a bounded operations.tool call."""
+    import operations
+    label = " ".join(argv[:2])
+    try:
+        return operations.tool(argv, cwd=cwd, timeout=timeout or config.SUBPROCESS_TIMEOUT_SECONDS)
+    except (subprocess.TimeoutExpired, TimeoutError) as error:
+        raise errors.Transient(f"{label} timed out in {cwd}", code=argv[0] + "_timeout", resource=str(cwd)) from error
+    except OSError as error:
+        raise errors.Fatal(f"{label} cannot run: {error}", code=argv[0] + "_missing", resource=str(cwd)) from error
 
 
 def pr_number(record):
@@ -58,10 +62,17 @@ class RepoOps:
     name: str
     remote: str
     base: str
+    infer: bool = False  # repo mode: any GitHub host; before a PR exists gh resolves the checkout
+
+    @classmethod
+    def checkout(cls, path, base, pr_url=None):
+        """The repository of repo mode, named by its PR once there is one."""
+        match = re.match(r"https://([^/]+/[^/]+/[^/]+)/pull/\d+$", pr_url or "")
+        return cls(Path(path), ".", match[1] if match else "", base, infer=True)
 
     @property
     def slug(self):
-        return self.remote.removeprefix("github.com/")
+        return self.remote.split("/", 1)[-1] if self.infer else self.remote.removeprefix("github.com/")
 
     def git(self, *args, timeout=None):
         return run(["git", *args], self.path, timeout=timeout)
@@ -73,10 +84,26 @@ class RepoOps:
         except errors.CoderbotError:
             return ""
 
-    def gh(self, *args):
+    def _gh(self, args):
+        if args[0] == "api":  # endpoints name the repository themselves
+            return ["gh", *args]
+        if self.infer:
+            return ["gh", *args, *(["--repo", self.remote] if self.remote else [])]
         if not self.remote.startswith("github.com/"):
             raise errors.Fatal(f"PR publication requires a GitHub origin: {self.name}", code="not_github")
-        return run(["gh", *args, "--repo", self.slug], self.path)
+        return ["gh", *args, "--repo", self.slug]
+
+    def gh(self, *args):
+        return run(self._gh(args), self.path)
+
+    def gh_quiet(self, *args):
+        """The finished gh process, or None when it timed out or could not start: for
+        queries that fail open, or read stdout on a non-zero exit (pr checks)."""
+        try:
+            return call(self._gh(args), self.path)
+        except errors.CoderbotError as error:
+            log.warning("gh %s could not complete: %s", " ".join(args[:2]), error)
+            return None
 
     def branch(self):
         return self.quiet("branch", "--show-current")
@@ -122,21 +149,27 @@ class RepoOps:
     def pr(self, number, fields=PR_FIELDS):
         return json.loads(self.gh("pr", "view", str(number), "--json", fields))
 
+    def url(self, number):
+        return f"https://{self.remote if self.infer else 'github.com/' + self.slug}/pull/{number}"
+
     def open_pr(self, branch, title, body, *, draft):
-        """The open PR of this attempt's unique branch, else a new one; its number."""
+        """The open PR of this attempt's unique branch, else a new one: (number, url)."""
         listed = json.loads(self.gh("pr", "list", "--state", "open", "--head", branch, "--base", self.base,
-                                    "--json", "number", "--limit", "2") or "[]")
+                                    "--json", "number,url", "--limit", "2") or "[]")
         if len(listed) > 1:
             raise errors.Fatal(f"{self.name}: more than one open PR for {branch}", code="ambiguous_pr")
         if listed:
-            return int(listed[0]["number"])
+            number = int(listed[0]["number"])
+            return number, listed[0].get("url") or self.url(number)
         url = self.gh("pr", "create", *(["--draft"] if draft else []), "--base", self.base, "--head", branch,
-                      "--title", title, "--body", body)
-        return pr_number({"pr_url": url.strip().splitlines()[-1]})
+                      "--title", title, "--body", body).strip().splitlines()[-1:] or [""]
+        if not re.fullmatch(r"https://\S+/pull/\d+", url[0]):
+            raise errors.AgentFault(f"{self.name}: gh pr create printed no PR URL: {url[0][:200]!r}", code="pr_create")
+        return pr_number({"pr_url": url[0]}), url[0]
 
     def matches(self, record, value):
         """The PR is the one this record pinned: number, branches and repository (any case)."""
-        expected = f"https://github.com/{self.slug}/pull/".casefold()
+        expected = self.url(pr_number(record)).rsplit("/", 1)[0].casefold() + "/"
         return (isinstance(value, dict) and value.get("number") == pr_number(record)
                 and str(value.get("url", "")).casefold().startswith(expected)
                 and value.get("headRefName") == record.get("branch") and value.get("baseRefName") == self.base
@@ -208,12 +241,12 @@ def open_drafts(target, records, title, body, save):
             if not ops.ahead(record.get("base_sha")):
                 continue
             ops.push(record["branch"])
-            number = ops.open_pr(record["branch"], title, body(name), draft=True)
+            number, url = ops.open_pr(record["branch"], title, body(name), draft=True)
         except Exception as error:  # noqa: BLE001 - the ready step opens it at the end
             record["draft_attempts"] = record.get("draft_attempts", 0) + 1
             log.warning("draft PR for %s failed (attempt %d): %s", name, record["draft_attempts"], error)
             continue
-        record.update(pr_number=number, pr_url=f"https://github.com/{ops.slug}/pull/{number}", draft=True)
+        record.update(pr_number=number, pr_url=url, draft=True)
         save()
         opened.append(name)
     return opened
@@ -421,9 +454,9 @@ def publish(ws, state):
             continue
         repo.push(record["branch"])
         if not pr_number(record):
-            number = repo.open_pr(record["branch"], main._pr_title(state), pr_body(state, name), draft=False)
+            number, url = repo.open_pr(record["branch"], main._pr_title(state), pr_body(state, name), draft=False)
             # Persist accepted publication before any further call or notification.
-            record.update(pr_number=number, pr_url=f"https://github.com/{repo.slug}/pull/{number}")
+            record.update(pr_number=number, pr_url=url)
             main.save_state(state)
         value = repo.pr(pr_number(record))
         if not repo.matches(record, value):

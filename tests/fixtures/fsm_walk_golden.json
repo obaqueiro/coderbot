@@ -80,16 +80,20 @@
   [
    "pr",
    "view",
-   "https://github.com/acme/walk/pull/1",
+   "1",
    "--json",
-   "state,mergeable"
+   "state,mergeable",
+   "--repo",
+   "github.com/acme/walk"
   ],
   [
    "pr",
    "view",
-   "https://github.com/acme/walk/pull/1",
+   "1",
    "--json",
-   "state,mergeable"
+   "state,mergeable",
+   "--repo",
+   "github.com/acme/walk"
   ],
   [
    "api",
@@ -113,10 +117,12 @@
   [
    "pr",
    "merge",
-   "https://github.com/acme/walk/pull/1",
+   "1",
    "--squash",
    "--match-head-commit",
-   "<sha>"
+   "<sha>",
+   "--repo",
+   "github.com/acme/walk"
   ]
  ],
  "pushes": [

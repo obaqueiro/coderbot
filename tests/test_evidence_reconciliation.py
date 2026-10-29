@@ -51,7 +51,7 @@ class ReconciliationTests(unittest.TestCase):
                  patch("evidence_delivery.implementation_snapshot", return_value="implementation"), \
                  patch("evidence.valid_media", return_value=True), \
                  patch("drive_client.verify_existing", return_value={"status": "complete", "url": url}) as verify, \
-                 patch.object(main, "_run_checked", return_value=json.dumps({"body": f"Demo: {url}"})), \
+                 patch.object(main.lifecycle.RepoOps, "gh", return_value=json.dumps({"body": f"Demo: {url}"})), \
                  patch.object(main.evidence, "record_evidence") as record, \
                  patch.object(main, "email", return_value=None) as notify, patch.object(main, "save_state"), \
                  patch.object(main, "_publish_progress"), patch.object(main, "unresolved_review_threads", return_value=[]):

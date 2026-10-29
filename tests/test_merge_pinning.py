@@ -45,7 +45,7 @@ class Pinning(unittest.TestCase):
 
     def test_unchanged_head_merges_pinned(self):
         email, finish, run = self.merge(self.state(delivered_sha=SHA))
-        self.assertEqual(run.call_args.args[0][-2:], ["--match-head-commit", SHA])
+        self.assertEqual(run.call_args.args[0][-4:-2], ["--match-head-commit", SHA])
         finish.assert_called_once()
         email.assert_not_called()
 
@@ -61,7 +61,7 @@ class Pinning(unittest.TestCase):
 
     def test_unreadable_head_still_merges_with_pin(self):
         email, finish, run = self.merge(self.state(delivered_sha=SHA), head=RuntimeError("gh down"))
-        self.assertEqual(run.call_args.args[0][-2:], ["--match-head-commit", SHA])
+        self.assertEqual(run.call_args.args[0][-4:-2], ["--match-head-commit", SHA])
         finish.assert_called_once()
 
     def test_old_gh_fails_closed_without_unpinned_retry(self):

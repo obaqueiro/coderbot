@@ -43,6 +43,7 @@ import delivery_checkpoint
 import evidence_delivery
 import message_templates
 import performance
+import lifecycle
 import persistence
 import retention
 import config
@@ -816,14 +817,14 @@ def _sync_pr_video(state: dict, video_url: str) -> None:
     section = ("<!-- coderbot:video:start -->\n## Demo video\n\n"
                + "\n".join(f"- [Video]({url})" for url in urls)
                + "\n<!-- coderbot:video:end -->")
-    current = json.loads(_run_checked(["gh", "pr", "view", pr_url, "--json", "body"]))["body"]
+    current = _pr_body(pr_url)
     pattern = r"<!-- coderbot:video:start -->.*?<!-- coderbot:video:end -->"
     updated = (re.sub(pattern, lambda _: section, current, flags=re.DOTALL)
                if re.search(pattern, current, re.DOTALL) else current.rstrip() + "\n\n" + section)
     if updated != current:
-        _run_checked(["gh", "pr", "edit", pr_url, "--body", updated])
+        _pr_ops(pr_url).gh("pr", "edit", _pr_owner_number(pr_url)[1], "--body", updated)
     state["pr_summary"] = updated
-    verified = json.loads(_run_checked(["gh", "pr", "view", pr_url, "--json", "body"]))["body"]
+    verified = _pr_body(pr_url)
     if section not in verified:
         raise RuntimeError("PR evidence section could not be verified after update")
 
@@ -2617,7 +2618,7 @@ def code_review_check(pr_url: str) -> dict | None:
     surfaces promptly instead of masquerading as "not started" and stalling the poll loop
     until the review timeout.
     """
-    proc = _gh_quiet("pr", "checks", pr_url, "--json", "name,bucket,workflow,link")
+    proc = _pr_ops(pr_url).gh_quiet("pr", "checks", _pr_owner_number(pr_url)[1], "--json", "name,bucket,workflow,link")
     if proc is None:
         return None
     try:
@@ -2643,18 +2644,18 @@ def code_review_check(pr_url: str) -> dict | None:
     return None
 
 
-def _gh_quiet(*args: str) -> subprocess.CompletedProcess | None:
-    """A gh call that never raises: None when it timed out or could not start."""
-    try:
-        return operations.tool(["gh", *args], cwd=config.REPO_PATH)
-    except (subprocess.TimeoutExpired, TimeoutError, OSError) as error:
-        log.warning("gh %s could not complete: %s", " ".join(args[:2]), error)
-        return None
+def _pr_ops(pr_url: str | None = None) -> lifecycle.RepoOps:
+    """The repository the PR (repo mode: the checkout) lives in; every gh/PR call goes through it."""
+    return lifecycle.RepoOps.checkout(config.REPO_PATH, config.BASE_BRANCH, pr_url)
+
+
+def _pr_body(pr_url: str) -> str:
+    return json.loads(_pr_ops(pr_url).gh("pr", "view", _pr_owner_number(pr_url)[1], "--json", "body"))["body"]
 
 
 def _bot_comments(endpoint: str) -> list[dict]:
     """github-actions[bot] comments from a PR comments endpoint ([] on any failure)."""
-    proc = _gh_quiet("api", "--paginate", f"{endpoint}?per_page=100")
+    proc = _pr_ops().gh_quiet("api", "--paginate", f"{endpoint}?per_page=100")
     if proc is None or proc.returncode != 0:
         log.warning("gh api %s failed: %s", endpoint, proc.stderr[-300:] if proc else "")
         return []
@@ -2725,7 +2726,7 @@ def finalize_pr(state: dict, note: str = "") -> None:
         manifests = config.DATA_DIR / "outbox/evidence"
         adopted = None
         if manifests.exists() and any(manifests.rglob("verified-delivery.json")):
-            existing_body = json.loads(_run_checked(["gh", "pr", "view", state["pr_url"], "--json", "body"]))["body"]
+            existing_body = _pr_body(state["pr_url"])
             adopted = evidence_delivery.reconcile(state, config.REPO_PATH, existing_body)
     except Exception:
         log.exception("existing evidence could not be reconciled; not duplicating capture/publication")
@@ -2976,7 +2977,7 @@ def _finish_address_review(state: dict, result, head_before: str | None) -> None
 def _pr_merge_state(pr_url: str) -> tuple[str | None, str | None]:
     """(state, mergeable) of the PR — e.g. ("OPEN", "CONFLICTING") — or (None, None)
     when the query fails. Callers treat that as "unknown", never as "clean"."""
-    proc = _gh_quiet("pr", "view", pr_url, "--json", "state,mergeable")
+    proc = _pr_ops(pr_url).gh_quiet("pr", "view", _pr_owner_number(pr_url)[1], "--json", "state,mergeable")
     if proc is None or proc.returncode != 0:
         log.warning("gh pr view failed checking mergeability: %s", proc.stderr[-300:] if proc else "")
         return None, None
@@ -3150,7 +3151,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
                "-f", f"repo={repo}", "-F", f"number={number}"]
         if cursor:
             cmd += ["-f", f"cursor={cursor}"]
-        proc = _gh_quiet(*cmd)
+        proc = _pr_ops().gh_quiet(*cmd)
         if proc is None or proc.returncode != 0:
             log.warning("gh api graphql (review threads) failed: %s", proc.stderr[-300:] if proc else "")
             return None
@@ -3303,12 +3304,11 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
         posted = state.setdefault("thread_replies", [])
         try:
             if thread.get("comment_id") and receipt not in posted:  # a retried step never replies twice
-                reply = operations.tool(
-                    ["gh", "api", f"repos/{owner_repo}/pulls/{number}/comments/"
-                     f"{thread['comment_id']}/replies", "-f", f"body={reason}"], cwd=config.REPO_PATH)
-                if reply.returncode != 0:
+                reply = _pr_ops().gh_quiet("api", f"repos/{owner_repo}/pulls/{number}/comments/"
+                                           f"{thread['comment_id']}/replies", "-f", f"body={reason}")
+                if reply is None or reply.returncode != 0:
                     log.warning("could not reply on thread %s: %s",
-                                thread_id, reply.stderr[-300:])
+                                thread_id, reply.stderr[-300:] if reply else "")
                 else:
                     _remember_bot_comment(state, reply.stdout)
                     posted.append(receipt)
@@ -3385,7 +3385,7 @@ def _answered_only(thread: dict, reason: str) -> bool:
 
 
 def resolve_review_thread(thread_id: str) -> bool:
-    proc = _gh_quiet("api", "graphql",
+    proc = _pr_ops().gh_quiet("api", "graphql",
                      "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
                      "-f", f"id={thread_id}")
     if proc is None or proc.returncode != 0:
@@ -3538,11 +3538,9 @@ def _pr_head_moved(state: dict, expected: str, head: str | None) -> bool:
 
 def _gh_squash_merge(pr_url: str, expected: str | None) -> subprocess.CompletedProcess:
     """A client incapable of pinning the reviewed head must fail closed."""
-    command = ["gh", "pr", "merge", pr_url, "--squash"]
-    run = lambda args: operations.tool(args, cwd=config.REPO_PATH)
-    if not expected:
-        return run(command)
-    return run(command + ["--match-head-commit", expected])
+    pin = ["--match-head-commit", expected] if expected else []
+    return (_pr_ops(pr_url).gh_quiet("pr", "merge", _pr_owner_number(pr_url)[1], "--squash", *pin)
+            or subprocess.CompletedProcess([], 1, "", "gh pr merge could not complete"))
 
 
 def _finish_address_pr_threads(state: dict) -> None:
@@ -4362,7 +4360,7 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         try:
             outcome = evidence_delivery.deliver(database, state, config.REPO_PATH,
                 sync_pr=_sync_pr_video, notify=_notify_evidence, operations=assessment.get("operations"),
-                read_pr=lambda s: json.loads(_run_checked(["gh", "pr", "view", s["pr_url"], "--json", "body"]))["body"])
+                read_pr=lambda s: _pr_body(s["pr_url"]))
             if outcome["status"] != "complete":
                 if (state.get("pr_url") and state.get("has_e2e_harness") and
                         original_phase == "WAIT_MERGE" and
