@@ -76,7 +76,7 @@ class TaskLanguageTests(unittest.TestCase):
             agent_runner.resume("ses_one", prompts.ANSWER_REPLY)
             self.assertIn("Use Spanish", invoke.call_args.args[0])
             self.assertEqual(invoke.call_args.args[1], "ses_one")
-            agent_runner.run(prompts.CLASSIFY_QUESTION_REPLY, contract=False)
+            agent_runner.run(prompts.PICK, contract=False)
             self.assertNotIn("Use Spanish", invoke.call_args.args[0])
 
     def test_restart_applies_persisted_language_before_dispatching_reply(self):

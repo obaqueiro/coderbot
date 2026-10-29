@@ -29,6 +29,7 @@ import errors
 import feedback
 import parallel_conversation
 import replanning
+import replies
 import verification_ledger
 import verification_recovery
 import review_intent
@@ -1276,9 +1277,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
     explicit = reply.strip().casefold().rstrip(".! ")
     verdict = ({"action": "approve"} if explicit in ("approve", "approved", "aprobado", "aprobar", "apruebo",
                                                        "implementa", "lgtm", "go ahead", "adelante")
-               else parse_json_reply(agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)
-                          + handoffs.classification_context(state),
-                         contract=False).output))
+               else replies.classify("approval", reply, state))
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
     if action == "wait":
@@ -3306,10 +3305,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
     if re.fullmatch(r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?)[.!]?\s*", reply):
         verdict = {"action": "merge", "force": bool(re.search(r"(?i)anyway|de todos modos", reply))}
     else:
-        result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply)
-                                  + handoffs.classification_context(state),
-                                  contract=False)
-        verdict = parse_json_reply(result.output)
+        verdict = replies.classify("pr", reply, state)
     action = verdict.get("action")
     log.info("classified PR reply as action=%r force=%r", action, verdict.get("force"))
     if action not in ("merge", "changes", "abort", "complete"):
@@ -3779,12 +3775,8 @@ def _classify_credential_reply(state: dict, reply: str) -> str:
             if pattern.search(text):
                 return action
     request = state["credential_request"]
-    verdict = parse_json_reply(agent_runner.run(
-        prompts.render(prompts.CLASSIFY_CREDENTIAL_REPLY, reply=reply, env=request["env"],
-                       purpose=request["purpose"], service=request["service"]),
-        contract=False).output)
-    action = verdict.get("action")
-    return action if action in ("send_link", "skip", "pause") else "other"
+    return replies.classify("credential", reply, env=request["env"], purpose=request["purpose"],
+                            service=request["service"])["action"]
 
 
 def _credential_action(state: dict, msg_id: str, reply: str):
@@ -4732,10 +4724,7 @@ def do_stuck_reply(state: dict, reply: str) -> None:
     keyword = {"retry": "retry", "reintenta": "retry", "reintentar": "retry", "try again": "retry",
                "abort": "abort", "aborta": "abort", "complete": "complete"}.get(
         reply.strip().casefold().rstrip(".! "))
-    verdict = {"action": keyword} if keyword else parse_json_reply(
-        agent_runner.run(prompts.render(prompts.CLASSIFY_STUCK_REPLY, reply=reply)
-                         + handoffs.classification_context(state),
-                         contract=False).output)
+    verdict = {"action": keyword} if keyword else replies.classify("stuck", reply, state)
     action = verdict.get("action")
     log.info("classified stuck reply as action=%r", action)
     failed_state = state.get("stuck_return", "IDLE")
@@ -5455,12 +5444,8 @@ def do_question_reply(state: dict, reply: str) -> None:
     if state.get("pending_reply_delivery"):
         _continue_reply_delivery(state)
         return
-    verdict = parse_json_reply(
-        agent_runner.run(
-            prompts.render(prompts.CLASSIFY_QUESTION_REPLY, reply=reply,
-                           question=state.get("pending_question", "(not recorded)"))
-            + handoffs.classification_context(state),
-            contract=False).output)
+    verdict = replies.classify("question", reply, state,
+                               question=state.get("pending_question", "(not recorded)"))
     action = verdict.get("action")
     log.info("classified WAIT_REPLY reply as action=%r", action)
     if action == "complete":

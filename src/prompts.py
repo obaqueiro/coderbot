@@ -146,29 +146,6 @@ Done when: `openspec validate $slug --strict` passes. Return status done with a 
 """
 
 
-CLASSIFY_APPROVAL_REPLY = """The user replied to the proposal-review message. Their reply
-is below.
-
-""" + fenced("user reply", "$reply") + """
-
-Classify their intent. Respond with ONLY a JSON object, no other text:
-{"action": "approve" | "changes" | "wait" | "complete" | "abort" | "unclear", "feedback": "<the requested changes, empty otherwise>"}
-
-- "approve" ONLY when the reply is a clear, explicit go-ahead to implement the proposal as-is.
-- "changes" when they request any modification; put the substance in "feedback".
-- "wait" when they ask to keep waiting, defer approval, or say not to implement
-  until approval without requesting substantive proposal changes. Existing approval
-  boundaries are controller state, not missing requirements to add to artifacts.
-  Do not classify 'no implementes hasta mi aprobación' as a proposal revision.
-  If they also request actual scope/design changes, use "changes" instead.
-- "complete" ONLY when the reply explicitly says the task should be marked done with no
-  further work (e.g. "this is already implemented, mark it complete and move on").
-- "abort" ONLY when the reply explicitly tells codebot to stop or abandon the task
-  WITHOUT marking it done.
-- "unclear" when the reply asks a question, is ambiguous, or you cannot confidently tell.
-When in doubt, choose "unclear" rather than guessing.
-"""
-
 REVISE_PROPOSAL = """The user reviewed the proposal and asked for changes (below). It is not approved yet.
 
 """ + fenced_authoritative("user feedback", "$feedback") + """
@@ -260,29 +237,6 @@ Done when: every thread above is handled. Fill threads with one entry per thread
 """
 
 
-CLASSIFY_PR_REPLY = """The user replied to the pull-request review message. Their reply
-is below.
-
-""" + fenced("user reply", "$reply") + """
-
-Classify their intent. Respond with ONLY a JSON object, no other text:
-{"action": "merge" | "changes" | "complete" | "abort" | "unclear", "force": false, "feedback": "<the change requests, empty otherwise>"}
-
-Merging is IRREVERSIBLE, so:
-- "merge" ONLY when the reply is a clear, explicit instruction to merge the PR as-is.
-  An unconditional user instruction to merge means "merge anyway": set "force": true,
-  including plain "merge". Honor explicit conditions instead of treating a conditional,
-  negated or hypothetical merge as unconditional authorization.
-- "changes" when they request any modification; put the substance in "feedback". Choose
-  "changes" even if they also ask to close/withdraw the PR as part of those changes.
-- "complete" ONLY when the reply explicitly says to mark the task done WITHOUT codebot
-  merging (e.g. the PR was already merged or handled outside codebot).
-- "abort" ONLY when the reply explicitly tells codebot to stop or abandon the task
-  WITHOUT marking it done (e.g. "abort", "cancel this", "never mind, stop working on this").
-- "unclear" when the reply asks a question, is ambiguous, or you cannot confidently tell.
-When in doubt, choose "unclear" rather than guessing.
-"""
-
 ADDRESS_PR_THREADS = """A human reviewer left unresolved conversations on your pull request (below, with their ids). Their requests are decisions about what this PR should do. Task: carry them out with receiving-code-review.
 
 """ + fenced_authoritative("reviewer threads", "$threads") + """
@@ -336,68 +290,6 @@ The user gave this guidance about the title; follow it as long as the title stay
 within the length limit:
 
 """ + fenced("user guidance", "$guidance") + "\n"
-
-CLASSIFY_STUCK_REPLY = """Codebot got stuck on a task, messaged the user for help, and is
-waiting. The user's reply is below.
-
-""" + fenced("user reply", "$reply") + """
-
-Classify what the user wants. Respond with ONLY a JSON object, no other text:
-{"action": "retry" | "abort" | "instructions" | "complete" | "unclear", "feedback": "<their instructions, empty otherwise>"}
-
-- "retry" when they want codebot to simply try the failed step again (e.g. "retry", "try again").
-- "abort" when they want codebot to give up and reset to a clean slate (e.g. "abort", "stop", "give up").
-- "instructions" when they provide guidance on HOW to fix or proceed; put it in "feedback".
-- "complete" ONLY when they explicitly say the task should be marked done with no further
-  work (e.g. "it's already done, mark it complete and move on").
-- "unclear" when you cannot confidently tell. When in doubt, choose "unclear".
-"""
-
-CLASSIFY_CREDENTIAL_REPLY = """Codebot needs the credential $env ($purpose) to test against
-$service, and offered the user three options: 1) send it through a secure one-time link,
-2) continue without it (checks that need it are skipped), 3) pause until they decide.
-
-""" + fenced("user reply", "$reply") + """
-
-Classify the reply. Respond with ONLY a JSON object, no other text:
-{"action": "send_link" | "skip" | "pause" | "other"}
-
-- "send_link": they want to provide it or asked for the link.
-- "skip": they cannot or will not provide it and want the work to continue without it.
-- "pause": they want to wait or decide later.
-- "other": a question, a different instruction, or anything unclear.
-"""
-
-
-CLASSIFY_QUESTION_REPLY = """Codebot asked the user a question while working on a task
-and is waiting for the answer. The question codebot asked is below, followed by the
-user's reply.
-
-""" + fenced("codebot's question", "$question") + """
-
-""" + fenced("user reply", "$reply") + """
-
-Classify the reply's intent. Respond with ONLY a JSON object, no other text:
-{"action": "answer" | "complete" | "abort" | "resume_implementation"}
-
-- "complete" ONLY when the reply explicitly says the WHOLE TASK should be considered
-  finished, marked done, or skipped with nothing more to do (e.g. "mark the task as
-  completed and move on", "this is already done, close it out"). A reply that merely
-  answers the question or confirms a sub-step (e.g. "yes, that part is done, continue")
-  is an "answer", NOT "complete".
-- "abort" ONLY when the reply explicitly tells codebot to stop, abandon, or reset the
-  task WITHOUT marking it done.
-- "resume_implementation" ONLY when the pending question says verification is
-  blocked by unfinished implementation tasks AND the reply explicitly authorizes
-  completing those pending tasks within the ALREADY approved spec/scope. For example:
-  "Continue the pending implementation tasks of the approved spec; preserve existing
-  work and do not replan." This is not a new scope approval or a pass claim. A bare
-  "yes", "continue", "retry", a VERIFY request, or a request only to reconcile evidence
-  is NOT this authorization. New requirements or scope changes are NOT this action.
-- "answer" for everything else: answers, guidance, or new instructions for the current
-  task — even ambiguous ones. When in doubt, choose "answer".
-"""
-
 
 # Restated when resuming a session with the user's answer: the raw reply carries no
 # phase context. Push/PR/merge/archive bans are enforced by the runtime (tool_policy).

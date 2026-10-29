@@ -17,6 +17,7 @@ import sys
 import config
 import errors
 import lifecycle
+import replies
 import workspace
 import workspace_state
 from execution_identity import verification_snapshot as snapshot
@@ -678,9 +679,7 @@ def reply(state, reply):
         return main.do_approval_reply(state, reply)
     if phase == "WAIT_STUCK":
         action = ("retry" if re.fullmatch(r"(?i)\s*retry[.!]?\s*", reply) else
-                  main.parse_json_reply(main.agent_runner.run(main.prompts.render(
-                      main.prompts.CLASSIFY_STUCK_REPLY, reply=reply) + main.handoffs.classification_context(state),
-                      contract=False).output).get("action"))
+                  replies.classify("stuck", reply, state)["action"])
         if action == "abort":
             return main._abort_and_reset(state, "Task stopped; workspace changes preserved.")
         if action == "complete":
@@ -693,9 +692,7 @@ def reply(state, reply):
             state["state"] = origin
         return
     if phase == "WAIT_REPLY":
-        verdict = main.parse_json_reply(main.agent_runner.run(main.prompts.render(
-            main.prompts.CLASSIFY_QUESTION_REPLY, reply=reply,
-            question=state.get("pending_question", "")), contract=False).output)
+        verdict = replies.classify("question", reply, question=state.get("pending_question", ""))
         if verdict.get("action") == "abort":
             return main._abort_and_reset(state, "Task stopped; workspace changes preserved.")
         if verdict.get("action") == "complete":
@@ -716,9 +713,7 @@ def reply(state, reply):
             complete_implementation(state, result)
         return
     if phase == "WAIT_MERGE":
-        verdict = main.parse_json_reply(main.agent_runner.run(main.prompts.render(
-            main.prompts.CLASSIFY_PR_REPLY, reply=reply) + main.handoffs.classification_context(state),
-            contract=False).output)
+        verdict = replies.classify("pr", reply, state)
         action = verdict.get("action")
         if action == "abort":
             return main._abort_and_reset(state, "Task stopped; workspace changes and PRs preserved.")

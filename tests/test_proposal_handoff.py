@@ -99,8 +99,8 @@ class ProposalHandoff(unittest.TestCase):
         self.assertNotIn("Long proposal", body)
 
     def test_wait_classifier_contract_does_not_turn_deferral_into_revision(self):
-        self.assertIn('"wait"', main.prompts.CLASSIFY_APPROVAL_REPLY)
-        self.assertIn("no implementes hasta mi aprobación", main.prompts.CLASSIFY_APPROVAL_REPLY)
+        self.assertIn('"wait"', main.replies.prompt("approval", "r"))
+        self.assertIn("no implementes hasta mi aprobación", main.replies.prompt("approval", "r"))
 
     def test_direct_and_question_continuation_use_same_sender(self):
         result = SimpleNamespace(output="Summary", session_id="sid", question=None)
