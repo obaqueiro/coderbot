@@ -851,51 +851,6 @@ class NativePullRequestTests(unittest.TestCase):
         self.assertEqual(review["push_context"]["continuation"], "review")
         save.assert_called_once_with(review)
 
-    def test_human_feedback_fix_queues_coderbot_push_with_serializable_result(self):
-        state = self.state() | {
-            "state": "WAIT_MERGE", "session_id": "session-1",
-            "pr_url": "https://github.com/acme/project/pull/42",
-        }
-        verdict = Mock(output='{"action":"changes","feedback":"adjust it"}')
-        fixed = Mock(session_id="session-1", output="fixed", question=None, attachments=[])
-        with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main.agent_runner, "resume", return_value=fixed), \
-             patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
-             patch.object(main, "_collect_attachments",
-                          return_value=[Path("/tmp/evidence.txt")]), \
-             patch.object(main, "save_state"), patch.object(main, "email"), \
-             patch.object(main, "git") as git:
-            main.do_merge_reply(state, "please adjust it")
-
-        git.assert_not_called()
-        self.assertEqual(state["state"], "PUSHING")
-        self.assertEqual(state["push_context"]["continuation"], "feedback")
-        self.assertEqual(state["push_context"]["attachments"], ["/tmp/evidence.txt"])
-        json.dumps(state["push_context"])
-
-    def test_human_feedback_question_resumes_to_push_and_wait_for_merge(self):
-        state = self.state() | {
-            "state": "WAIT_MERGE", "session_id": "session-1",
-            "pr_url": "https://github.com/acme/project/pull/42",
-        }
-        verdict = Mock(output='{"action":"changes","feedback":"adjust it"}')
-        question = Mock(
-            session_id="session-1", output="question", question="Which value?", attachments=[])
-        fixed = Mock(session_id="session-1", output="fixed", question=None, attachments=[])
-        with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main.agent_runner, "resume", side_effect=[question, fixed]), \
-             patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
-             patch.object(main, "_collect_attachments", return_value=[]), \
-             patch.object(main, "save_state"), patch.object(main, "email"), \
-             patch.object(main, "git") as git:
-            main.do_merge_reply(state, "please adjust it")
-            self.assertEqual(state["return_state"], "APPLY_PR_FEEDBACK")
-            main._handle_reply(state, "Use 42")
-
-        git.assert_not_called()
-        self.assertEqual(state["state"], "PUSHING")
-        self.assertEqual(state["push_context"]["continuation"], "feedback")
-
     def test_unresolved_thread_fix_queues_coderbot_push(self):
         state = self.state() | {
             "state": "ADDRESS_PR_THREADS", "session_id": "session-1",

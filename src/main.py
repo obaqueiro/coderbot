@@ -3329,22 +3329,9 @@ def do_merge_reply(state: dict, reply: str) -> None:
                                 f"slate.\n\nPR: {pr_url}")
         return
     if action == "changes":
-        if state.get("execution_task_id"):
-            feedback.receive(phase_checkpoint.store(), state, config.REPO_PATH,
-                "pr-feedback-" + hashlib.sha256(reply.encode()).hexdigest(), verdict.get("feedback") or reply)
-            _dispatch_feedback(state)
-            return
-        state["pending_feedback"] = verdict.get("feedback", "")
-        r = agent_runner.resume(
-            state["session_id"],
-            prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
-        if handle_result(state, r, "APPLY_PR_FEEDBACK"):
-            return
-        extra_attachments = _scrub_evidence_from_repo(state, "APPLY_PR_FEEDBACK")
-        attachments = _collect_attachments(r, state.get("e2e_specs", []), state.get("e2e_kind"))
-        attachments += [a for a in extra_attachments if a.resolve() not in {p.resolve() for p in attachments}]
-        _queue_push(state, "feedback", r.output, attachments,
-                    feedback=state.get("pending_feedback", ""))
+        feedback.receive(phase_checkpoint.store(), state, config.REPO_PATH,
+            "pr-feedback-" + hashlib.sha256(reply.encode()).hexdigest(), verdict.get("feedback") or reply)
+        _dispatch_feedback(state)
         return
     # merge
     if state.get("replan") and not state.get("approved_proposal"):

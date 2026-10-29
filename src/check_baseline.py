@@ -99,7 +99,7 @@ def compare(feature, baseline, *, roots=()):
     return result
 
 
-def baseline_result(check, repo, sha, store, *, audit_task=None):
+def baseline_result(check, repo, sha, store):
     cache_task = "baseline:" + str(Path(repo).resolve()) + ":" + sha
     from checks import tool_versions, environment_revision, check_environment
     environment = environment_identity(check.argv, repo, env_keys=check.env_keys, environ=check_environment(), tools=tool_versions(check.argv, Path(repo) / check.cwd),
@@ -166,8 +166,7 @@ def baseline_result(check, repo, sha, store, *, audit_task=None):
                  else arg for arg in check.argv]
         if prepared_python and Path(argv[0]).name in ("python", "python3"):
             argv[0] = prepared_python
-        kwargs = {"audit_task": audit_task} if audit_task else {}
-        result = execute(replace(check, argv=argv), path, store, cache_task, reuse=False, **kwargs)
+        result = execute(replace(check, argv=argv), path, store, cache_task, reuse=False)
         result["failures"] = {signature(test, (path, repo)): signature(error, (path, repo))
                               for test, error in result.get("failures", {}).items()}
     store.record_check(cache_task, identity, result=result)

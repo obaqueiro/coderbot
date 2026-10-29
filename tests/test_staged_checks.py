@@ -36,12 +36,6 @@ class StagedChecksTests(unittest.TestCase):
         self.assertEqual(result["audit_checks"][0]["status"], "not_run")
         self.assertFalse(result["audit_checks"][0]["required"])
 
-    def test_explicit_audit_keeps_cheap_focused_full_order(self):
-        with patch("checks.execute_plan", side_effect=self.execute) as run:
-            result = staged_checks.run(self.state, self.plan, self.root, self.store, audit=True)
-        self.assertEqual([[c.id for c in call.args[0]] for call in run.call_args_list], [["unit"], ["focused"], ["full"]])
-        self.assertEqual(result["stage"], "complete")
-
     def test_exhausted_audits_and_unknown_history_do_not_block_focused_gate(self):
         for i in range(2):
             self.store.put("operation", task_id="task", identity="full-e2e-launch", data={"launch": i})
@@ -104,50 +98,26 @@ class StagedChecksTests(unittest.TestCase):
         path = self.root / "e2e/run.sh"
         path.parent.mkdir()
         path.write_text("#!/bin/sh\necho done\n")
-        checks.execute(check_plan.Check("first", ["sh", "e2e/run.sh"]), self.root, self.store, "task", audit_task="task")
-        result = checks.execute(check_plan.Check("second", ["bash", "e2e/run.sh"]), self.root, self.store, "task", audit_task="task")
+        checks.execute(check_plan.Check("first", ["sh", "e2e/run.sh"]), self.root, self.store, "task")
+        result = checks.execute(check_plan.Check("second", ["bash", "e2e/run.sh"]), self.root, self.store, "task")
         self.assertTrue(result["reused"])
         self.assertEqual(result["check"], "second")
-        self.assertEqual(len(self.store.list("operation", "task", identity="full-e2e-launch")), 1)
-
-    def test_audit_budget_survives_state_reload_and_content_changes(self):
-        plan = [check_plan.Check("focused", ["python3", "-c", 'print(\'{"failures":{},"ran":1}\')', "feature.spec.ts"],
-                                scope="focused", kind="e2e", reporter="json"),
-                check_plan.Check("full", ["echo", "full"], kind="e2e")]
-        staged_checks.run(self.state, plan, self.root, self.store, audit=True)
-        reused = staged_checks.run(dict(self.state), plan, self.root, ExecutionStore(self.store.path), audit=True)
-        self.assertTrue(all(r["reused"] for r in reused["checks"]))
-        (self.root / "source").write_text("second")
-        staged_checks.run(self.state, plan, self.root, self.store, audit=True)
-        (self.root / "source").write_text("third")
-        result = staged_checks.run(self.state, plan, self.root, self.store, audit=True)
-        self.assertEqual(result["stage"], "full_e2e_budget_exhausted")
-        self.assertEqual(len(self.store.list("operation", "task", identity="full-e2e-launch")), 2)
-
-    def test_multiple_full_checks_cannot_exceed_budget_in_one_batch(self):
-        import checks
-        plan = [check_plan.Check(str(i), ["echo", str(i)], kind="e2e") for i in range(3)]
-        result = checks.execute_plan(plan, self.root, self.store, "task", audit_task="task")
-        self.assertEqual(sum(r["status"] == "pass" for r in result), 2)
-        self.assertEqual(sum(r.get("reason") == "full_e2e_budget_exhausted" for r in result), 1)
 
     def test_bookkeeping_does_not_invalidate_actual_check_cache(self):
         import checks
         check = check_plan.Check("full", ["echo", "full"], kind="e2e")
-        checks.execute(check, self.root, self.store, "task", audit_task="task")
+        checks.execute(check, self.root, self.store, "task")
         path = self.root / "openspec/changes/feature/tasks.md"
         path.parent.mkdir(parents=True)
         path.write_text("- [x] Verified\n")
-        self.assertTrue(checks.execute(check, self.root, self.store, "task", audit_task="task")["reused"])
+        self.assertTrue(checks.execute(check, self.root, self.store, "task")["reused"])
 
-    def test_environment_revision_invalidates_cache_without_resetting_budget(self):
+    def test_environment_revision_invalidates_cache(self):
         import checks
         check = check_plan.Check("full", ["echo", "full"], kind="e2e")
-        checks.execute(check, self.root, self.store, "task", audit_task="task")
+        checks.execute(check, self.root, self.store, "task")
         checks.invalidate_environment(self.store, self.root, ["full"])
-        self.assertFalse(checks.execute(check, self.root, self.store, "task", audit_task="task")["reused"])
-        checks.invalidate_environment(self.store, self.root, ["full"])
-        self.assertEqual(checks.execute(check, self.root, self.store, "task", audit_task="task")["reason"], "full_e2e_budget_exhausted")
+        self.assertFalse(checks.execute(check, self.root, self.store, "task")["reused"])
 
     def test_binary_executable_and_shell_flags_are_not_shell_aliases(self):
         path = self.root / "binary"

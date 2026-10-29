@@ -58,8 +58,7 @@ def gate(check, result, state, repo, store):
         return {"status": "pass", "preexisting": [], "regressions": []}
     # Focused evidence must actually pass; baseline debt cannot stand in for it.
     if result["status"] == "fail" and state.get("base_sha") and not (check.scope == "focused" and check_plan.is_e2e(check, repo)):
-        baseline = baseline_result(check, repo, state["base_sha"], store,
-                                   audit_task=store.task_identity(state, repo))
+        baseline = baseline_result(check, repo, state["base_sha"], store)
         value = compare(result, baseline, roots=(Path(repo).resolve(),))
         value["baseline"] = {"sha": state["base_sha"], **{k: baseline.get(k) for k in ("status", "report", "detail", "reason")}}
         if baseline.get("reason"):

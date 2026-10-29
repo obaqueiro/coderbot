@@ -36,21 +36,20 @@ def _changed_specs(full, repo):
     return [replace(full[0], id="e2e:changed", argv=[*full[0].argv, *specs], scope="focused", kind="e2e")] if specs else []
 
 
-def run(state, plan, repo, store, *, evaluate=None, audit=False):
+def run(state, plan, repo, store, *, evaluate=None):
     plan = check_plan.normalize(plan, repo)
     task = store.task_identity(state, repo)
-    required = plan if audit else check_plan.feature_checks(plan, repo)
+    required = check_plan.feature_checks(plan, repo)
     full = [c for c in plan if check_plan.is_e2e(c, repo) and c.scope == "full"
             and not check_plan.has_e2e_selection(c)]
-    audit_checks = _audit_history(full, repo, store, task) if not audit else []
+    audit_checks = _audit_history(full, repo, store, task)
     outcomes = []
     def report(stage, **details):
         return {"stage": stage, "checks": outcomes, "audit_checks": audit_checks,
-                "verification_scope": "regression_audit" if audit else "focused_e2e", **details}
+                "verification_scope": "focused_e2e", **details}
 
-    def execute(selected, *, focused=False, full=False):
-        kwargs = {"audit_task": task} if full else {}
-        result = checks.execute_plan(selected, repo, store, task, **kwargs) if selected else []
+    def execute(selected, *, focused=False):
+        result = checks.execute_plan(selected, repo, store, task) if selected else []
         if len(result) != len(selected):
             result = [{"check": c.id, "status": "unknown", "reason": "incomplete_check_results"} for c in selected]
         result = [{**r, "check": c.id, **({"gate": evaluate(c, r)} if evaluate else {})}
@@ -65,12 +64,10 @@ def run(state, plan, repo, store, *, evaluate=None, audit=False):
 
     cheap = [c for c in required if not check_plan.is_e2e(c, repo)]
     focused = [c for c in required if check_plan.is_e2e(c, repo) and c.scope == "focused"]
-    if audit:
-        full = [c for c in plan if check_plan.is_e2e(c, repo) and c.scope == "full"]
     if not execute(cheap):
         return report("unit_functional")
     invalid = [c for c in focused if not check_plan.has_e2e_selection(c)]
-    if full and not focused and not invalid and not audit:
+    if full and not focused and not invalid:
         # No repair lap just to name the specs the diff already names.
         derived = _changed_specs(full, repo)
         if derived == []:
@@ -84,10 +81,4 @@ def run(state, plan, repo, store, *, evaluate=None, audit=False):
             {"reason": "missing_focused_e2e", "full_checks": [c.id for c in full]}])
     if not execute(focused, focused=True):
         return report("focused_e2e")
-    if not full or not audit:
-        return report("complete")
-    execute(full, full=True)
-    if any(r.get("reason") == "full_e2e_budget_exhausted" or
-           r.get("gate", {}).get("baseline", {}).get("reason") == "full_e2e_budget_exhausted" for r in outcomes):
-        return report("full_e2e_budget_exhausted")
     return report("complete")

@@ -46,24 +46,23 @@ class ShellSyntaxChecks(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertTrue(check_plan.is_e2e(check_plan.Check("execute", argv), self.root))
 
-    def test_syntax_runs_before_focused_checks_and_full_only_on_explicit_audit(self):
+    def test_syntax_runs_before_focused_checks_and_never_the_full_suite(self):
         focused = check_plan.Check("focused", ["playwright", "test", "feature.spec.ts"], scope="focused", kind="e2e")
         full = check_plan.Check("full", ["bash", "e2e/run.sh"], kind="e2e")
         def execute(selected, *args, **kwargs):
             return [{"check": c.id, "status": "pass", "test_count": 1} for c in selected]
-        for audit in (False, True):
-            with self.subTest(audit=audit), patch("checks.execute_plan", side_effect=execute) as run:
-                result = staged_checks.run({"execution_task_id": "task"}, [self.syntax, focused, full],
-                                           self.root, self.store, audit=audit)
-            self.assertEqual(result["stage"], "complete")
-            self.assertEqual([[c.id for c in call.args[0]] for call in run.call_args_list],
-                             [["entorno-sintaxis"], ["focused"]] + ([["full"]] if audit else []))
+        with patch("checks.execute_plan", side_effect=execute) as run:
+            result = staged_checks.run({"execution_task_id": "task"}, [self.syntax, focused, full],
+                                       self.root, self.store)
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual([[c.id for c in call.args[0]] for call in run.call_args_list],
+                         [["entorno-sintaxis"], ["focused"]])
 
     def test_real_syntax_check_neither_launches_harness_nor_spends_audit_budget(self):
         full_syntax = check_plan.Check(self.syntax.id, self.syntax.argv)
         with patch("checks.tool_versions", return_value={}), patch("checks.check_environment", return_value={}):
-            result = checks.execute(full_syntax, self.root, self.store, "task", audit_task="task")
-            repeated = checks.execute(full_syntax, self.root, self.store, "task", audit_task="task")
+            result = checks.execute(full_syntax, self.root, self.store, "task")
+            repeated = checks.execute(full_syntax, self.root, self.store, "task")
         self.assertEqual(result["status"], "pass")
         self.assertTrue(repeated["reused"])
         self.assertFalse((self.root / "harness-ran").exists())

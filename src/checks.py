@@ -35,7 +35,7 @@ def invalidate_environment(store, repo, check_ids):
                   data={"revision": environment_revision(store, repo, check_id) + 1})
 
 
-def execute_plan(plan, repo, store, task_id, *, workers=3, audit_task=None):
+def execute_plan(plan, repo, store, task_id, *, workers=3):
     plan = check_plan.normalize(plan, repo)
     # The same command declared under several ids (or scopes, kinds, inputs) runs once;
     # every id gets that run's result. Tests are the most expensive thing coderbot does.
@@ -47,8 +47,7 @@ def execute_plan(plan, repo, store, task_id, *, workers=3, audit_task=None):
     # Each process takes sorted exclusive resources before launch. Preserve result
     # order for deterministic reporting, independently of completion order.
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        kwargs = {"audit_task": audit_task} if audit_task else {}
-        futures = [pool.submit(copy_context().run, execute, merged, repo, store, task_id, **kwargs)
+        futures = [pool.submit(copy_context().run, execute, merged, repo, store, task_id)
                    for merged, _ in runs]
         results = {id(merged): future.result() for (merged, _), future in zip(runs, futures)}
     by_check = {}
@@ -71,7 +70,7 @@ def check_environment():
     return secret_store.environment()
 
 
-def execute(check, repo, store, task_id, *, reuse=True, audit_task=None):
+def execute(check, repo, store, task_id, *, reuse=True):
     repo = Path(repo).resolve()
     check = check_plan.normalize([check], repo)[0]
     if check_plan.is_harness(check, repo):
@@ -129,19 +128,6 @@ def execute(check, repo, store, task_id, *, reuse=True, audit_task=None):
         log.warning("check timeout budget exhausted: %s; repair before retrying", check.id,
                     extra={"public_progress": f"check blocked: {check.id} (timeout ceiling reached; repair required)"})
         return {**previous["data"]["result"], "reused": True, "timeout_budget_exhausted": True}
-    # Reserve each actual full-suite launch, not a batch. Cache hits cost nothing;
-    # crashes conservatively consume a reservation. Baselines share the feature budget.
-    if audit_task and not preparation_error and check.scope == "full" and check_plan.is_e2e(check, repo):
-        with store.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            count = db.execute("SELECT COUNT(*) FROM operation WHERE task_id=? AND identity=?",
-                               (audit_task, "full-e2e-launch")).fetchone()[0]
-            if count >= 2:
-                return {"check": check.id, "status": "unknown", "failures": {},
-                        "reason": "full_e2e_budget_exhausted", "reused": False}
-            now = time.time()
-            db.execute("INSERT INTO operation VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, audit_task,
-                None, "reserved", "full-e2e-launch", now, now, json.dumps({"check": check.to_dict(), "identity": identity})))
     candidates = store.list("check_run", task_id)
     previous_check = next((r for r in candidates if isinstance(r["data"].get("check"), dict)
                            and r["data"]["check"].get("id") == check.id), None)
