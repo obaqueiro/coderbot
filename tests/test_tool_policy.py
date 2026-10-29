@@ -144,3 +144,20 @@ class Runtime(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadOnlyTurns(unittest.TestCase):
+    def test_a_read_turn_cannot_edit_or_commit_in_any_phase(self):
+        import agent_runner
+        seen = []
+        def run(prompt, contract=True):
+            phase = tool_policy.current_phase()
+            seen.append((phase, tool_policy.claude_args(phase), json.loads(tool_policy.environment(phase)["CODEBOT_POLICY"])))
+            return "result"
+        with patch.object(config, "TOOL_POLICY", True), patch.object(agent_runner, "run", side_effect=run):
+            self.assertEqual(agent_runner.read("investigate"), "result")
+        phase, args, policy = seen[0]
+        self.assertEqual(phase, "READING")
+        self.assertIn("Edit", args[args.index("--disallowedTools"):])
+        self.assertIn("git commit", policy["denied"])
+        self.assertIsNone(tool_policy.reading.get() or None)

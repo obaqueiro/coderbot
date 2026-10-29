@@ -7,6 +7,7 @@ fan out to subagents. Claude Code gets `--settings` deny rules plus a PreToolUse
 `bash -c "…"`, live check C4). OpenCode gets bash permission patterns. Everything here
 fails open: a policy error must never block a turn (CODEBOT_TOOL_POLICY=off disables).
 """
+import contextvars
 import json
 
 import config
@@ -23,10 +24,16 @@ NO_SUBAGENTS = {"IMPLEMENTING", "REPAIR_CHECKS", "E2E", "APPLY_FEEDBACK", "APPLY
                 "ADDRESS_REVIEW", "ADDRESS_PR_THREADS", "RESOLVE_CONFLICTS",
                 "ARCHIVING", "VERIFYING", "INTERNAL_REVIEW"}
 GUARD = config.BRIDGE_PLUGIN_DIR / "runtime" / "guard.py"
+# A read-only turn inside any phase (feedback investigation): inspect, never change.
+READING = "READING"
+READ_ONLY = {"EXPLORING", READING}
+reading = contextvars.ContextVar("reading", default=False)
 
 
 def current_phase() -> str | None:
     """The FSM phase of the agent turn being started (None outside a task)."""
+    if reading.get():
+        return READING
     import agent_runner
     return (agent_runner._task_context.get() or {}).get("state")
 
@@ -36,7 +43,7 @@ def enabled() -> bool:
 
 
 def denied(phase: str | None) -> tuple[str, ...]:
-    return DENIED + (PLANNING_DENIED if phase in PLANNING else ())
+    return DENIED + (PLANNING_DENIED if phase in PLANNING or phase == READING else ())
 
 
 def claude_args(phase: str | None) -> list[str]:
@@ -50,7 +57,7 @@ def claude_args(phase: str | None) -> list[str]:
         "hooks": [{"type": "command", "command": f"python3 {GUARD} || true", "timeout": 5}]}]}}
     args = ["--settings", json.dumps(settings)]
     tools = []
-    if phase == "EXPLORING":
+    if phase in READ_ONLY:
         tools += ["Edit", "Write", "MultiEdit", "NotebookEdit"]
     if phase in NO_SUBAGENTS and config.EXECUTION != "subagent":
         tools += ["Task", "Agent"]
@@ -62,7 +69,8 @@ def environment(phase: str | None) -> dict:
     if not enabled():
         return {}
     policy = {"phase": phase, "repo": str(config.REPO_PATH), "outbox": str(config.DATA_DIR / "outbox"),
-              "denied": list(denied(phase)), "write_scope": ["openspec"] if phase in PLANNING else None}
+              "denied": list(denied(phase)), "write_scope": ["openspec"] if phase in PLANNING else
+              ["/nonexistent"] if phase == READING else None}
     if config.TARGET_MODE == "workspace":
         # The root holds the shared plan (<root>/openspec) and the controller's manifest.
         policy.update(workspace=True, protected=[str(config.REPO_PATH / path) for path in

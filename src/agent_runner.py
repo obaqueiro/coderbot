@@ -303,6 +303,8 @@ def _opencode_environment() -> dict[str, str]:
     phase = tool_policy.current_phase()
     env.update(tool_policy.environment(phase))
     trusted = {"*": "allow", "bash": tool_policy.opencode_bash(phase)} if tool_policy.enabled() else {"*": "allow"}
+    if tool_policy.enabled() and phase == tool_policy.READING:
+        trusted["edit"] = "deny"
     inline["permission"] = trusted
     agents = inline.setdefault("agent", {})
     if not isinstance(agents, dict):
@@ -649,6 +651,16 @@ def converse(prompt: str, session_id: str | None = None, *, on_session=None):
 
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
+def read(prompt: str):
+    """A fresh read-only session: it may inspect the repository and run commands, but
+    the runtime denies edits and commits (feedback investigation, attribution)."""
+    token = tool_policy.reading.set(True)
+    try:
+        return run(prompt)
+    finally:
+        tool_policy.reading.reset(token)
+
+
 def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
     classifiers) whose only output instruction must be their own JSON contract."""

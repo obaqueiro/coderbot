@@ -4262,7 +4262,7 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     if not assessment:
         database.update("feedback", row, status="investigating")
         try:
-            result = agent_runner.run(feedback.investigation(state, row))
+            result = agent_runner.read(feedback.investigation(state, row))
             assessment = feedback.validate(parse_json_reply(result.output))
         except Exception:
             state["state"] = original_phase
