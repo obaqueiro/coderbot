@@ -19,11 +19,11 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import time
 from pathlib import Path
 
 import config
+import persistence
 import privatebin
 import redaction
 
@@ -68,15 +68,7 @@ def put(task_key: str, name: str, value: str, *, ttl: int, source: str) -> None:
     os.chmod(_root(), 0o700)
     os.chmod(directory, 0o700)
     payload = json.dumps({"value": value, "expires": time.time() + ttl, "source": source})
-    fd, temp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(payload)
-        os.replace(temp, directory / f"{name}.json")
-    except BaseException:
-        Path(temp).unlink(missing_ok=True)
-        raise
+    persistence.atomic_write(directory / f"{name}.json", payload, mode=0o600)
     redaction.register(value)
 
 

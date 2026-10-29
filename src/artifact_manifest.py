@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import persistence
+
 
 def file_hash(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -14,7 +16,7 @@ def write(path, *, run_id, snapshot, status, artifacts):
         file = Path(entry["path"]).resolve()
         entries.append({**entry, "path": str(file), "hash": file_hash(file), "size": file.stat().st_size})
     value = {"version": 1, "run_id": run_id, "snapshot": snapshot, "status": status, "artifacts": entries}
-    Path(path).write_text(json.dumps(value, ensure_ascii=False))
+    persistence.write_json(path, value, ensure_ascii=False)
     return value
 
 

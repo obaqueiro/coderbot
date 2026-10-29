@@ -60,6 +60,6 @@ class CredentialLoading(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "token.json"
             target.write_text("old")
-            google_auth._write_atomically(target, '{"new": 1}')
+            google_auth.persistence.atomic_write(target, '{"new": 1}')
             self.assertEqual(target.read_text(), '{"new": 1}')
             self.assertEqual(os.listdir(tmp), ["token.json"])

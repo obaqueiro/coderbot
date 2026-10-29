@@ -12,6 +12,7 @@ from pathlib import Path
 from googleapiclient.discovery import build
 
 import config
+import persistence
 from command_text import COMMANDS, parse_command
 from google_auth import load_credentials
 
@@ -207,18 +208,15 @@ def _processed_path():
 
 
 def _load_processed() -> list[str]:
-    path = _processed_path()
-    return json.loads(path.read_text()) if path.exists() else []
+    processed = persistence.read_json(_processed_path(), [])
+    return processed if isinstance(processed, list) else persistence.quarantine(_processed_path(), [])
 
 
 def _save_processed(ids: list[str]) -> None:
     # Replies come from the same account, so UNREAD is never set on them;
     # we track consumed message ids ourselves instead. Insertion order, so
     # truncation drops the oldest entries.
-    path = _processed_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(ids[-500:]))
-    tmp.replace(path)
+    persistence.write_json(_processed_path(), ids[-500:])
 
 
 def mark_processed(message_id: str) -> None:

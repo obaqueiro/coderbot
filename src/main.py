@@ -43,6 +43,7 @@ import delivery_checkpoint
 import evidence_delivery
 import message_templates
 import performance
+import persistence
 import config
 import drive_client
 import evidence
@@ -82,8 +83,8 @@ redaction.install()  # after every root handler exists (never raises)
 # ---------------------------------------------------------------- state
 
 def load_state() -> dict:
-    if config.STATE_PATH.exists():
-        state = json.loads(config.STATE_PATH.read_text())
+    state = persistence.read_state(config.STATE_PATH)
+    if state is not None:
         state = _validate_target_state(state)
         recovered = selfheal_events.recover(state)
         if recovered != state:
@@ -92,6 +93,24 @@ def load_state() -> dict:
         state = recovered
         return task_records.migrate(state, phase_checkpoint.store(), config.REPO_PATH)
     return _validate_target_state({"state": "IDLE"})
+
+
+def _report_quarantined() -> None:
+    """Tell the operator once about every unparseable file set aside (best effort)."""
+    while persistence.quarantined:
+        path, moved = persistence.quarantined[0]
+        log.error("%s did not parse; moved it to %s and continued without it", path, moved)
+        body = (f"{config.INSTANCE_ID}: {path} was unreadable (not valid JSON). It was moved to "
+                f"{moved} and I continued without it; check that copy for anything to restore.")
+        try:
+            if config.COMM_CHANNEL == "slack":
+                gmail_client.announce(body)
+            else:
+                gmail_client.send(f"{config.SUBJECT_PREFIX} unreadable state file", body)
+        except Exception:  # noqa: BLE001 — the report must never stall the loop
+            log.warning("could not report the quarantined file", exc_info=True)
+            return
+        persistence.quarantined.pop(0)
 
 
 def _validate_target_state(state: dict) -> dict:
@@ -107,9 +126,7 @@ def _validate_target_state(state: dict) -> dict:
 
 
 def save_state(state: dict) -> None:
-    tmp = config.STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.replace(config.STATE_PATH)
+    persistence.write_json(config.STATE_PATH, state, indent=2)
     global _conversation_state
     with _status_command_lock:
         _conversation_state = copy.deepcopy(state)
@@ -4782,44 +4799,9 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
     return problems
 
 
-# Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
-# next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("sent_messages", "declined_findings", "review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
-              "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
-              "recovery_id", "replan", "approved_proposal",
-              "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
-              "check_waivers", "technical_retry", "stuck_diagnostic", "feedback_origin",
-              "last_delivery", "verification_diagnostic", "proposal_delivery_pending",
-              "feedback_question_origin", "remote_branch", "feedback_delivery_pending", "recovery_resume",
-              "pending_decision_id", "reminded_decision", "last_effective_progress",
-              "feedback_question_id",
-              "isolated_merge_heads",
-              "branch", "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
-        "return_state", "review_since", "review_round", "review_run_link",
-              "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
-              "pr_title_guidance",
-              "pr_threads", "pr_thread_round", "pr_thread_notified", "pr_threads_seen",
-              "bot_comment_ids", "verify_round",
-              "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
-              "e2e_repair_status", "push_context", "archive_error", "e2e_round",
-              "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
-              "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
-              "evidence_url", "milestones_announced", "banner_state", "banner_stage", "proposal_snapshot", "proposal_sent_key",
-              "quality_report", "internal_review_report", "e2e_passed",
-              "implementation_summary", "pending_feedback", "architecture_report",
-              "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",
-              "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
-               "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
-               "reported_check_plan_error", "check_plan_repair_round", "check_plan_repair_revision",
-               "rejected_check_plan", "failure_context", "provider_block",
-              "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
-              "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
-              "implementation_return_round", "implementation_turn", "implementation_progress",
-              "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
-              "implementation_attachments", "implementation_ready", "pending_decision", "check_repair", "pending_reply_delivery",
-              "verification_guidance", "verification_requested_from", "verification_blocker",
-              "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
-              "approved_task_inventory", "verified_task_inventory", "evidence_recovery_round", "focused_scope_reconciled")
+# Every task-scoped state key (persistence.TASK_KEYS): cleared when a task ends, kept
+# with a held task.
+RESET_KEYS = persistence.TASK_KEYS
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -5111,21 +5093,20 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
 # ---------------------------------------------------------------- on-hold tasks
 
 def _load_holds() -> list[dict]:
-    try:
-        holds = json.loads(config.HOLDS_PATH.read_text())
-        for hold in holds:
-            if hold.get("saved"):
-                hold["saved"] = _validate_target_state(hold["saved"])
-                task_records.migrate(hold["saved"], phase_checkpoint.store(), config.REPO_PATH)
-        return holds
-    except (OSError, json.JSONDecodeError):
-        return []
+    """Unparseable holds.json is quarantined (and reported), never read as empty and
+    then overwritten; an unreadable one raises rather than losing the holds."""
+    holds = persistence.read_json(config.HOLDS_PATH, [])
+    if not isinstance(holds, list):
+        return persistence.quarantine(config.HOLDS_PATH, [])
+    for hold in holds:
+        if hold.get("saved"):
+            hold["saved"] = persistence.forward(_validate_target_state(hold["saved"]))
+            task_records.migrate(hold["saved"], phase_checkpoint.store(), config.REPO_PATH)
+    return holds
 
 
 def _save_holds(holds: list[dict]) -> None:
-    tmp = config.HOLDS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(holds, indent=2))
-    tmp.replace(config.HOLDS_PATH)
+    persistence.write_json(config.HOLDS_PATH, holds, indent=2)
 
 
 def _commit_pending_work(state: dict) -> list[str]:
@@ -6333,6 +6314,7 @@ def _run_loop() -> None:
         _liveness["tick_started"] = time.time()
         try:
             state = load_state()
+            _report_quarantined()
             if state.get("workspace_path"):
                 config.REPO_PATH = Path(state["workspace_path"])
         except (ValueError, OSError):

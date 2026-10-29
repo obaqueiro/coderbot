@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import markdown
 
 import config
+import persistence
 
 
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -168,9 +169,7 @@ def prepare(data_dir: Path, repo: Path, slug: str, branch: str,
     dest.mkdir(parents=True, exist_ok=True)
     target = dest / f"proposal-{fingerprint(files)}.html"
     if not target.exists():
-        temp = target.with_suffix(".tmp")
-        temp.write_bytes(data)
-        temp.replace(target)
+        persistence.atomic_write(target, data)
     return target, files
 
 
@@ -180,9 +179,7 @@ def save_snapshot(data_dir: Path, branch: str, files: dict[str, str]) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     target = dest / f"proposal-{fingerprint(files)}.json"
     if not target.exists():
-        temp = target.with_suffix(".tmp")
-        temp.write_text(json.dumps(files, ensure_ascii=False), encoding="utf-8")
-        temp.replace(target)
+        persistence.write_json(target, files, ensure_ascii=False)
     return target
 
 
