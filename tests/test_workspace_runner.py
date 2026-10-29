@@ -437,18 +437,18 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.edit(self.ui)
         self.records()
         self.verified()
-        runner.publish(self.state)
+        lifecycle.publish(runner, self.state)
 
     def creates(self):
         return sum(1 for c in self.github.calls if c[1:3] == ("pr", "create"))
 
     def test_lazy_drafts_then_ready_prs_pinned_by_number(self):
         with patch.object(main.config, "DRAFT_PR", True):
-            runner.rails(self.state)  # nothing past merge-base yet: no PR
+            lifecycle.rails(runner, self.state)  # nothing past merge-base yet: no PR
             self.assertEqual(self.github.prs, {})
             self.edit(self.api)
             self.records()
-            runner.rails(self.state)
+            lifecycle.rails(runner, self.state)
         self.assertEqual([v["repo"] for v in self.github.prs.values()], ["api"])
         self.assertTrue(self.github.prs[("api", 1)]["draft"])
         main.email.assert_called_once()
@@ -457,7 +457,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.records()
         self.verified()
         main.email.reset_mock()
-        runner.publish(self.state)
+        lifecycle.publish(runner, self.state)
         self.assertEqual(self.state["state"], "WAIT_MERGE")
         self.assertFalse(any(pr["draft"] for pr in self.github.prs.values()))
         self.assertEqual(self.creates(), 2)
@@ -467,7 +467,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual({n: r["pr_number"] for n, r in records.items()}, {"api": 1, "ui": 2})
         self.assertTrue(all(r["announced"] for r in records.values()))
         self.assertNotIn("unused", records)
-        runner.publish(self.state)  # a restart replays publication without another PR
+        lifecycle.publish(runner, self.state)  # a restart replays publication without another PR
         self.assertEqual(self.creates(), 2)
 
     def test_poll_is_throttled_and_covers_every_repository(self):
@@ -475,18 +475,18 @@ class WorkspaceRunnerTests(unittest.TestCase):
         with patch.object(main, "unresolved_review_threads", return_value=[]), patch.object(main, "handle_wait") as wait, \
              patch.object(main, "_finish_task") as finish:
             self.github.calls.clear()
-            runner.poll_prs(self.state)
+            lifecycle.poll_prs(runner, self.state)
             self.assertEqual(sorted(c[0] for c in self.github.calls), ["api", "ui"])
-            runner.poll_prs(self.state)  # within the interval: no GitHub calls
+            lifecycle.poll_prs(runner, self.state)  # within the interval: no GitHub calls
             self.assertEqual(len(self.github.calls), 2)
             self.assertEqual(wait.call_count, 2)
             self.github.prs[("api", 1)]["state"] = "MERGED"
             self.state["workspace"]["pr_polled_at"] = 0
-            runner.poll_prs(self.state)
+            lifecycle.poll_prs(runner, self.state)
             finish.assert_not_called()
             self.github.prs[("ui", 2)]["state"] = "MERGED"
             self.state["workspace"]["pr_polled_at"] = 0
-            runner.poll_prs(self.state)
+            lifecycle.poll_prs(runner, self.state)
         finish.assert_called_once()
         self.assertFalse(finish.call_args.kwargs["reset_repo"])
         self.assertEqual(git(self.api, "branch", "--show-current"), "main")  # returned to base
@@ -494,7 +494,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
     def test_closed_pr_asks_and_retry_opens_a_new_pr(self):
         self.publish()
         self.github.prs[("ui", 2)]["state"] = "CLOSED"
-        runner.poll_prs(self.state)
+        lifecycle.poll_prs(runner, self.state)
         self.assertEqual(self.state["state"], "WAIT_STUCK")
         self.assertEqual(self.state["stuck_return"], "PUSHING")
         self.assertIn("closed without merging", self.state["stuck_error"])
@@ -517,14 +517,14 @@ class WorkspaceRunnerTests(unittest.TestCase):
         git(self.ui, "fetch", "-q", str(clone), "bot-feature")
         external = git(self.ui, "rev-parse", "FETCH_HEAD")
         self.github.prs[("ui", 2)]["sha"] = external
-        runner.poll_prs(self.state)
+        lifecycle.poll_prs(runner, self.state)
         self.assertEqual(self.state["state"], "VERIFYING")
         self.assertEqual(git(self.ui, "rev-parse", "HEAD"), external)
         self.github.prs[("ui", 2)]["sha"] = "0" * 40  # diverged: needs a human
         self.state.update(state="WAIT_MERGE")
         self.state["workspace"]["pr_polled_at"] = 0
         self.state["workspace"]["repositories"]["ui"]["delivered_sha"] = external
-        runner.poll_prs(self.state)
+        lifecycle.poll_prs(runner, self.state)
         self.assertEqual(self.state["state"], "WAIT_STUCK")
 
     def test_threads_from_all_prs_are_answered_in_one_wave(self):
@@ -533,7 +533,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
                    "https://github.com/example/ui/pull/2": [{"id": "T2", "comments": [{"body": "fix ui"}]}]}
         with patch.object(main, "unresolved_review_threads", side_effect=lambda url: threads[url]), \
              patch.object(main, "thread_has_new_comments", return_value=True):
-            runner.poll_prs(self.state)
+            lifecycle.poll_prs(runner, self.state)
         self.assertEqual(self.state["state"], "ADDRESS_PR_THREADS")
         result = SimpleNamespace(session_id="session", output="RESOLVE: T1 fixed: done\nRESOLVE: T2 fixed: done",
                                  question=None, attachments=[], data=None)
@@ -544,7 +544,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual(self.state["state"], "VERIFYING")
         self.verified()
         with patch.object(main, "_resolve_review_threads") as resolve:
-            runner.publish(self.state)
+            lifecycle.publish(runner, self.state)
         self.assertEqual(sorted(call.args[0]["pr_url"] for call in resolve.call_args_list), sorted(threads))
 
     def test_feature_review_findings_are_data_for_one_fix_wave(self):
@@ -594,7 +594,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         report = self.state["workspace"]["merge_report"]
         self.assertEqual((report["merged"], report["failed"]), (["ui"], "api"))
         self.assertEqual(main.email.call_args.args[1], "partial merge")
-        self.assertIn("Partial merge", runner.status_body(self.state))
+        self.assertIn("Partial merge", lifecycle.status_body(self.state))
 
     def test_typed_tool_errors(self):
         cases = {"echo 'fatal: unable to access: Could not resolve host: github.com' >&2; exit 1": errors.TRANSIENT,
@@ -610,7 +610,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
     def test_publication_waits_for_pending_conversation_changes(self):
         self.verified()
         with patch.object(main, "_conversation_delivery_blocked", return_value=True):
-            runner.publish(self.state)
+            lifecycle.publish(runner, self.state)
         self.assertEqual(self.github.calls, [])
 
 

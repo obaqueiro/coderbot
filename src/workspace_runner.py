@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 import re
 import secrets
-import time
+import sys
 
 import config
 import errors
@@ -327,29 +327,9 @@ def implement(state):
         branch=state["branch"], e2e_note="Implement tests in each affected repo plus shared E2E tests.",
         e2e_report_note="In checks, list the actual repository and integration commands.")
         + "\n" + state.get("implementation_feedback", ""))
-    rails(state)
+    lifecycle.rails(_self, state)
     if not main.handle_result(state, result, "IMPLEMENTING"):
         complete_implementation(state, result)
-
-
-def rails(state):
-    """After each implementation turn: progress pushes and lazy draft PRs (best effort)."""
-    import main
-    if not config.DRAFT_PR:
-        return
-    try:
-        ops = lifecycle.Target.of(target())
-        records = state["workspace"]["repositories"]
-        lifecycle.push_progress(ops, records)
-        opened = lifecycle.open_drafts(ops, records, main._pr_title(state),
-                                       lambda name: pr_body(state, name, draft=True), lambda: main.save_state(state))
-    except Exception as error:  # noqa: BLE001 - never fail the turn; OPEN_PR publishes
-        log.warning("workspace progress publication failed: %s", error)
-        return
-    if opened:
-        lifecycle.edit_bodies(ops, records, lambda name: pr_body(state, name, draft=True))
-        main.email(state, "draft PR", "I opened draft PRs so you can follow the implementation; I push after "
-                   "each step and mark them ready once the feature is verified and reviewed.\n\n" + status_body(state))
 
 
 def remember_checks(state, output):
@@ -558,7 +538,7 @@ def address(state):
         for name in review_data.get("conflicts", [review_data.get("repository")]):
             if name:
                 ops.repo(name).fetch()
-    data = {"findings": state["workspace"].get("findings"), "threads": threads_by_repo(review_data),
+    data = {"findings": state["workspace"].get("findings"), "threads": lifecycle.threads_by_repo(review_data),
             "conflicts": review_data.get("conflicts") or ([review_data["repository"]] if review_data.get("conflict") else None)}
     prompt = (CARDS.get(phase, CARDS["APPLY_FEEDBACK"]) + " Preserve user changes; commit in each repository.\n"
               + main.prompts.fenced("controller data", json.dumps({k: v for k, v in data.items() if v}, ensure_ascii=False))
@@ -578,13 +558,6 @@ def address(state):
     state["workspace"].pop("findings", None)
     state["workspace"]["review_output"] = result.output
     state["state"] = "VERIFYING"
-
-
-def threads_by_repo(review_data):
-    """{repository: threads}; older states stored one repository's threads."""
-    if review_data.get("repository") and review_data.get("threads"):
-        return {review_data["repository"]: review_data["threads"]}
-    return review_data.get("threads_by_repo") or {}
 
 
 def verification_attempt(state, kind, detail):
@@ -685,231 +658,6 @@ def archive(state):
     state["state"] = "OPEN_PR"
 
 
-def status_body(state):
-    records = state["workspace"]["repositories"]
-    lines = ["Feature: " + state.get("item", "")]
-    for name, record in records.items():
-        if record.get("pr_url"):
-            lines.append(f"- {name}: {record['pr_url']} ({record.get('merge', {}).get('status') or 'OPEN'})")
-    edits = sorted({entry["path"] for entry in state["workspace"].get("local_edits", [])})
-    if edits:
-        lines += ["", "Local-only workspace changes (NOT delivered by merging PRs):", *["- " + p for p in edits]]
-    concerns = state["workspace"].get("concerns") or []
-    if concerns:
-        lines += ["", "Review notes left open:", *["- " + c for c in concerns]]
-    report = state["workspace"].get("merge_report")
-    if report and report.get("failed"):
-        lines += ["", f"Partial merge: merged {', '.join(report['merged']) or 'none'}; {report['failed']} failed: "
-                  f"{report['error']}"]
-    lines += ["", "Each repository PR is independent; the feature completes only after all required merges."]
-    return "\n".join(lines)
-
-
-def pr_body(state, name, *, draft=False):
-    return ((f"Work in progress: coderbot pushes as it implements and marks this PR ready after verification "
-             "and review.\n\n" if draft else "")
-            + f"Feature: {state['item']}\nSource: {state.get('item_url') or 'backlog'}\nRepository: {name}\n"
-              f"Shared local plan: {state.get('archive_path', state['slug'])}\n\n"
-            + ("" if draft else state.get("implementation_summary", "") + "\n\n") + status_body(state))
-
-
-def closed(state, name, record):
-    """A PR closed without merging: ask, keeping every other repository's PR."""
-    import main
-    number = lifecycle.pr_number(record)
-    record.setdefault("closed_prs", []).append(number)
-    for key in ("pr_number", "pr_url", "delivered_sha", "announced", "draft"):
-        record.pop(key, None)
-    record["merge"] = {}
-    main.save_state(state)
-    main._enter_stuck(state, "PUSHING", f"The PR for {name} (#{number}) was closed without merging. Reply "
-                      "'retry' to open a new PR for it from the same verified branch, 'complete' to finish the "
-                      "task without it, or 'abort' to stop. The other repositories' PRs are unchanged.")
-
-
-def moved(state, name, ops, record, value):
-    """The PR head is not the verified head: take an external push in, or push ours."""
-    import main
-    lifecycle.on_branch(ops, record)
-    remote, local = value.get("headRefOid"), ops.head()
-    ops.fetch(record["branch"])
-    if remote and remote != local and ops.is_ancestor(local, remote):
-        ops.git("merge", "--ff-only", "--quiet", remote)
-        main.email(state, "PR updated externally", f"New commits were pushed to the {name} PR; I took them in "
-                   "and am re-verifying the feature before it can merge.")
-        state["state"] = "VERIFYING"
-    elif remote and ops.is_ancestor(remote, local):
-        state["state"] = "PUSHING"
-    else:
-        main._enter_stuck(state, "WAIT_MERGE", f"The {name} PR head ({remote}) diverged from the verified branch "
-                          f"({local}). Reconcile the branch by hand, then reply 'retry'.")
-
-
-def publish(state):
-    import main
-    context = target()
-    if main._scope_drift(state) or main._conversation_delivery_blocked(state):
-        return
-    bind(state, context)
-    if state["workspace"].get("verified_snapshot") != snapshot(context.root):
-        state["state"] = "VERIFYING"
-        return
-    ops = lifecycle.Target.of(context)
-    records = state["workspace"]["repositories"]
-    for name, record in records.items():
-        if record.get("merge", {}).get("status") == "MERGED":
-            continue
-        repo = ops.repo(name)
-        lifecycle.on_branch(repo, record)
-        if repo.tracked_changes():
-            result = turn(state, f"Commit the completed feature changes in {name}, excluding evidence and secrets. "
-                          "Do not push; leave unrelated changes alone.")
-            if not main.handle_result(state, result, "OPEN_PR"):
-                state["state"] = "VERIFYING"
-            return
-        if not repo.ahead(record.get("base_sha")):
-            record["state"] = "NO_CHANGES"
-            continue
-        repo.push(record["branch"])
-        if not lifecycle.pr_number(record):
-            number = repo.open_pr(record["branch"], main._pr_title(state), pr_body(state, name), draft=False)
-            # Persist accepted publication before any further call or notification.
-            record.update(pr_number=number, pr_url=f"https://github.com/{repo.slug}/pull/{number}")
-            main.save_state(state)
-        value = repo.pr(lifecycle.pr_number(record))
-        if not repo.matches(record, value):
-            raise errors.Fatal(f"{name}: {record['pr_url']} no longer matches its repository and branch", code="pr_mismatch")
-        if value["state"] == "CLOSED":
-            return closed(state, name, record)
-        if value["state"] == "OPEN" and value["headRefOid"] != repo.head():
-            raise errors.Transient(f"{name}: GitHub has not caught up with the pushed head yet", code="pr_head_lag")
-        if value["state"] == "OPEN" and value.get("isDraft"):
-            repo.gh("pr", "ready", str(value["number"]))
-        record.update(pr_number=value["number"], delivered_sha=value["headRefOid"], state="WAIT_MERGE",
-                      merge={"status": value["state"]}, draft=False)
-        main.save_state(state)
-    resolve_threads(state)
-    fresh = [name for name, record in records.items() if record.get("pr_url") and not record.get("announced")]
-    state["state"] = "WAIT_MERGE"
-    if fresh:
-        lifecycle.edit_bodies(ops, records, lambda name: pr_body(state, name))
-        reports = [entry["report"] for entry in state.get("final_check_report", {}).get("checks", [])
-                   if entry.get("report") and Path(entry["report"]).is_file()]
-        attachments = [Path(path) for path in dict.fromkeys([*reports, *state["workspace"].get("attachments", [])])
-                       if Path(path).is_file()]
-        main.email(state, "PRs ready for review", status_body(state), attachments)
-        if state.get("last_delivery", {}).get("complete") is not False:
-            for name in fresh:
-                records[name]["announced"] = True
-            main.save_state(state)
-        for name in fresh:
-            try:
-                main.task_source.note_pr(state["item"], state.get("item_id"), records[name]["pr_url"])
-            except Exception:
-                log.exception("Could not link workspace PR on backlog")
-    if not any(record.get("pr_url") for record in records.values()):
-        main.email(state, "local workspace changes verified", status_body(state))
-        if state.get("last_delivery", {}).get("complete") is not False:
-            main._finish_task(state, "Verified local-only workspace changes.\n" + status_body(state), reset_repo=False)
-
-
-def resolve_threads(state):
-    """Reply to and resolve the threads the last ADDRESS_PR_THREADS turn answered."""
-    import main
-    output = state["workspace"].pop("review_output", None)
-    review_data = state.pop("workspace_review", {})
-    records = state["workspace"]["repositories"]
-    for name, threads in threads_by_repo(review_data).items() if output else ():
-        if name in records and records[name].get("pr_url"):
-            reviewed = {"pr_url": records[name]["pr_url"], "pr_threads": threads,
-                        "pr_threads_seen": records[name].setdefault("review", {}).get("seen", {})}
-            main._resolve_review_threads(reviewed, output, key="pr_threads")
-            records[name]["review"]["seen"] = reviewed.get("pr_threads_seen", {})
-
-
-def poll_prs(state):
-    """One throttled poll per interval covering every repository's PR."""
-    import main
-    ws = state["workspace"]
-    if time.time() < ws.get("pr_polled_at", 0) + config.POLL_INTERVAL_SECONDS:
-        return main.handle_wait(state)
-    ws["pr_polled_at"] = time.time()
-    context = target()
-    ops = lifecycle.Target.of(context)
-    records = ws["repositories"]
-    pending, threads, conflicts = False, {}, []
-    for name, record in records.items():
-        number = lifecycle.pr_number(record)
-        if not number:
-            continue
-        repo = ops.repo(name)
-        value = repo.pr(number)
-        if not repo.matches(record, value):
-            raise errors.Fatal(f"{name}: {record.get('pr_url')} no longer matches its repository and branch", code="pr_mismatch")
-        record.update(pr_number=number, merge={"status": value["state"], "mergeable": value.get("mergeable")})
-        if value["state"] == "CLOSED":
-            return closed(state, name, record)
-        if value["state"] == "MERGED":
-            continue
-        pending = True
-        if value.get("headRefOid") != record.get("delivered_sha"):
-            return moved(state, name, repo, record, value)
-        if value.get("mergeable") == "CONFLICTING":
-            conflicts.append(name)
-            continue
-        listed = main.unresolved_review_threads(record["pr_url"])
-        seen = record.setdefault("review", {}).get("seen", {})
-        fresh = [thread for thread in listed or [] if main.thread_has_new_comments(thread, seen)]
-        if fresh:
-            threads[name] = fresh
-    if conflicts:
-        state["workspace_review"] = {"conflicts": conflicts}
-        state["state"] = "RESOLVE_CONFLICTS"
-        return
-    if threads and ws.get("thread_rounds", 0) < config.PR_THREAD_MAX_ROUNDS:
-        ws["thread_rounds"] = ws.get("thread_rounds", 0) + 1
-        state["workspace_review"] = {"threads_by_repo": threads}
-        state["state"] = "ADDRESS_PR_THREADS"
-        return
-    if pending:
-        return main.handle_wait(state)
-    if any(record.get("pr_url") for record in records.values()):
-        lifecycle.release(ops, records)
-        main._finish_task(state, "All feature PRs merged.\n" + status_body(state), reset_repo=False, merged=True)
-
-
-def merge_all(state, force=False):
-    """Pre-check every PR, then merge in the manifest's order; record a partial merge."""
-    import main
-    context = target()
-    if state["workspace"].get("verified_snapshot") != snapshot(context.root):
-        state["state"] = "VERIFYING"
-        return
-    ops = lifecycle.Target.of(context)
-    records = state["workspace"]["repositories"]
-    order = lifecycle.merge_order(records, context.manifest.merge_order)
-    problems = lifecycle.precheck(ops, records, order)
-    for name in order:
-        if records[name].get("merge", {}).get("status") != "MERGED":
-            threads = main.unresolved_review_threads(records[name]["pr_url"])
-            if threads is None or threads and not force:
-                problems.append(f"{name}: review threads remain or could not be checked")
-    if problems:
-        main.email(state, "merge blocked", "Nothing was merged:\n" + "\n".join("- " + p for p in problems)
-                   + "\n\n" + status_body(state))
-        return
-    report = lifecycle.merge(ops, records, order, lambda: main.save_state(state))
-    state["workspace"]["merge_report"] = report
-    main.save_state(state)
-    if report["failed"]:
-        main.email(state, "partial merge", f"Merged in order: {', '.join(report['merged']) or 'none'}. "
-                   f"{report['failed']} failed: {report['error']}\nThe remaining PRs are untouched; reply 'merge' "
-                   "to retry them once the cause is fixed.\n\n" + status_body(state))
-        return
-    state["workspace"]["pr_polled_at"] = 0
-    poll_prs(state)
-
-
 def reply(state, reply):
     import main
     phase = state["state"]
@@ -966,7 +714,7 @@ def reply(state, reply):
         if action == "merge":
             if main._scope_drift(state) or main._conversation_delivery_blocked(state):
                 return
-            return merge_all(state, force=verdict.get("force") is True)
+            return lifecycle.merge_all(_self, state, force=verdict.get("force") is True)
         if action == "wait":
             main.email(state, "merge deferred", "Work and PRs are preserved; I will keep waiting.")
             return
@@ -984,8 +732,11 @@ def wait_clean(state):
     state["state"] = "IDLE"
 
 
+_self = sys.modules[__name__]
 PHASES = {"IDLE": pick, "EXPLORING": explore, "PROPOSING": propose, "REPLANNING": replan,
           "IMPLEMENTING": implement, "VERIFYING": verify, "REPAIR_CHECKS": repair_checks,
-          "INTERNAL_REVIEW": review, "ARCHIVING": archive, "OPEN_PR": publish, "PUSHING": publish,
-          "WAIT_REVIEW": poll_prs, "WAIT_MERGE": poll_prs, "APPLY_FEEDBACK": address,
+          "INTERNAL_REVIEW": review, "ARCHIVING": archive, "OPEN_PR": lambda s: lifecycle.publish(_self, s),
+          "PUSHING": lambda s: lifecycle.publish(_self, s),
+          "WAIT_REVIEW": lambda s: lifecycle.poll_prs(_self, s),
+          "WAIT_MERGE": lambda s: lifecycle.poll_prs(_self, s), "APPLY_FEEDBACK": address,
           "ADDRESS_PR_THREADS": address, "RESOLVE_CONFLICTS": address, "WAIT_CLEAN": wait_clean}
