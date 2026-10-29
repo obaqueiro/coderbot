@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+from tests.fake_github import FakeGitHub
 import sys
 import json
 from types import SimpleNamespace
@@ -296,9 +298,11 @@ class HumanHandoffs(unittest.TestCase):
             evidence.write_text("report")
             state = {"state": "WAIT_MERGE", "slug": "example", "branch": "bot-example",
                      "item": "Create API", "pr_url": "https://github.com/a/b/pull/3"}
+            github = FakeGitHub(base=main.config.BASE_BRANCH)
+            github.add(3, "bot-example")
             with patch.object(main, "save_state"), \
                  patch.object(main.final_checks, "run", return_value={"status": "pass"}), \
-                 patch.object(main, "git"), \
+                 patch.object(main, "git"), github, \
                  patch.object(main, "email") as send:
                 main._queue_push(state, "feedback", "Added pagination and ran unit tests",
                                  [evidence], feedback="Add pagination")

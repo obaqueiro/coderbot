@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
+from tests.fake_github import FakeGitHub
+
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 
@@ -532,18 +534,21 @@ class ArchivalTests(unittest.TestCase):
 
 
 class NativePullRequestTests(unittest.TestCase):
+    """OPEN_PR publishes through the shared seam (lifecycle.deliver) on a fake GitHub."""
+
     def setUp(self):
-        for helper in ("_publish_existing_pr", "_verify_pr_publication"):
-            patcher = patch.object(main, helper)
-            patcher.start()
-            self.addCleanup(patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name)
         (self.repo / "openspec/changes/archive/2026-09-01-api-version").mkdir(parents=True)
         self.repo_patch = patch.object(main.config, "REPO_PATH", self.repo)
         self.repo_patch.start()
+        self.github = FakeGitHub(base=main.config.BASE_BRANCH).__enter__()
+        self.save = patch.object(main, "save_state")
+        self.save.start()
 
     def tearDown(self):
+        self.save.stop()
+        self.github.__exit__()
         self.repo_patch.stop()
         self.tmp.cleanup()
 
@@ -564,174 +569,141 @@ class NativePullRequestTests(unittest.TestCase):
             "has_code_review": True,
         }
 
-    def test_native_pr_pushes_branch_and_stores_https_url(self):
-        state = self.state()
-        responses = [
-            subprocess.CompletedProcess([], 0, "[]\n", ""),
-            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
-        ]
-        with patch.object(main, "git", side_effect=self.ready_git) as git, \
-             patch.object(main.operations, "tool", side_effect=responses) as process, \
+    def created(self):
+        creates = [c for c in self.github.calls if c[:2] == ("pr", "create")]
+        self.assertEqual(len(creates), 1)
+        return creates[0]
+
+    def open_pr(self, state, **patches):
+        with patch.object(main, "git", side_effect=self.ready_git), \
              patch.object(main, "_enter_review_wait") as enter_wait:
             main.do_open_pr(state)
+        return enter_wait
 
-        self.assertIn(call("push", "-u", "origin", "codebot-api-version"), git.call_args_list)
-        lookup = process.call_args_list[0].args[0]
-        self.assertEqual(lookup, ["gh", "pr", "list", "--state", "open", "--head",
-                                  "codebot-api-version", "--json", "url,state", "--limit", "1"])
-        command = process.call_args_list[1].args[0]
-        self.assertEqual(command[:4], ["gh", "pr", "create", "--base"])
-        self.assertEqual(command[4], main.config.BASE_BRANCH)
+    def test_native_pr_pushes_branch_and_stores_https_url(self):
+        state = self.state()
+        enter_wait = self.open_pr(state)
+        self.assertEqual(self.github.pushes, ["codebot-api-version"])
+        lookup = self.github.calls[0]
+        self.assertEqual(lookup, ("pr", "list", "--state", "open", "--head", "codebot-api-version", "--base",
+                                  main.config.BASE_BRANCH, "--json", "number,url", "--limit", "2"))
+        command = self.created()
+        self.assertNotIn("--draft", command)
+        self.assertEqual(command[command.index("--base") + 1], main.config.BASE_BRANCH)
         self.assertEqual(command[command.index("--head") + 1], "codebot-api-version")
         self.assertEqual(command[command.index("--title") + 1], "Support another API version")
-        body = command[command.index("--body") + 1]
-        self.assertIn("openspec/changes/archive/2026-09-01-api-version", body)
+        self.assertIn("openspec/changes/archive/2026-09-01-api-version", command[command.index("--body") + 1])
         self.assertEqual(state["pr_url"], "https://github.com/acme/project/pull/42")
+        self.assertEqual(state["delivered_sha"], self.github.local_head)
+        self.assertEqual(state["repository"]["pr_number"], 42)
         enter_wait.assert_called_once_with(state)
 
     def test_native_pr_rejects_non_https_output(self):
         state = self.state()
-        responses = [
-            subprocess.CompletedProcess([], 0, "[]", ""),
-            subprocess.CompletedProcess([], 0, "github.com/acme/project/pull/42", ""),
-        ]
-        with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.operations, "tool", side_effect=responses):
-            with self.assertRaisesRegex(RuntimeError, "HTTPS"):
-                main.do_open_pr(state)
+        original = self.github.gh
+        self.github.gh = lambda ops, *a: ("github.com/acme/project/pull/42" if a[:2] == ("pr", "create")
+                                          else original(ops, *a))
+        with self.assertRaisesRegex(RuntimeError, "HTTPS"):
+            self.open_pr(state)
+        self.assertNotIn("pr_url", state)
 
     def test_open_pr_links_backlog_issue_and_notes_pr(self):
         state = self.state() | {"item_id": "PVTI_1",
                                 "item_url": "https://github.com/acme/project/issues/9"}
-        responses = [
-            subprocess.CompletedProcess([], 0, "[]", ""),
-            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42", ""),
-        ]
-        with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.operations, "tool", side_effect=responses) as process, \
-             patch.object(main.task_source, "note_pr") as note_pr, \
-             patch.object(main, "trail") as trail, \
-             patch.object(main, "_enter_review_wait"):
-            main.do_open_pr(state)
-
+        with patch.object(main.task_source, "note_pr") as note_pr, patch.object(main, "trail") as trail:
+            self.open_pr(state)
         trail.assert_called_once()
         self.assertEqual(trail.call_args.args[1], "PR opened: https://github.com/acme/project/pull/42")
-        create = process.call_args_list[1].args[0]
-        body = create[create.index("--body") + 1]
-        self.assertIn("Closes https://github.com/acme/project/issues/9", body)
-        note_pr.assert_called_once_with(state["item"], "PVTI_1",
-                                         "https://github.com/acme/project/pull/42")
+        create = self.created()
+        self.assertIn("Closes https://github.com/acme/project/issues/9", create[create.index("--body") + 1])
+        note_pr.assert_called_once_with(state["item"], "PVTI_1", "https://github.com/acme/project/pull/42")
 
     def test_jira_pr_references_issue_without_relying_on_github_auto_close(self):
         state = self.state() | {"item_id": "10001", "item_key": "TEAM-7",
                                 "item_url": "https://team.atlassian.net/browse/TEAM-7"}
-        responses = [
-            subprocess.CompletedProcess([], 0, "[]", ""),
-            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42", ""),
-        ]
         with patch.object(main.config, "TASK_SOURCE", "jira"), \
-             patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.operations, "tool", side_effect=responses) as process, \
-             patch.object(main.task_source, "note_pr") as note_pr, \
-             patch.object(main, "_enter_review_wait"):
-            main.do_open_pr(state)
-        create = process.call_args_list[1].args[0]
+             patch.object(main.task_source, "note_pr") as note_pr:
+            self.open_pr(state)
+        create = self.created()
         body = create[create.index("--body") + 1]
         self.assertIn("Closes TEAM-7", body)
         self.assertIn("Jira: https://team.atlassian.net/browse/TEAM-7", body)
-        note_pr.assert_called_once_with(state["item"], "10001",
-                                         "https://github.com/acme/project/pull/42")
+        note_pr.assert_called_once_with(state["item"], "10001", "https://github.com/acme/project/pull/42")
 
     def test_open_pr_survives_backlog_write_back_failure(self):
-        state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
-        with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.task_source, "note_pr", side_effect=RuntimeError("gh down")), \
-             patch.object(main, "_enter_review_wait") as enter_wait:
-            main.do_open_pr(state)
+        state = self.state() | {"pr_url": self.github.add(42, "codebot-api-version")}
+        with patch.object(main.task_source, "note_pr", side_effect=RuntimeError("gh down")):
+            enter_wait = self.open_pr(state)
         enter_wait.assert_called_once_with(state)
         self.assertNotIn("Closes", state["pr_summary"])
 
     def test_open_pr_restart_reuses_persisted_url_without_external_creation(self):
-        state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
-        with patch.object(main, "git", side_effect=self.ready_git) as git, \
-             patch.object(main.operations, "tool") as process, \
-             patch.object(main, "_enter_review_wait") as enter_wait:
-            main.do_open_pr(state)
-
-        self.assertFalse(any(c.args and c.args[0] == "push" for c in git.call_args_list))
-        process.assert_not_called()
+        state = self.state() | {"pr_url": self.github.add(42, "codebot-api-version")}
+        enter_wait = self.open_pr(state)
+        self.assertEqual(self.github.calls[0][:3], ("pr", "view", "42"))  # validated before the push
+        self.assertFalse([c for c in self.github.calls if c[:2] in (("pr", "list"), ("pr", "create"))])
+        self.assertEqual(self.github.pushes, ["codebot-api-version"])
         enter_wait.assert_called_once_with(state)
-        main._publish_existing_pr.assert_called_once_with(state)
-        main._verify_pr_publication.assert_called_once_with(state)
+
+    def test_adopted_draft_gets_the_final_title_and_body_then_is_marked_ready(self):
+        state = self.state() | {"draft_pr_url": self.github.add(42, "codebot-api-version", draft=True)}
+        self.open_pr(state)
+        pr = self.github.prs[42]
+        self.assertFalse(pr["draft"])
+        self.assertEqual(pr["title"], state["pr_title"])
+        self.assertIn("OpenSpec archive", pr["body"])
+        self.assertEqual(state["pr_url"], "https://github.com/acme/project/pull/42")
+        self.assertTrue(state["draft_pr_ready"])
+        self.assertFalse(state["repository"]["draft"])
 
     def test_open_pr_restart_discovers_existing_pr_before_create(self):
+        self.github.add(42, "codebot-api-version")
         state = self.state()
-        existing = subprocess.CompletedProcess(
-            [], 0, '[{"url":"https://github.com/acme/project/pull/42","state":"OPEN"}]', "")
-        with patch.object(main, "git", side_effect=self.ready_git) as git, \
-             patch.object(main.operations, "tool", return_value=existing) as process, \
-             patch.object(main, "_enter_review_wait"):
-            main.do_open_pr(state)
-
-        self.assertIn(call("push", "-u", "origin", "codebot-api-version"), git.call_args_list)
-        self.assertEqual(process.call_count, 1)
+        self.open_pr(state)
+        self.assertEqual(self.github.pushes, ["codebot-api-version"])
+        self.assertFalse([c for c in self.github.calls if c[:2] == ("pr", "create")])
         self.assertEqual(state["pr_url"], "https://github.com/acme/project/pull/42")
 
     def test_closed_or_merged_pr_from_reused_branch_does_not_block_new_pr(self):
         for stale_state in ("CLOSED", "MERGED"):
             with self.subTest(stale_state=stale_state):
+                self.github.prs.clear()
+                self.github.calls.clear()
+                self.github.add(7, "codebot-api-version", state=stale_state)
                 state = self.state()
-                responses = [
-                    subprocess.CompletedProcess(
-                        [], 0,
-                        json.dumps([{
-                            "url": "https://github.com/acme/project/pull/7",
-                            "state": stale_state,
-                        }]), ""),
-                    subprocess.CompletedProcess(
-                        [], 0, "https://github.com/acme/project/pull/42", ""),
-                ]
-                with patch.object(main, "git", side_effect=self.ready_git), \
-                     patch.object(main.operations, "tool", side_effect=responses) as process, \
-                     patch.object(main, "_enter_review_wait"):
-                    main.do_open_pr(state)
-
-                lookup = process.call_args_list[0].args[0]
-                self.assertEqual(lookup[lookup.index("--state") + 1], "open")
-                self.assertEqual(process.call_count, 2)
-                self.assertEqual(state["pr_url"], "https://github.com/acme/project/pull/42")
+                self.open_pr(state)
+                self.created()
+                self.assertEqual(state["pr_url"], "https://github.com/acme/project/pull/8")
 
     def test_open_pr_rejects_malformed_or_multiple_lookup_results_without_create(self):
         outputs = (
             "not-json",
             "{}",
             '[{"url":"https://github.com/acme/project/pull/42"}]',
-            '[{"url":"https://github.com/acme/project/pull/42","state":"UNKNOWN"}]',
-            '[{"url":"http://github.com/acme/project/pull/42","state":"OPEN"}]',
-            ('[{"url":"https://github.com/acme/project/pull/42","state":"OPEN"},'
-             '{"url":"https://github.com/acme/project/pull/43","state":"CLOSED"}]'),
+            '[{"number":42,"url":"http://github.com/acme/project/pull/42"}]',
+            ('[{"number":42,"url":"https://github.com/acme/project/pull/42"},'
+             '{"number":43,"url":"https://github.com/acme/project/pull/43"}]'),
         )
+        original = self.github.gh
         for output in outputs:
             with self.subTest(output=output):
+                self.github.calls.clear()
+                self.github.gh = lambda ops, *a: output if a[:2] == ("pr", "list") else original(ops, *a)
                 state = self.state()
-                response = subprocess.CompletedProcess([], 0, output, "")
-                with patch.object(main, "git", side_effect=self.ready_git), \
-                     patch.object(main.operations, "tool", return_value=response) as process:
-                    with self.assertRaises(RuntimeError):
-                        main.do_open_pr(state)
-                self.assertEqual(process.call_count, 1)
+                with self.assertRaises(RuntimeError):
+                    self.open_pr(state)
+                self.assertFalse([c for c in self.github.calls if c[:2] == ("pr", "create")])
                 self.assertNotIn("pr_url", state)
 
     def test_open_pr_without_archive_path_returns_to_verifying_without_side_effects(self):
         state = self.state()
         state.pop("archive_path")
         state["review_gate_round"] = 2
-        with patch.object(main, "git") as git, \
-             patch.object(main.operations, "tool") as process:
+        with patch.object(main, "git") as git:
             main.do_open_pr(state)
 
         git.assert_not_called()
-        process.assert_not_called()
+        self.assertEqual((self.github.calls, self.github.pushes), ([], []))
         self.assertEqual(state["state"], "VERIFYING")
         self.assertEqual(state.get("verify_round", 0), 0)
         self.assertNotIn("review_gate_round", state)
@@ -740,12 +712,12 @@ class NativePullRequestTests(unittest.TestCase):
         state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(main.config, "REPO_PATH", Path(tmp)), \
-             patch.object(main, "git") as git, patch.object(main.operations, "tool") as process, \
+             patch.object(main, "git") as git, \
              patch.object(main, "_enter_review_wait"):
             main.do_open_pr(state)
 
         git.assert_not_called()
-        process.assert_not_called()
+        self.assertEqual((self.github.calls, self.github.pushes), ([], []))
         self.assertEqual(state["state"], "ARCHIVING")
         # The archive budget is per task; OPEN_PR no longer grants a fresh one.
         self.assertNotIn("archive_round", state)
@@ -759,12 +731,11 @@ class NativePullRequestTests(unittest.TestCase):
             (repo / "openspec/changes/api-version").mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git") as git, \
-                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait"):
                 main.do_open_pr(state)
 
         git.assert_not_called()
-        process.assert_not_called()
+        self.assertEqual((self.github.calls, self.github.pushes), ([], []))
         self.assertEqual(state["state"], "ARCHIVING")
 
     def test_open_pr_with_dirty_openspec_tree_returns_to_archiving_before_gh(self):
@@ -774,13 +745,12 @@ class NativePullRequestTests(unittest.TestCase):
             (repo / state["archive_path"]).mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git", return_value="?? openspec/specs/new/spec.md") as git, \
-                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait"):
                 main.do_open_pr(state)
 
         self.assertEqual(git.call_args_list, [
             call("status", "--porcelain", "--untracked-files=all", "--", "openspec/")])
-        process.assert_not_called()
+        self.assertEqual((self.github.calls, self.github.pushes), ([], []))
         self.assertEqual(state["state"], "ARCHIVING")
 
     def test_open_pr_with_archive_not_in_head_returns_to_archiving_before_gh(self):
@@ -790,7 +760,6 @@ class NativePullRequestTests(unittest.TestCase):
             (repo / state["archive_path"]).mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git", side_effect=["", ""]) as git, \
-                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait"):
                 main.do_open_pr(state)
 
@@ -798,18 +767,17 @@ class NativePullRequestTests(unittest.TestCase):
             call("status", "--porcelain", "--untracked-files=all", "--", "openspec/"),
             call("ls-tree", "-r", "--name-only", "HEAD", "--", state["archive_path"]),
         ])
-        process.assert_not_called()
+        self.assertEqual((self.github.calls, self.github.pushes), ([], []))
         self.assertEqual(state["state"], "ARCHIVING")
 
     def test_open_pr_with_committed_clean_archive_reuses_persisted_url(self):
-        state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
+        state = self.state() | {"pr_url": self.github.add(42, "codebot-api-version")}
         tracked = state["archive_path"] + "/proposal.md"
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             (repo / state["archive_path"]).mkdir(parents=True)
             with patch.object(main.config, "REPO_PATH", repo), \
                  patch.object(main, "git", side_effect=["", tracked]) as git, \
-                 patch.object(main.operations, "tool") as process, \
                  patch.object(main, "_enter_review_wait") as enter_wait:
                 main.do_open_pr(state)
 
@@ -817,18 +785,18 @@ class NativePullRequestTests(unittest.TestCase):
             call("status", "--porcelain", "--untracked-files=all", "--", "openspec/"),
             call("ls-tree", "-r", "--name-only", "HEAD", "--", state["archive_path"]),
         ])
-        process.assert_not_called()
+        self.assertFalse([c for c in self.github.calls if c[:2] in (("pr", "list"), ("pr", "create"))])
         enter_wait.assert_called_once_with(state)
 
     def test_open_pr_rejects_untrusted_archive_reference_before_push(self):
         state = self.state() | {"archive_path": "../../etc/passwd"}
         with patch.object(main.config, "REPO_PATH", Path("/safe/repo")), \
-             patch.object(main, "git") as git, patch.object(main.operations, "tool") as process:
+             patch.object(main, "git") as git:
             with self.assertRaises(ValueError):
                 main.do_open_pr(state)
 
         git.assert_not_called()
-        process.assert_not_called()
+        self.assertEqual((self.github.calls, self.github.pushes), ([], []))
 
     def test_post_pr_agent_fix_queues_coderbot_push(self):
         review = self.state() | {
@@ -874,6 +842,10 @@ class PushPhaseTests(unittest.TestCase):
         patcher = patch.object(main.final_checks, "run", return_value={"status": "pass"})
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.github = FakeGitHub(base=main.config.BASE_BRANCH).__enter__()
+        self.addCleanup(self.github.__exit__)
+        self.github.add(42, "codebot-api-version")
+
     def state(self, continuation, **context):
         return {
             "state": "PUSHING",
@@ -890,7 +862,7 @@ class PushPhaseTests(unittest.TestCase):
              patch.object(main, "_enter_review_wait") as enter:
             main.do_push(state)
 
-        git.assert_any_call("push", "origin", "codebot-api-version")
+        self.assertEqual(self.github.pushes, ["codebot-api-version"])
         resume.assert_not_called()
         resolve.assert_called_once()
         enter.assert_called_once_with(state)
@@ -924,7 +896,8 @@ class PushPhaseTests(unittest.TestCase):
     def test_push_failure_keeps_persisted_context_for_retry(self):
         state = self.state("review")
         context = dict(state["push_context"])
-        with patch.object(main, "git", side_effect=RuntimeError("network down")), \
+        self.github.fail_push = RuntimeError("network down")
+        with patch.object(main, "git"), \
              patch.object(main.agent_runner, "resume") as resume:
             with self.assertRaisesRegex(RuntimeError, "network down"):
                 main.do_push(state)
@@ -939,7 +912,7 @@ class PushPhaseTests(unittest.TestCase):
              patch.object(main.agent_runner, "resume") as resume, patch.object(main, "email"):
             main.PHASES[state["state"]](state)
 
-        git.assert_any_call("push", "origin", "codebot-api-version")
+        self.assertEqual(self.github.pushes, ["codebot-api-version"])
         resume.assert_not_called()
         self.assertEqual(state["state"], "WAIT_MERGE")
 
@@ -1077,30 +1050,13 @@ class LongTitlePullRequestTests(NativePullRequestTests):
         return super().state() | {"item": LONG_ITEM}
 
     def test_native_pr_pushes_branch_and_stores_https_url(self):
-        state = self.state()
-        responses = [
-            subprocess.CompletedProcess([], 0, "[]\n", ""),
-            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
-        ]
-        with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.operations, "tool", side_effect=responses) as process, \
-             patch.object(main, "_enter_review_wait"):
-            main.do_open_pr(state)
-        command = process.call_args_list[1].args[0]
-        title = command[command.index("--title") + 1]
-        self.assertEqual(title, "Añadir rol sysadmin y sitio Sistema")
+        self.open_pr(self.state())
+        command = self.created()
+        self.assertEqual(command[command.index("--title") + 1], "Añadir rol sysadmin y sitio Sistema")
         self.assertIn(LONG_ITEM, command[command.index("--body") + 1])
 
     def test_title_is_never_over_the_limit_even_without_agent(self):
-        state = self.state()
-        responses = [
-            subprocess.CompletedProcess([], 0, "[]\n", ""),
-            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
-        ]
-        with patch.object(main, "git", side_effect=self.ready_git), \
-             patch.object(main.operations, "tool", side_effect=responses) as process, \
-             patch.object(main.agent_runner, "run", side_effect=RuntimeError("down")), \
-             patch.object(main, "_enter_review_wait"):
-            main.do_open_pr(state)
-        command = process.call_args_list[1].args[0]
+        with patch.object(main.agent_runner, "run", side_effect=RuntimeError("down")):
+            self.open_pr(self.state())
+        command = self.created()
         self.assertLessEqual(len(command[command.index("--title") + 1]), main.PR_TITLE_HARD_MAX)

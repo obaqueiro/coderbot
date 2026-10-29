@@ -8,6 +8,8 @@ import unittest
 import time
 from unittest.mock import Mock, patch
 
+from tests.fake_github import FakeGitHub
+
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 
@@ -365,8 +367,11 @@ class Conflicts(unittest.TestCase):
         self.assertNotIn("git fetch", resume.call_args.args[1])
         self.assertEqual(state["state"], "PUSHING")
         self.assertEqual(state["push_context"]["continuation"], "conflicts")
-        with patch.object(main, "git"), patch.object(main.final_checks, "run", return_value={"status": "pass"}):
+        with FakeGitHub(base=main.config.BASE_BRANCH) as github, patch.object(main, "git"), \
+             patch.object(main.final_checks, "run", return_value={"status": "pass"}):
+            github.add(42, "b")
             main.do_push(state)
+        self.assertEqual(github.pushes, ["b"])
         self.assertEqual(state["state"], "WAIT_REVIEW")
         self.assertTrue(state["await_new_run"])
         self.assertTrue(state["stale_replies"])

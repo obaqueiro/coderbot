@@ -30,30 +30,38 @@
   [
    "pr",
    "view",
-   "https://github.com/acme/walk/pull/1",
+   "1",
    "--json",
-   "state,headRefName,headRefOid,baseRefName,isCrossRepository"
+   "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository",
+   "--repo",
+   "github.com/acme/walk"
+  ],
+  [
+   "pr",
+   "view",
+   "1",
+   "--json",
+   "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository",
+   "--repo",
+   "github.com/acme/walk"
   ],
   [
    "pr",
    "edit",
-   "https://github.com/acme/walk/pull/1",
+   "1",
    "--title",
    "Add greeting",
    "--body",
-   "<body>"
+   "<body>",
+   "--repo",
+   "github.com/acme/walk"
   ],
   [
    "pr",
    "ready",
-   "https://github.com/acme/walk/pull/1"
-  ],
-  [
-   "pr",
-   "view",
-   "https://github.com/acme/walk/pull/1",
-   "--json",
-   "state,headRefName,headRefOid,baseRefName,isCrossRepository"
+   "1",
+   "--repo",
+   "github.com/acme/walk"
   ],
   [
    "api",
@@ -112,9 +120,11 @@
   [
    "pr",
    "view",
-   "https://github.com/acme/walk/pull/1",
+   "1",
    "--json",
-   "state,headRefName,headRefOid,baseRefName,isCrossRepository"
+   "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository",
+   "--repo",
+   "github.com/acme/walk"
   ],
   [
    "pr",

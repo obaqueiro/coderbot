@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from tests.fake_github import FakeGitHub
+
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 
@@ -163,9 +165,11 @@ class FeedbackPushTests(unittest.TestCase):
                  "pr_url": "https://github.com/acme/repo/pull/7",
                  "push_context": {"continuation": "feedback", "output": "fixed details",
                                   "attachments": [str(MP4), "/tmp/evidence.txt"]}}
+        github = FakeGitHub(base=main.config.BASE_BRANCH)
+        github.add(7, "codebot-api-version")
         with patch.object(main.config, "EVIDENCE_UPLOAD", True), \
              patch.object(main.final_checks, "run", return_value={"status": "pass"}), \
-             patch.object(main, "git"), \
+             patch.object(main, "git"), github, \
              patch.object(main.evidence_delivery, "publish", return_value={"status": "complete", "url": LINK}), \
              tempfile.TemporaryDirectory() as root, \
              patch.object(main.config, "DATA_DIR", Path(root)), \

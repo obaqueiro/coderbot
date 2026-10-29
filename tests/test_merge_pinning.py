@@ -23,9 +23,9 @@ class Pinning(unittest.TestCase):
                 "session_id": "sid", "pr_url": PR, **extra}
 
     def merge(self, state, *, head=SHA, runs=(done(),)):
-        publication = (patch.object(main, "_pr_publication", side_effect=head)
+        publication = (patch.object(main.lifecycle, "pinned", side_effect=head)
                        if isinstance(head, BaseException) or (isinstance(head, list))
-                       else patch.object(main, "_pr_publication", return_value={"headRefOid": head}))
+                       else patch.object(main.lifecycle, "pinned", return_value={"headRefOid": head}))
         with patch.object(main, "trail"), \
              patch.object(main, "_pr_merge_state", return_value=("OPEN", "MERGEABLE")), \
              patch.object(main, "unresolved_review_threads", return_value=[]), \

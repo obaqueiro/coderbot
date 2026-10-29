@@ -148,23 +148,33 @@ class RepoOps:
     def pr(self, number, fields=PR_FIELDS):
         return json.loads(self.gh("pr", "view", str(number), "--json", fields))
 
+    def with_pr(self, url):
+        """Repo mode learns which repository it is from the PR it just opened."""
+        return RepoOps.checkout(self.path, self.base, url) if self.infer else self
+
     def url(self, number):
         return f"https://{self.remote if self.infer else 'github.com/' + self.slug}/pull/{number}"
 
     def open_pr(self, branch, title, body, *, draft):
         """The open PR of this attempt's unique branch, else a new one: (number, url)."""
-        listed = json.loads(self.gh("pr", "list", "--state", "open", "--head", branch, "--base", self.base,
-                                    "--json", "number,url", "--limit", "2") or "[]")
-        if len(listed) > 1:
-            raise errors.Fatal(f"{self.name}: more than one open PR for {branch}", code="ambiguous_pr")
+        output = self.gh("pr", "list", "--state", "open", "--head", branch, "--base", self.base,
+                         "--json", "number,url", "--limit", "2")
+        try:
+            listed = json.loads(output or "[]")
+        except ValueError:
+            listed = None
+        if (not isinstance(listed, list) or len(listed) > 1 or any(
+                not isinstance(item, dict) or not isinstance(item.get("number"), int)
+                or not str(item.get("url") or "https://").startswith("https://") for item in listed)):
+            raise errors.Fatal(f"{self.name}: gh pr list returned an invalid or ambiguous result for {branch}",
+                               code="ambiguous_pr")
         if listed:
-            number = int(listed[0]["number"])
-            return number, listed[0].get("url") or self.url(number)
-        url = self.gh("pr", "create", *(["--draft"] if draft else []), "--base", self.base, "--head", branch,
-                      "--title", title, "--body", body).strip().splitlines()[-1:] or [""]
-        if not re.fullmatch(r"https://\S+/pull/\d+", url[0]):
-            raise errors.AgentFault(f"{self.name}: gh pr create printed no PR URL: {url[0][:200]!r}", code="pr_create")
-        return pr_number({"pr_url": url[0]}), url[0]
+            return listed[0]["number"], listed[0].get("url") or self.url(listed[0]["number"])
+        url = (self.gh("pr", "create", *(["--draft"] if draft else []), "--base", self.base, "--head", branch,
+                       "--title", title, "--body", body).strip().splitlines() or [""])[-1]
+        if not re.fullmatch(r"https://\S+/pull/\d+", url):
+            raise errors.AgentFault(f"{self.name}: gh pr create printed no HTTPS PR URL: {url[:200]!r}", code="pr_create")
+        return pr_number({"pr_url": url}), url
 
     def matches(self, record, value):
         """The PR is the one this record pinned: number, branches and repository (any case)."""
@@ -437,6 +447,43 @@ def moved(state, name, ops, record, value):
                           f"({local}). Reconcile the branch by hand, then reply 'retry'.")
 
 
+def pinned(ops, record):
+    """The record's PR, refused unless it is still this repository's branch PR."""
+    value = ops.pr(pr_number(record))
+    if not ops.matches(record, value):
+        raise errors.Fatal(f"{ops.name}: {record.get('pr_url')} no longer matches its repository and branch",
+                           code="pr_mismatch")
+    return value
+
+
+def deliver(ops, record, title, body, save, *, ready_body=False):
+    """Push the verified head to the record's PR (validated first, never forced), open one
+    when there is none, mark a draft ready (`ready_body`: with the final title and body)
+    and record the delivered head. A PR that is no longer open is returned untouched."""
+    if pr_number(record):
+        value = pinned(ops, record)
+        if value["state"] != "OPEN":
+            return value
+    if ops.tracked_changes():
+        raise errors.AgentFault(f"{ops.name}: PR publication requires committed tracked changes", code="dirty_publication")
+    ops.push(record["branch"])
+    if not pr_number(record):
+        number, url = ops.open_pr(record["branch"], title(), body(), draft=False)
+        record.update(pr_number=number, pr_url=url, draft=False)
+        ops = ops.with_pr(url)
+        save()  # persist accepted publication before any further call or notification
+    value = pinned(ops, record)
+    if value["state"] == "OPEN" and value["headRefOid"] != ops.head():
+        raise errors.Transient(f"{ops.name}: the PR head does not match the pushed HEAD yet", code="pr_head_lag")
+    if value["state"] == "OPEN" and (value.get("isDraft") or record.get("draft")):
+        if ready_body:
+            ops.gh("pr", "edit", str(value["number"]), "--title", title(), "--body", body())
+        ops.gh("pr", "ready", str(value["number"]))
+    record.update(pr_number=value["number"], delivered_sha=value["headRefOid"], draft=False)
+    save()
+    return value
+
+
 def publish(ws, state):
     import main
     context = ws.target()
@@ -462,23 +509,11 @@ def publish(ws, state):
         if not repo.ahead(record.get("base_sha")):
             record["state"] = "NO_CHANGES"
             continue
-        repo.push(record["branch"])
-        if not pr_number(record):
-            number, url = repo.open_pr(record["branch"], main._pr_title(state), pr_body(state, name), draft=False)
-            # Persist accepted publication before any further call or notification.
-            record.update(pr_number=number, pr_url=url)
-            main.save_state(state)
-        value = repo.pr(pr_number(record))
-        if not repo.matches(record, value):
-            raise errors.Fatal(f"{name}: {record['pr_url']} no longer matches its repository and branch", code="pr_mismatch")
+        value = deliver(repo, record, lambda: main._pr_title(state), lambda: pr_body(state, name),
+                        lambda: main.save_state(state))
         if value["state"] == "CLOSED":
             return closed(state, name, record)
-        if value["state"] == "OPEN" and value["headRefOid"] != repo.head():
-            raise errors.Transient(f"{name}: GitHub has not caught up with the pushed head yet", code="pr_head_lag")
-        if value["state"] == "OPEN" and value.get("isDraft"):
-            repo.gh("pr", "ready", str(value["number"]))
-        record.update(pr_number=value["number"], delivered_sha=value["headRefOid"], state="WAIT_MERGE",
-                      merge={"status": value["state"]}, draft=False)
+        record.update(state="WAIT_MERGE", merge={"status": value["state"]})
         main.save_state(state)
     resolve_threads(state)
     fresh = [name for name, record in records.items() if record.get("pr_url") and not record.get("announced")]

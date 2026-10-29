@@ -2473,37 +2473,17 @@ def _pr_title(state: dict) -> str:
     return title
 
 
-def _pr_publication(state: dict) -> dict:
-    value = json.loads(_run_checked(["gh", "pr", "view", state["pr_url"], "--json",
-                                     "state,headRefName,headRefOid,baseRefName,isCrossRepository"]))
-    branch = state.get("remote_branch") or state["branch"]
-    if (not isinstance(value, dict) or value.get("state") != "OPEN" or
-            value.get("headRefName") != branch or value.get("baseRefName") != config.BASE_BRANCH or
-            value.get("isCrossRepository") is not False or
-            not isinstance(value.get("headRefOid"), str) or
-            not re.fullmatch(r"[0-9a-f]{40}", value["headRefOid"])):
-        raise RuntimeError("PR publication target is not the expected open same-repository branch")
-    return value
-
-
-def _verify_pr_publication(state: dict) -> None:
-    head = git("rev-parse", "HEAD")
-    published = _pr_publication(state)
-    if published["headRefOid"] != head:
-        raise RuntimeError("PR head does not match local HEAD; publication is not confirmed")
-    state["delivered_sha"] = head
-    log.info("PR publication confirmed: %s head=%s", state["pr_url"], head)
-
-
-def _publish_existing_pr(state: dict) -> None:
-    # Validate before publishing: a stale URL must never target another branch,
-    # a fork, closed PR or different base. Push without force preserves remote work.
-    _pr_publication(state)
-    branch = state.get("remote_branch") or state["branch"]
-    _run_checked(["git", "check-ref-format", "refs/heads/" + branch])
-    if git("status", "--porcelain", "--untracked-files=no"):
-        raise RuntimeError("PR publication requires committed tracked changes")
-    git("push", "origin", "HEAD:refs/heads/" + branch)
+def _deliver(state: dict, body: str, *, ready_body: bool = False) -> None:
+    """Push the verified head to the task's PR on the shared seam (lifecycle.deliver): a
+    stale URL never targets another branch, a fork or a different base, and nothing is
+    forced. A PR that is no longer open stops the delivery."""
+    target, records = _repo_target(state)
+    value = lifecycle.deliver(target.repos[0], records["."], lambda: _pr_title(state), lambda: body,
+                              lambda: _save_record(state), ready_body=ready_body)
+    persistence.mirror_record(state)
+    if value["state"] != "OPEN":
+        raise errors.Fatal(f"The PR is {value['state']}, not open: {state['pr_url']}", code="pr_not_open")
+    log.info("PR publication confirmed: %s head=%s", state["pr_url"], state["delivered_sha"])
 
 
 def do_open_pr(state: dict) -> None:
@@ -2541,39 +2521,7 @@ def do_open_pr(state: dict) -> None:
     elif state.get("item_url"):
         # A GitHub issue backs the item: let the merge close it.
         body += f"\n\nCloses {state['item_url']}"
-    if not state.get("pr_url") and state.get("draft_pr_url"):
-        state["pr_url"] = state["draft_pr_url"]
-    if state.get("pr_url"):
-        state["pr_url"] = _https_url(state["pr_url"])
-        _publish_existing_pr(state)
-        if state.get("draft_pr_url") == state["pr_url"] and not state.get("draft_pr_ready"):
-            _run_checked(["gh", "pr", "edit", state["pr_url"], "--title", _pr_title(state), "--body", body])
-            _run_checked(["gh", "pr", "ready", state["pr_url"]])
-            state["draft_pr_ready"] = True
-    else:
-        git("push", "-u", "origin", state["branch"])
-        listed = _run_checked([
-            "gh", "pr", "list", "--state", "open", "--head", state["branch"],
-            "--json", "url,state", "--limit", "1",
-        ])
-        try:
-            existing = json.loads(listed)
-        except ValueError as error:
-            raise RuntimeError("gh pr list returned malformed JSON") from error
-        if not isinstance(existing, list) or len(existing) > 1 or \
-                any(not isinstance(item, dict) for item in existing):
-            raise RuntimeError("gh pr list returned an invalid or ambiguous result")
-        if existing and existing[0].get("state") not in ("OPEN", "CLOSED", "MERGED"):
-            raise RuntimeError("gh pr list returned an invalid pull-request state")
-        if existing and existing[0]["state"] == "OPEN":
-            state["pr_url"] = _https_url(existing[0].get("url"))
-        else:
-            output = _run_checked([
-                "gh", "pr", "create", "--base", config.BASE_BRANCH, "--head", state["branch"],
-                "--title", _pr_title(state), "--body", body,
-            ])
-            state["pr_url"] = _https_url(output)
-    _verify_pr_publication(state)
+    _deliver(state, body, ready_body=True)
     state["pr_summary"] = body
     if state.get("evidence_url"):
         _sync_pr_video(state, state["evidence_url"])
@@ -3513,7 +3461,8 @@ def do_merge_reply(state: dict, reply: str) -> None:
 def _remote_pr_head(state: dict) -> str | None:
     """The PR's current head SHA, or None when it can't be read (never raises)."""
     try:
-        return _pr_publication(state)["headRefOid"]
+        target, records = _repo_target(state)
+        return lifecycle.pinned(target.repos[0], records["."])["headRefOid"]
     except Exception as error:  # noqa: BLE001 — the merge itself still pins the head
         log.warning("could not read the PR head before merging: %s", error)
         return None
@@ -3601,9 +3550,7 @@ def do_push(state: dict) -> None:
         _begin_check_repair(state, report, resume="PUSHING")
         return
     state.pop("check_repair", None)
-    git("push", "origin", ("HEAD:refs/heads/" + state["remote_branch"])
-        if state.get("remote_branch") else state["branch"])
-    state["delivered_sha"] = git("rev-parse", "HEAD")
+    _deliver(state, state.get("pr_summary") or state.get("item", ""))
     if continuation == "review":
         # The fix is on GitHub now: reply on + resolve the threads the worker declared
         # handled, then wait for the re-review the push triggers.
