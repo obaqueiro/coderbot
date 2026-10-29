@@ -100,8 +100,8 @@ carries `[on hold: <instance>@<fingerprint>]` instead.
 
 When idle, coderbot picks, in this order: a held task whose CONTINUE was requested;
 a task it already claimed but lost track of; the lowest `Codebot[n]` tag; otherwise
-the coding agent chooses among all pending items (prerequisites first). That PICK
-call also reports the task's language, so no separate detection call is needed.
+the coding agent chooses among all pending items (prerequisites first). When the agent
+picks, it also reports the task's language; otherwise one utility call detects it.
 
 ### GitHub Projects v2 (`CODEBOT_TASK_SOURCE=github`)
 
@@ -216,7 +216,8 @@ change, pushes the branch, reuses or opens a **draft PR** and posts its link. A 
 is retried once; after that the PR is opened at the end instead. `off` keeps the PR
 for the end. The task inventory and an approval fingerprint of the change are frozen
 at approval. Later changes to requirements, design or task text are scope drift: you
-are offered "1 accept" (re-baseline) or "2 restore".
+are asked to accept the current scope (re-baseline), reconcile the checklist with the
+approved scope, request a scope revision, or keep waiting.
 
 ### Implementation
 
@@ -285,8 +286,9 @@ agent turn:
 
 The **evidence** video is recorded during that same E2E run (`PW_VIDEO=on`); see
 "Evidence". Then ARCHIVING archives the OpenSpec change on the feature branch, so it
-lands with the implementation. If the archive fails, one FIX_ARCHIVE turn may repair
-OpenSpec files only (`CODEBOT_ARCHIVE_MAX_ROUNDS`).
+lands with the implementation. A failed archive is retried up to
+`CODEBOT_ARCHIVE_MAX_ROUNDS` (3) times, then one FIX_ARCHIVE turn may repair OpenSpec
+files only; after that coderbot asks you.
 
 OPEN_PR edits the draft's title and body (concerns included) and runs `gh pr ready`;
 without a draft it opens the PR. The backlog item moves to review.
@@ -306,8 +308,8 @@ in the "PR ready" message.
 In WAIT_MERGE coderbot keeps polling for unresolved threads from anyone
 (ADDRESS_PR_THREADS, capped by `CODEBOT_PR_THREAD_MAX_ROUNDS`). For human threads the
 agent sees the whole thread and the reviewer's word is final; a thread that only asked
-a question gets an answer and stays open. New commits go through VERIFYING before
-PUSHING, so any head you can merge has passed the checks.
+a question gets an answer and stays open. PUSHING re-runs the controller's final
+checks before it pushes, so any head you can merge has passed them.
 
 On `merge`, coderbot re-checks the PR: unresolved threads (or a failed query) block the
 merge with a list; reply `merge anyway` to force. It merges with
@@ -347,8 +349,9 @@ coderbot pushes and the review runs again. Attempts are capped by
   more in the same session with tools off; otherwise the text is used. Internally the
   object is rendered back to the controller's line markers for the existing parsers.
 - **Three sessions per task:** planning, implementer (fresh at approval), reviewer
-  (fresh, read-only). A session above `CODEBOT_CONTEXT_TOKEN_BUDGET` tokens is rotated
-  with a handoff.
+  (fresh, read-only). With OpenCode, a session above `CODEBOT_CONTEXT_TOKEN_BUDGET`
+  tokens is rotated with a handoff (Claude Code does not report the count, so it is not
+  rotated).
 - **Replies without a model where possible.** Commands, option numbers, plain
   answers to a displayed decision (`yes`, `sí`, `no`, `ok`, `lgtm`, `dale`,
   `adelante`, `go ahead`) and `retry`, `abort`, `complete`, `merge` are resolved
@@ -389,7 +392,7 @@ the reset.
 | review fix waves / re-reviews | 1 / 1 | leftovers listed on the PR |
 | bot review rounds, PR thread rounds | 3 each | finalize with a note / help message |
 | conflict rounds | 3 | WAIT_STUCK |
-| archive rounds | 3 | ask |
+| archive rounds | 3 (`CODEBOT_ARCHIVE_MAX_ROUNDS`) | one FIX_ARCHIVE turn, then ask |
 | consecutive questions | 8 (`CODEBOT_QUESTION_MAX_ROUNDS`) | WAIT_STUCK |
 | failures per state | 5 (`CODEBOT_MAX_STATE_FAILURES`), agent faults only | WAIT_STUCK |
 | same transition on an unchanged repo | 4 | WAIT_STUCK (loop guard) |
