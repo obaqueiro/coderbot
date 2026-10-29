@@ -3,11 +3,13 @@
 Evidence is not delivered merely because a WEBM exists. Codebot validates the run,
 binds artifacts to the implementation snapshot, probes playable MP4 media, verifies
 Drive permissions, reads back the PR video section and sends the actual link/files.
-No evidence belongs in Git.
+No evidence belongs in Git: when evidence files (videos, evidence-named images or
+HTML) are committed on the task branch, the controller moves them to the outbox and
+commits their removal itself.
 
 ## Configuration
 
-- `CODEBOT_EVIDENCE_UPLOAD=on` enables upload.
+- `CODEBOT_EVIDENCE_UPLOAD` (default `on`) uploads the stitched video; `off` attaches it.
 - `CODEBOT_DRIVE_FOLDER_ID` selects an authorized destination; empty uses the existing
   `Codebot evidence` folder convention.
 - Delivery ALWAYS inherits the folder permissions. Codebot verifies the parent and
@@ -38,18 +40,24 @@ traversal, unrelated paths and escaping symlinks are rejected.
 
 PR-ready and feedback delivery require a playable MP4 (or the validated Newman
 HTML report). Missing evidence blocks the ready cover and merge wait: it is not a
-successful delivery with zero attachments. If the filtered `@evidence` recording
-fails validation or produces no complete videos, codebot records the complete
-selected specs, validates the fresh run, and only then converts its demo clips.
-Rejected clips remain diagnostic artifacts, never delivery evidence.
+successful delivery with zero attachments.
 
-If that full recording still fails, the controller enters bounded automatic
-diagnosis/implementation repair. The agent must implement missing approved
-functionality, demo tests, runner/video support or conversion prerequisites, not
-merely label evidence invalid. Changed code receives internal review and controller
-final checks before pushing; recording and delivery are retried afterward. Archived
-OpenSpec plans are not restored or rearchived. Exhausted repairs remain blocked and
-request concrete recovery guidance; they never waive evidence or invite merge.
+The video is normally recorded during the final-check E2E run: the controller runs
+it with `PW_VIDEO=on` and keeps the clips of the `@evidence` demo tests
+(`evidence.harvest_check_run`), so the specs are not run again. Only when that
+harvest is incomplete does codebot record separately: first the filtered
+`@evidence` tests, then the complete selected specs, validating the fresh run before
+converting its demo clips. Rejected clips remain diagnostic artifacts, never
+delivery evidence.
+
+If recording still fails, the controller enters a bounded repair (REPAIR_CHECKS,
+`CODEBOT_QUALITY_GATE_MAX_ROUNDS` attempts, then a question). The agent must
+implement missing approved functionality, demo tests, runner/video support or
+conversion prerequisites, not merely label evidence invalid. After the repair the
+task goes to PUSHING, which re-runs the controller's final checks before pushing;
+the PR's review sees the fix. Archived OpenSpec plans are not restored or
+rearchived. Exhausted repairs ask for concrete recovery guidance; they never waive
+evidence or invite merge.
 
 Target harnesses own their selection and validation semantics. Coderbot does not
 encode a target's spec inventory or alter its validator. Zero matches, missing

@@ -21,11 +21,12 @@ Rebuild after entrypoint changes. Starting the bot starts real backlog work;
 review configuration and saved state first.
 
 Discovery checks **only immediate child folders**, excludes generated folders and
-symlink directories, and supports worktree `.git` files. It never scans inside
-repositories or other folders for additional repositories. Each repository needs
-`origin` and an available default branch, from `origin/HEAD` or a manifest override.
-The current checkout branch is never guessed as the base. GitHub Projects needs
-`CODEBOT_GH_ISSUE_REPO=owner/repo` because the workspace root has no origin.
+symlink directories, and supports worktree `.git` files. Each repository needs
+`origin` and a default branch, from `origin/HEAD` or a manifest override; the current
+checkout branch is never guessed as the base. A child without them is left out with a
+warning; a saved task that references a skipped repository pauses with the reason.
+GitHub Projects needs `CODEBOT_GH_ISSUE_REPO=owner/repo` because the workspace root
+has no origin.
 
 Optional manifest:
 
@@ -33,59 +34,85 @@ Optional manifest:
 {
   "exclude": ["scratch"],
   "base_branches": {"api": "develop", "frontend": "main"},
-  "shared_inputs": ["openspec", "docs", "scripts", "e2e", "*compose*.y*ml"],
+  "merge_order": ["api", "frontend"],
+  "shared_inputs": ["openspec", "docs", "scripts", "e2e", "*compose*.y*ml",
+                    "AGENTS.md", "INSTRUCTIONS.md", "requirements.md"],
   "checks": [
     {"id": "integration", "argv": ["python3", "scripts/integration_test.py"], "cwd": ".", "scope": "full"}
   ],
-  "docker": {"context": "desktop-linux", "host_root": "/absolute/path/to/feature-workspace"}
+  "docker": {"context": "desktop-linux", "host_root": "/absolute/path/to/feature-workspace",
+             "compose_files": ["docker-compose.e2e.yaml"]}
 }
 ```
 
-Agent-emitted `CHECK_PLAN` uses workspace-relative `cwd`. Repository checks are
-discovered automatically; verification also requires a shared root/E2E check.
-Repository and root source content contributes to evidence/cache identity,
-including unchanged dependency repositories.
-Child repositories contribute tracked files and non-ignored untracked source,
-using their own Git ignore rules. Ignored build caches, such as TypeScript
-incremental state, do not invalidate verification; tracked changes, deletions,
-dependencies and shared root source still do. Failed checks remain visible to
-the repair agent even when concurrent source changes invalidate their evidence.
+`shared_inputs` above is the default. `max_depth` is still accepted (1-16) but
+discovery always uses 1. A check may list the `repositories` it covers.
 
-The controller collapses identical check executions regardless of their IDs;
-different arguments, input selections, credentials, reporters or preparation
-remain separate. E2E `run.sh` checks share a workspace resource lock even when
-the agent omits `resources`. Their initial execution budget is at least 1800
-seconds, capped at 3600. A recorded execution timeout raises the next execution
-budget up to that ceiling automatically, preserving partial output for diagnosis.
-Once an execution times out at the ceiling, unchanged reruns remain blocked with
-the failure report until source or execution-environment identity changes.
-Waiting for controller resources is bounded separately from execution. Explicit
-manifest and agent timeout settings are retained within the E2E ceiling.
+Checks the agent declares in its turn result use workspace-relative `cwd`.
+Repository checks are discovered automatically; verification also requires a shared
+root/E2E check. Repository and root source content contributes to evidence/cache
+identity, including unchanged dependency repositories. Child repositories contribute
+tracked files and non-ignored untracked source, using their own Git ignore rules.
 
-Agents must not ask users to deduplicate checks or increase controller timeouts.
-These are operational repairs, not product approvals. Human questions should
-contain one concrete decision and consequences; transport contracts and attachment
-paths are parsed separately, not embedded in the visible question. Actual test
-failures still block verification; increasing a timeout does not waive them.
+The controller runs identical check commands once, whatever their ids. E2E `run.sh`
+checks share a workspace resource lock. Their execution budget is at least 1800
+seconds, capped at 3600; a recorded timeout raises the next budget up to that ceiling.
+Actual test failures still block verification.
 
 ## Workflow
 
-- One source task, shared root OpenSpec plan, and communication thread.
-- Agent-selected feature branches use each repository's base. Additional repos
-  need no selection approval. Existing functional proposal approval still applies.
-- Independent branch, publication, review, and merge progress for each changed repo.
-- Checks and independent internal review precede publication.
-- Each PR is announced with reports/available attachments in the feature thread.
-- Completion requires all required merges and valid integrated verification.
-- Shared edits have private eligible-content recovery journals under Coderbot data.
-  Delivery lists local-only files: **merging PRs does not deliver those files**.
+Workspace mode runs the lifecycle in `src/lifecycle.py` over the list of repositories
+(`Target{root, repos}` plus `RepoOps`). `RepoOps` is the only code that runs git and
+gh for a repository: every call is time-bounded and its failures are typed
+(transient, agent fault, fatal). Single-repository mode still uses its own handlers
+in `src/main.py`.
+
+- One backlog task, one shared root OpenSpec plan and one conversation thread.
+- **The controller owns branches.** At pick time it fetches each repository, returns
+  clean children left on an old coderbot branch to their base, and creates a unique
+  branch per attempt (`<instance>-<slug>-<6 hex>`). `base_sha` is the merge-base with
+  the fetched base. The agent stays on the checked-out branch; commits it makes on the
+  base branch are moved onto the feature branch. The agent cannot push (see the
+  README's guardrails).
+- **Draft PRs open lazily**, one per repository, after the first implementation turn
+  that commits past the merge-base (at most 2 attempts per repository;
+  `CODEBOT_DRAFT_PR=off` disables them). Progress is pushed after every
+  implementation turn. PRs are pinned by number: number, URL, head and base must still
+  match, or the task pauses.
+- **Verification and review** run before any PR is marked ready. The review is one
+  fresh, read-only session over every repository's diff, starting from at most
+  `CODEBOT_REVIEW_CONTEXT_CHARS` (12000) characters of diff stats. Critical or
+  Important findings get one fix wave in the implementer session, then one
+  re-review. Critical findings left after that pause the task; Important ones are
+  listed as "Review notes left open" in the PR status.
+- **PR changes while waiting.** A head moved by someone else is fast-forwarded in and
+  re-verified; a diverged head or a closed PR pauses the task with retry, complete or
+  abort. Conflicts get a RESOLVE_CONFLICTS turn. Review threads from all PRs are
+  handled in one wave, bounded by `CODEBOT_PR_THREAD_MAX_ROUNDS`.
+- **Merges are ordered and pre-checked.** A `merge` reply merges in `merge_order`
+  first, then the rest. Before the first merge every PR must be open, not a draft, at
+  the verified head, mergeable, green and free of unresolved threads (unless the
+  reply forces it); otherwise nothing is merged. Each merge uses
+  `gh pr merge --squash --match-head-commit`. A partial merge is recorded, reported
+  in the thread and retried by replying `merge` again.
+- The task completes when every PR is merged; children then return to their base.
+  Verified root-only changes are delivered locally without a PR. **Merging PRs does
+  not deliver root-local files.**
 
 ## Safety and operational limits
 
-No repository sandbox is imposed. Picking requires clean child repositories;
-mismatched/unattributed work pauses rather than resets it. Abort/hold preserve
-workspace files and branches. State from another target requires explicit reset or
-migration. Do not run older single-repository builds against workspace state.
+No repository sandbox is imposed. A pick with dirty children notifies once and then
+waits in WAIT_CLEAN until they are clean. Hold and abort preserve workspace files and
+branches. Workspace and target errors (lost `origin/HEAD`, a new child without origin,
+a mismatched saved target) are fatal errors: during a task they pause it in
+WAIT_STUCK instead of crashing the loop. State from another target requires explicit
+reset or migration. Do not run older single-repository builds against workspace
+state.
+
+The runtime guard also enforces workspace rules: no `git init` at the root, no
+mutating `gh api` calls (non-GET methods, GraphQL mutations, field flags), and no
+writes to the manifest or any `.codebot/checks.json`. Planning phases may write only
+under `<root>/openspec`. The guard fails open.
 
 Local Docker socket tests use the mounted host paths without extra configuration.
 Remote Docker tests require a host-root mapping; it is not file synchronization:
@@ -95,10 +122,5 @@ context must match the active context.
 Compose `down --volumes` is allowed only with explicit test/e2e project and file
 arguments and a resolved configuration with project-scoped volumes/networks.
 External volumes/networks, shared resource names, and global prune are rejected.
-Harness blockers prompt an agent repair before verification retries. Arbitrary
-shell commands are not a security sandbox. Guard report opening with a Darwin
-check and `command -v open`; Linux should print the report path instead.
 
-Cross-repository merges are independent, not atomic. Changed PR heads, closed PRs,
-conflicts, and failed checks pause completion. Verified root-only changes can be
-delivered locally without inventing a PR.
+Cross-repository merges are independent, not atomic.

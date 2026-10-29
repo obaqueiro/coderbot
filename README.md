@@ -3,9 +3,9 @@
 Autonomous coding agent that works the improvements backlog — a Google Doc
 (`CODEBOT_DOC_ID`), a GitHub Projects v2 board (`CODEBOT_TASK_SOURCE=github`),
 or a Jira Cloud project (`CODEBOT_TASK_SOURCE=jira`) —
-of whatever target repo you point it at (`CODEBOT_REPO_PATH`), plans with the
-managed OpenSpec workflow via a selectable headless coding agent (Claude Code or
-OpenCode), and talks to the team by email (default) or Slack (`CODEBOT_COMM_CHANNEL=slack`).
+of whatever target repo you point it at (`CODEBOT_REPO_PATH`). It plans with the
+managed OpenSpec workflow, drives a headless coding agent (Claude Code or OpenCode),
+and talks to the team by email (default) or Slack (`CODEBOT_COMM_CHANNEL=slack`).
 Several instances can share a backlog; Slack instances each use their own app.
 
 Coderbot is repository- and organization-agnostic. Target-specific checks, provider
@@ -16,121 +16,103 @@ Target mode is automatic: a root `.git` means single repository; otherwise the
 directory is a workspace. See [feature workspaces](docs/workspaces.md).
 
 Optional independent supervision and validated Python repairs are documented in
-[self-healing](docs/self-healing.md); automatic repair is disabled by default.
-
-The communication façade supports optional live task progress. Slack edits the
-initial feature message with its phase, `:loading:` while working, `:question:`
-when user input is required, and the last three safe operational log lines.
-Enable the animated custom `:loading:` emoji in your workspace. Updates are
-deduplicated, normally at most once every 30 seconds, and respect Slack's
-rate-limit retries; pause/completion updates can bypass the normal interval.
-The original message and task marker are preserved across restarts. Log tails
-are bounded in memory per task, redact known credentials, and exclude reasoning,
-prompts and tool output. Email does not send extra progress emails. Future
-editable channels can implement `update_progress(thread_id, snapshot)` without
-changing the task supervisor. Questions and approvals still arrive in the thread.
+[self-healing](docs/self-healing.md); they are off by default.
 
 ## Repository layout
 
-Conversation and recovery contracts, diagnostic attachments and the rollout procedure
-are documented in [docs/conversation-recovery.md](docs/conversation-recovery.md).
-
-- `src/` — the bot: `main.py` (state machine), `config.py`, `prompts.py`, the
-  agent runners and the Gmail/Docs clients. Flat modules, imported by name.
-- `tests/` — unit tests (`python3 -m unittest discover -s tests -t .`).
-- `scripts/` — `setup.sh` (guided host setup), `setup_oauth.py` (Google consent
-  flow), `entrypoint.sh` and `healthcheck.sh` (container runtime).
-- `agent-plugin/` — the Claude/OpenCode plugin injected into agent sessions.
+- `src/` — the bot: `main.py` (state machine and single-repo handlers),
+  `lifecycle.py` (the lifecycle over a list of repositories, used by workspace mode),
+  `config.py`, `prompts.py` (system prompt and phase cards), `turns.py` (structured
+  turn results), `tool_policy.py` (runtime guardrails), `replies.py` (reply
+  classifier), `errors.py` (typed errors), `message_templates.py` (EN/ES catalog), the
+  agent runners and the backlog/channel clients. Flat modules, imported by name.
+- `tests/` — unit tests and the fake-agent walks (`tests/test_fsm_walk.py`,
+  `test_workspace_walk.py`, `test_supervisor_walk.py`).
+- `scripts/` — `setup.sh` (guided host setup), `setup_oauth.py` (Google consent),
+  `entrypoint.sh` and `healthcheck.sh` (container runtime), `supervisor.py` and
+  `selfheal.py` (self-healing), `test.sh` (the suite on the image's Python 3.12).
+- `agent-plugin/` — the Claude/OpenCode plugin injected into agent sessions,
+  including the guard hook (`runtime/guard.py`).
 - `openspec/` — this repo's own OpenSpec specs and changes.
 - `data/` — durable runtime state (git-ignored, bind-mounted into the container).
+
+More detail: [conversation and diagnostics](docs/conversation-recovery.md),
+[parallel conversation](docs/parallel-conversation.md),
+[evidence delivery](docs/evidence-delivery-recovery.md),
+[delivery recovery](docs/delivery-recovery.md),
+[runtime checks](docs/runtime-checks.md),
+[performance results](docs/performance-results.md).
 
 ## Target repo prerequisites
 
 Coderbot lives in its own repo and is pointed at a target checkout via
-`CODEBOT_REPO_PATH`. Two pieces of target-repo infrastructure make codebot's
-lifecycle stricter, but neither is a hard requirement — codebot auto-detects
-each at the start of every task and adapts, self-healing the gap if it's
-missing:
+`CODEBOT_REPO_PATH`. Two pieces of target-repo infrastructure make the lifecycle
+stricter, but neither is required. Coderbot detects each at the start of every task:
 
-- An **`e2e/` test harness**, run via `e2e/run.sh` as the pre-PR gate. Either
-  tool is supported, detected by what's under `e2e/`:
-  - **Playwright** (web UI) — `e2e/playwright.config.ts`; specs live under
-    `e2e/tests/`; evidence is a stitched video from `test-results/`.
-  - **Newman/Postman** (API-only repos with no frontend) — collections under
-    `e2e/collections/*.postman_collection.json`; evidence is the generated
-    run report from `test-results/`.
-  - **Missing**: the e2e gate is skipped for the current task, and codebot
-    adds a backlog item requesting the harness (Playwright if the repo has a
-    frontend, Newman otherwise) so a later task can build it.
-- A **`Code Review` GitHub Actions workflow** — matched by its declared
-  top-level workflow `name:` being exactly `Code Review` — drives the
-  automated review loop. Codebot's self-healing item asks for this to be
-  built on [alibaba/open-code-review](https://github.com/alibaba/open-code-review)
-  (OpenCodeReview), an Anthropic-backed automated PR reviewer, with the
-  workflow named `Code Review` (not OpenCodeReview's own suggested workflow
-  name) and posting under the default `github-actions[bot]` identity — both
-  required for codebot's detection and review-thread polling to see it.
-  - **Missing**: the post-PR review wait is skipped and the PR is emailed to
-    the user immediately, and codebot adds a backlog item requesting the
-    workflow (set `CODEBOT_SELF_HEAL_CODE_REVIEW=off` to not add it).
+- An **`e2e/` test harness**, run via `e2e/run.sh` by the final checks. Either tool
+  is supported, detected by what's under `e2e/`:
+  - **Playwright** (web UI) — `e2e/playwright.config.ts`; specs under `e2e/tests/`;
+    evidence is a stitched video from `test-results/`.
+  - **Newman/Postman** (API-only repos) — collections under
+    `e2e/collections/*.postman_collection.json`; evidence is the run report.
+  - **Missing**: the E2E gate is skipped for the task, and coderbot adds a backlog
+    item requesting the harness (Playwright with a frontend, Newman otherwise).
+- A **`Code Review` GitHub Actions workflow** — matched by its top-level `name:`
+  being exactly `Code Review` — drives the automated review loop. Coderbot's
+  self-healing item asks for it to be built on
+  [alibaba/open-code-review](https://github.com/alibaba/open-code-review), posting
+  as `github-actions[bot]`, and to run on `opened, ready_for_review, synchronize,
+  reopened` only while the PR is not a draft.
+  - **Missing**: the review wait is skipped and coderbot adds a backlog item for the
+    workflow (`CODEBOT_SELF_HEAL_CODE_REVIEW=off` stops that).
 
-OpenSpec owns requirements, design, and tasks; Superpowers owns engineering
-discipline; coderbot owns state, archive timing, push, PR, and merge. The image
-supplies managed, pinned OpenSpec 1.9.0 and Superpowers v6.3.0 integrations for
-both Claude Code and OpenCode: the `openspec-*` skills (`openspec-explore`,
-`openspec-propose`, `openspec-apply-change`, …) are generated at image build time by
-the pinned `openspec init` into `/opt/coderbot/openspec-skills` and loaded as a Claude
-plugin dir / an OpenCode `skills.paths` entry, so target repos need neither an
+OpenSpec owns requirements, design and tasks; Superpowers owns engineering
+discipline; coderbot owns state, archive timing, push, PR and merge. The image
+supplies pinned OpenSpec 1.9.0 and Superpowers v6.3.0 for both Claude Code and
+OpenCode: the `openspec-*` skills are generated at build time by the pinned
+`openspec init` into `/opt/coderbot/openspec-skills`, so target repos need neither an
 `openspec init` of their own nor a Superpowers installation.
 
 ## Backlog sources
 
 `CODEBOT_TASK_SOURCE` selects where tasks come from: `gdoc` (default), `github`,
 or `jira`. `CODEBOT_COMM_CHANNEL` independently selects `email` (default) or
-`slack`: GDoc+Slack and Jira+email both work.
-`main.py` only talks to the `task_source` façade; each backend implements the same
-operations (list pending, claim, hold, unclaim, mark done, seed an item, link the
-PR). Items keep their text as the identity the agent sees, plus a backend id.
+`slack`: GDoc+Slack and Jira+email both work. `main.py` only talks to the
+`task_source` façade; each backend implements the same operations (list pending,
+claim, hold, unclaim, mark done, seed an item, link the PR).
 
 ### Google Doc (`CODEBOT_TASK_SOURCE=gdoc`)
 
 The backlog is a Google Doc (`CODEBOT_DOC_ID`). Each **top-level bullet** is one task.
-Indented sub-bullets under it are the user's clarifications and sub-requirements of
-that task (any nesting level) and are shown to the agent with it — never picked on
-their own. Inline images pasted under a bullet (as their own paragraph or inside a
-sub-bullet) are downloaded to `data/doc_images/` and handed to the exploration
-session as screenshots. Struck-through bullets are done; codebot strikes a task
-through (sub-bullets included) when its PR merges or on `DONE`.
+Indented sub-bullets are the user's clarifications of that task and are shown to the
+agent with it, never picked on their own. Inline images under a bullet are downloaded
+to `data/doc_images/` and handed to the exploration session. Struck-through bullets
+are done; coderbot strikes a task through when its PR merges or on `DONE`.
 
 To force an order, write `Codebot[1]`, `Codebot[2]`, ... anywhere in a task's text:
-tagged tasks are picked before untagged ones, lowest number first (untagged tasks wait
-until no tagged task is left). The tag stays part of the task text.
+tagged tasks are picked before untagged ones, lowest number first.
 
 Set `CODEBOT_DOC_SECTION` to a heading text (e.g. `New:`) to make only the bullets
-under that heading pickable — items under other headings (say, "Under review:") are
-left alone. Unset, every top-level bullet in the doc is a candidate. Picking a task
-appends `[implementing: <instance>@<fingerprint>]` to its bullet so other instances sharing the doc
-skip it; the marker is removed when the task completes or is aborted. A task parked
-with the HOLD command carries `[on hold: <instance>@<fingerprint>]` instead and is skipped by everyone
-until CONTINUE (see "Mailbox commands").
+under that heading pickable. Picking a task appends
+`[implementing: <instance>@<fingerprint>]` to its bullet so other instances skip it;
+the marker is removed when the task completes or is aborted. A task parked with HOLD
+carries `[on hold: <instance>@<fingerprint>]` instead.
 
-When codebot is idle it picks, in this order: a held task whose CONTINUE was requested;
-a task it already claimed but lost track of (e.g. `data/` was rebuilt); the
-`Codebot[n]` tagged task(s) with the lowest number; otherwise the coding agent chooses
-among all pending items (prerequisites and enablers first).
+When idle, coderbot picks, in this order: a held task whose CONTINUE was requested;
+a task it already claimed but lost track of; the lowest `Codebot[n]` tag; otherwise
+the coding agent chooses among all pending items (prerequisites first). When the agent
+picks, it also reports the task's language; otherwise one utility call detects it.
 
 ### GitHub Projects v2 (`CODEBOT_TASK_SOURCE=github`)
 
-The backlog is a Projects v2 board (`CODEBOT_GH_PROJECT_URL`, e.g.
-`https://github.com/orgs/example/projects/3`, or `CODEBOT_GH_PROJECT_OWNER` +
-`CODEBOT_GH_PROJECT_NUMBER`). A task is a board card backed by an **issue of the
-target repo** (the checkout's `origin`, or `CODEBOT_GH_ISSUE_REPO`): the issue title
-is the task text, its body the clarifications, and images in the body are downloaded
-to `data/gh_images/`. Draft cards, pull-request cards, cards from other repos and
-closed issues are ignored (the log says how many).
+The backlog is a Projects v2 board (`CODEBOT_GH_PROJECT_URL`, or
+`CODEBOT_GH_PROJECT_OWNER` + `CODEBOT_GH_PROJECT_NUMBER`). A task is a board card
+backed by an **issue of the target repo** (the checkout's `origin`, or
+`CODEBOT_GH_ISSUE_REPO`): the issue title is the task, its body the clarifications,
+images in the body go to `data/gh_images/`. Draft cards, PR cards, cards from other
+repos and closed issues are ignored.
 
-Cards move through the board's **Status** field (names configurable, matched
-case-insensitively):
+Cards move through the board's **Status** field (names configurable, case-insensitive):
 
 | Event | Status | Labels on the issue |
 |---|---|---|
@@ -141,607 +123,401 @@ case-insensitively):
 | ABORT | first pick status | removed |
 | merged / DONE | `Done` | removed |
 
-`Codebot[n]` in an issue title orders tasks as in the Doc; without a tag, a
-single-select **Priority** field on the board orders them by option position.
-Self-healing items (missing e2e harness / Code Review workflow) are created as real
-issues and placed in the pick column. The labels are created on first start;
-`GH_TOKEN` needs the `project` scope in addition to `repo` (a classic PAT's
-`read:project` cannot move cards; an SSO-protected org needs the token authorized).
+`Codebot[n]` in an issue title orders tasks; without a tag, a single-select
+**Priority** field orders them by option position. `GH_TOKEN` needs the `project`
+scope in addition to `repo` (a classic PAT's `read:project` cannot move cards).
 
 ### Jira Cloud (`CODEBOT_TASK_SOURCE=jira`)
 
-Configure `CODEBOT_JIRA_URL=https://<site>.atlassian.net`, `CODEBOT_JIRA_PROJECT_KEY`,
-`CODEBOT_JIRA_EMAIL` and an account `CODEBOT_JIRA_API_TOKEN` (create one at
-[Atlassian account security](https://id.atlassian.com/manage-profile/security/api-tokens)). Set the **issue workflow**
-status names (`CODEBOT_JIRA_PICK_STATUS`, `CODEBOT_JIRA_ACTIVE_STATUS`,
-`CODEBOT_JIRA_REVIEW_STATUS`, `CODEBOT_JIRA_DONE_STATUS`) to statuses that exist in
-your project; these are not board columns. Only issues in the pick status are offered.
-Set `CODEBOT_JIRA_PICK_LABEL` to a Jira label such as `codebot-ready` and add
-that label to each issue Coderbot may take. **Both** the eligible status and the
-label are required for a new task. A task this instance already claimed remains
-recoverable if someone removes the opt-in label later; the ownership label is
-separate. The opt-in label is retained on hold, abort and completion. Self-healing
-issues created by Coderbot receive it automatically.
-After you enter the Jira site, project key, account email and API token,
-`scripts/setup.sh` queries that project's workflow statuses and lets you map
-all four using dropdowns (numbered choices in `--text` mode). If access fails,
-the wizard asks you to correct the connection instead of guessing status names.
-Individual issue workflows can still restrict transitions; Coderbot checks
-each transition when it acts on an issue.
-The project key is the short prefix in issue IDs: `ENG` in `ENG-42`, visible in
-the issue URL (`.../browse/ENG-42`) or Jira's Project settings. It is not the
-full project name or a UUID, and it need not be exactly three or four letters.
-The issue summary is the task; rich descriptions and attached images are delivered
-to the coding agent. `Codebot[n]` in the summary takes priority.
+Configure `CODEBOT_JIRA_URL=https://<site>.atlassian.net`, `CODEBOT_JIRA_PROJECT_KEY`
+(the `ENG` in `ENG-42`), `CODEBOT_JIRA_EMAIL` and `CODEBOT_JIRA_API_TOKEN` (create one
+at [Atlassian account security](https://id.atlassian.com/manage-profile/security/api-tokens)).
+Map the **workflow status** names (`CODEBOT_JIRA_PICK_STATUS`,
+`CODEBOT_JIRA_ACTIVE_STATUS`, `CODEBOT_JIRA_REVIEW_STATUS`, `CODEBOT_JIRA_DONE_STATUS`);
+these are not board columns. `scripts/setup.sh` lists the project's statuses for you.
+A new task needs **both** the pick status and the opt-in label
+`CODEBOT_JIRA_PICK_LABEL` (e.g. `codebot-ready`). The issue summary is the task;
+descriptions and attached images go to the agent.
 
 Claims use `codebot-claim-<instance>-<fingerprint>` labels; HOLD uses
-`codebot-hold-<instance>-<fingerprint>`. After a PR opens, the issue moves to the
-configured review status, remains open, and records the PR URL in a comment. The
-PR body contains `Closes <JIRA-KEY>` and a clickable Jira link for context; Coderbot
-explicitly transitions Jira to done after merging or on DONE (GitHub does not
-automatically close Jira issues). ABORT restores the pick status. Self-healing
-items are created as issues of `CODEBOT_JIRA_ISSUE_TYPE` (default `Task`).
+`codebot-hold-<instance>-<fingerprint>`. When the PR opens, the issue moves to the
+review status and gets a comment with the PR URL; the PR body contains
+`Closes <JIRA-KEY>` and the Jira link. Coderbot transitions the issue to done after
+merging or on DONE. ABORT restores the pick status. Self-healing items are created as
+`CODEBOT_JIRA_ISSUE_TYPE` (default `Task`).
 
 ### Activity trail
 
-Whatever the source, codebot leaves a log on the item itself (`CODEBOT_ACTIVITY_TRAIL`,
-default on): a note at every milestone — picked and branch, proposal sent, approval,
-each question and the user's answer, implemented, verified, reviewed, e2e result,
-archived, PR opened, review rounds, PR ready, conflicts resolved, merged/done, hold,
-resume, abort, stuck — with the full message body, so the ticket reads as the task's
-history. On GitHub each note is a comment on the issue. On the Google Doc the first
-note creates a doc-level comment quoting the item and later notes are replies in that
-thread (the Drive API cannot anchor comments to a bullet), which needs the full
-`drive` OAuth scope: installations set up before this option must re-run
-`python3 scripts/setup_oauth.py` once. A tracker failure is logged and never
-affects the task. On Jira, notes become issue comments.
+Whatever the source, coderbot leaves a log on the item itself (`CODEBOT_ACTIVITY_TRAIL`,
+default on): a note at every milestone (picked, proposal, approval, questions and
+answers, verified, reviewed, archived, PR opened, review rounds, merged, hold,
+resume, abort, stuck) with the full message body. On GitHub and Jira each note is an
+issue comment. On the Google Doc the first note creates a doc-level comment and later
+notes reply in that thread; this needs the full `drive` OAuth scope. A tracker failure
+is logged and never affects the task.
 
 ## Conversation channels
 
 Email is the default (`CODEBOT_COMM_CHANNEL=email`): `CODEBOT_USER_EMAIL` receives
 task threads and its listed senders can reply or issue commands. In Slack mode set
-`CODEBOT_COMM_CHANNEL=slack`, `CODEBOT_SLACK_CHANNEL_ID` (public `C...` channel),
-`CODEBOT_SLACK_BOT_TOKEN` (`xoxb-...`) and `CODEBOT_SLACK_APP_TOKEN` (`xapp-...`).
-Create and install **one Slack app per Coderbot instance**. Enable Socket Mode and
-an app-level token with `connections:write`; grant the bot `chat:write`,
-`channels:history`, `channels:read`, `files:write`, and subscribe to
-`message.channels` events.
-Invite each app to the public channel. Coderbot posts one root message when it
-claims a task. Approvals, questions, PR review, STATUS/KICK/ABORT/DONE/HOLD/CONTINUE and
-check-ins stay in that task's replies; any human member of the channel can act.
-Top-level messages are ignored except `status?`/`STATUS` and an explicitly targeted
-`KICK <instance>`. Replies appear under the command message; a bare top-level
-`STATUS` is visible to every codebot app in the channel. Replies to other bots'
-task threads are ignored. Socket Mode records incoming replies immediately; if an
-event is missed, the waiting
-thread is reconciled from Slack history at most once a minute. If replies only
-arrive through reconciliation, check that Event Subscriptions is enabled and
-`message.channels` is subscribed for this app. An in-flight coding-agent turn
-finishes before Coderbot acts on task-changing replies; brief `STATUS` replies are
-served independently without interrupting that turn. A dirty checkout before a
-task starts is announced once in the channel and automatically rechecked; replies to that
-operational notice are ignored. Small screenshots and reports are shared in
-the task thread; large evidence videos are linked from Google Drive.
-For each task, the language of its title and details in Jira, GitHub Projects or
-Google Docs is recorded in task state and used for agent output, OpenSpec
-artifacts and outgoing task messages. A later reply in another language does
-not change that task language; code, identifiers and control commands retain
-their original spelling.
+`CODEBOT_SLACK_CHANNEL_ID` (public `C...` channel), `CODEBOT_SLACK_BOT_TOKEN`
+(`xoxb-...`) and `CODEBOT_SLACK_APP_TOKEN` (`xapp-...`). Create **one Slack app per
+coderbot instance**, with Socket Mode, an app-level token with `connections:write`,
+the bot scopes `chat:write`, `channels:history`, `channels:read`, `files:write`, and
+the `message.channels` event. Invite each app to the channel.
+
+Coderbot posts one root message when it claims a task. Approvals, questions, PR
+review and commands stay in that task's replies; any human member of the channel can
+act. Top-level messages are ignored except `status?`/`STATUS` and an explicitly
+targeted `KICK <instance>`. If a Socket Mode event is missed, the waiting thread is
+reconciled from Slack history at most once a minute. Slack edits the root message with
+the task's live progress (phase, `:loading:` while working, `:question:` when input
+is needed, the last three safe log lines), at most once every 30 seconds.
+
+Each task's language is taken from its backlog text and used for agent output,
+OpenSpec artifacts and outgoing messages. Coderbot's own fixed messages come from an
+English/Spanish catalog (`message_templates.PHRASES`), so they cost no model call in
+either language. A model translates only text the catalog does not cover, or messages
+in other languages.
 
 ## Lifecycle
 
-### How coderbot drives the agent
-
-- **One fixed system prompt, short phase cards.** Working turns get a ~2.5k-character
-  system prompt (role, working rules, environment, result protocol) once per call,
-  never repeated inside the conversation. Each phase sends a short card that names the
-  one Superpowers/OpenSpec skill it uses, numbered steps, a "Done when" and the result
-  fields to fill. The bridge skill `coderbot-openspec-workflow` maps every interactive
-  step of those skills to coderbot (questions, approvals, file locations, "which
-  approach?", worktrees, finishing).
-- **Structured results.** Every working turn ends with one JSON result: status
-  (`done`, `done_with_concerns`, `needs_input`, `needs_approval`, `blocked`), summary,
-  question, attachments, checks, and phase fields (verification, review, threads,
-  classification, PR title). Claude Code enforces it with `--json-schema`; OpenCode is
-  asked for a JSON block (its native json_schema mode is broken up to 1.19.5). A
-  missing result gets one repair turn where a structured field is required; otherwise
-  the text is used as before. See `src/turns.py` and `docs/runtime-checks.md`.
-- **Guardrails in the runtime** (`CODEBOT_TOOL_POLICY`, default on). The agent cannot
-  push, create/merge/close/ready/edit PRs, archive OpenSpec changes or add worktrees;
-  planning phases write only under `openspec/` and cannot commit; implementation and
-  review turns cannot spawn subagents (`CODEBOT_EXECUTION=subagent` re-allows them for
-  an A/B test). Claude Code: deny rules plus a fail-open PreToolUse guard that also
-  catches `git -C . push` and `bash -c "…"`; OpenCode: bash deny patterns.
-- **Draft PR right after approval** (`CODEBOT_DRAFT_PR`, default on). Coderbot commits
-  the approved OpenSpec change, opens a draft PR, pushes after every implementation
-  turn, and marks it ready after verification, review and archival.
-- **Controller-owned verification.** When OpenSpec validates, the checklist is complete
-  and the focused checks passed, VERIFYING needs no agent turn. Each test command runs
-  once per plan even if declared under several ids, and an unchanged re-declared
-  command reuses its result.
-- **One review in the fresh session**, using Superpowers' `code-reviewer.md` template
-  filled with the change and the branch diff. Bot findings the agent already declined
-  are answered and resolved without another agent turn; no review wait is spent after
-  a push that changed nothing.
-- **Bounded loops.** Review, PR-thread, conflict and archive rounds are capped per task;
-  a loop guard stops a task that repeats the same transition on an unchanged
-  repository. Plain replies (`1`, `yes`, `sí`, `ok`, `lgtm`, `retry`) need no model call;
-  `CODEBOT_UTILITY_MODEL` (e.g. `haiku`) runs the remaining classifiers cheaply.
-
-### Trusted autonomous runtime and performance
-
-Coderbot's runtime is fully trusted: the principal and every subagent have all
-operational permissions, including external directories. Managed configuration
-overrides inherited permission restrictions; residual requests are automatically
-answered for child sessions. Product/proposal/merge decisions remain in the task
-conversation. Runtime configuration is loaded on process startup; restart the
-service when changing plugins/configuration.
-
-OpenCode defaults to the managed HTTP event bridge (`CODEBOT_OPENCODE_TRANSPORT=http`)
-so tool starts, child activity and provider retries are observable. Defaults:
-aggregate agent 1800 s, E2E 900 s, local tools other than bash/task 200 s, subagent 600 s,
-provider retry 180 s and utilities 30 s. Each is environment-overridable in the
-setup catalog. KICK also cancels controller-run tests and evidence operations.
-
-Tool execution watchdogs start only on `running`, never `pending`; argument
-generation and queueing still consume the aggregate agent budget. Repeated running
-updates do not extend local tool deadlines. Completed/error events retire the
-watchdog, including errors before execution; child metadata updates retain subagent
-progress tracking.
-
-Only primary sessions may launch subagents; child sessions (including resumed ones)
-are rejected before entering the concurrency queue. `CODEBOT_MAX_SUBAGENTS` defaults
-to 3. Queued delegations wait at most `CODEBOT_LOCAL_TOOL_TIMEOUT` (200 s by default).
-Completed or failed tasks release their slot even when the runtime skips the
-after-tool hook. On delegation rejection or queue timeout, the agent must finish
-that unit directly rather than retrying delegation or increasing runtime limits.
-
-There is no separate AI requirement-coverage audit before final checks or delivery.
-OpenSpec verification, independent internal review and controller-run final checks
-remain the verification gates.
-
-Reply `VERIFY` in the active task thread (or `VERIFY codebot-<id>` in email) to
-move an existing, unarchived change directly to verification. Optional guidance,
-such as `VERIFY: commit abc123 contains the fixes; verify that work`, is passed to
-the verifier. A running agent turn is interrupted first without discarding Git
-changes. Planning and implementation are not restarted by the command, but
-verification can still identify unfinished tasks or failures. No approval, pass,
-push or merge is implied. Held tasks must be resumed first with `CONTINUE`.
-Existing planning/repair continuations are superseded in the execution ledger
-(their history is retained), so reloading cannot undo the verification request.
-
-The controller freezes the task inventory on approval and implementation completion.
-Every human decision is presented in the conversation itself, in both email and
-Slack: Yes/No for a single authorization, or 3-4 numbered alternatives with their
-consequences and a recommendation when justified. Reply with the number (and any
-requested details), or write your own answer. Full-text replies such as
-`3. Dejemos el registro asíncrono y la BDD opcional`, `1: <details>` or
-`Sí, pero cambia el diseño` are interpreted in full with the displayed choices;
-no particular separator is required. Qualifications never become an automatic
-approval, merge or wait just because the reply starts with an option number.
-During exploration/proposal preparation, clarifications stay in that initial
-planning phase rather than attempting to revise a nonexistent approved change.
-A selection applies only to the
-current task and waiting phase, including after a restart. No means keep waiting
-and preserve the work, not abort or complete the task. Approval and merge gates
-still apply; Yes alone never authorizes a merge in a multi-option PR decision.
-Supporting reports do not replace the visible question and options. Reminders
-repeat the same active decision instead of truncating its choices.
-Each input handoff shows one question with each numbered alternative on its own
-line. Inline agent options are normalized without adding a second generic menu;
-open questions accept full-text answers. The agent asks one decision and waits
-for its answer before continuing.
-
-Changing checkmarks is allowed; adding, removing or changing tasks is a scope
-decision, not automatic permission for another implementation cycle. Tasks tagged
-`[codebot:approval]` block for an explicit decision. Existing `[codebot:verification]`
-tasks proceed to verification, where current results and evidence are reconciled
-without restarting implementation. They remain unchecked if required evidence is
-missing; the verifier asks for the specific missing result or artifact, not another
-spec approval. Historical results do not prove the integrated version passed.
-Unclassified pending tasks on an explicit `VERIFY` request pause
-for a decision rather than restarting work. Replying with explicit authorization
-to complete the pending implementation tasks of the already approved spec resumes
-`IMPLEMENTING` without replanning, but only if the approved task inventory is
-unchanged and no approval tasks remain. A bare "continue" or another `VERIFY`
-does not grant this authorization. Controller-run unknown/interrupted
-checks cannot be overridden by an agent's pass report. A clean internal review is
-reused only on the exact content snapshot, including after task-state recovery.
-Successful verification is also reused only on an exact snapshot; reported task
-counts must match the actual checklist and OpenSpec CLI counts.
-
-To recover a completed plan polluted by an unwanted replanning, explicitly send
-`VERIFY --restore-plan <commit SHA>: optional guidance`. The commit must be an
-ancestor with a complete checklist and the same artifact inventory. This replaces
-only the active change's proposal, design, tasks and specs; it does not touch
-application code, HEAD or the Git index, and does not imply approval or passing
-tests. The current documents and staged diff are backed up outside the repository
-under `data/verification-recovery/` before any replacement. Review legitimate spec
-changes first; omit this option when they must be kept and reconcile them manually.
-
-Top engineering priority: implement the requested behavior with as little code as
-possible. Prefer reuse, simplification and justified net code removal; preserve
-existing functionality, tests, readability and safety. Line-count tricks do not count.
-
-The feature gate (run by coderbot, not the agent) runs extensive
-unit/functional checks, then genuinely selected E2E covering the actual changes,
-including changed harness paths. E2E plans declare `kind: "e2e"`, focused plans declare
-`scope: "focused"`, and a structured reporter must prove positive test execution
-(`playwright`, `junit`, or `json` with `ran`). Missing/empty focused evidence blocks
-the feature gate. Old unfiltered full-suite registrations remain saved, but do not
-run or block feature verification, retries, publication or archival. Explicitly
-selected commands with legacy `scope: "full"` are treated as focused checks; an
-unfiltered command cannot masquerade as focused. Historical broad results appear
-separately as non-required `audit_checks`, without being passed, waived or reused
-as current feature evidence. `suite_status` retains raw outcomes (including those
-audits); gate `status` depends on required checks only. A separate explicit controller
-audit call (`staged_checks.run(..., audit=True)`) retains the full regression path.
-At most two actual full E2E launches per task are admitted, including
-baseline executions; reservations survive crashes and cache hits cost nothing.
-Planning completion/archive alone does not invalidate code checks. Changed approved
-requirements, design or task text still require reconciliation; approval fingerprints
-ignore checkboxes, not intent. Agents must not launch full or baseline suites themselves.
-
-The deterministic runner compares identifiable failures against immutable `base_sha`.
-Results are reused only with matching content, command, tools and declared
-environment. Unknown failures and incomparable baseline environments do not pass.
-The default response to every failed/unknown/infrastructure check is diagnose and
-repair approved behavior or operational prerequisites, not expand scope to fix
-unrelated product debt or repeat the same command blindly. Confirmed baseline-only
-failures do not block the regression gate: `status` can be `pass` while raw
-`suite_status` remains `fail`. New/worsened failures, unknown attribution and missing
-required feature evidence still block required-check evaluation; historical broad
-audit failures are informational in the focused feature gate. Workspace-local checks can use isolated
-repository baselines only with explicitly repository-local inputs; shared/composite
-failures remain unresolved without an immutable composite baseline. Agent prose or
-being "outside scope" is not baseline evidence. `REPAIR_CHECKS` reads actual feature/baseline logs, repairs
-declared dependencies in the check's interpreter and fixes approved code/test/runner
-behavior without requiring SSH or manual bot edits. The controller then reruns only
-affected invalidated checks; unaffected valid results remain reusable. Agent prose
-or "ignore it" never overrides the gate. Tracked repairs re-enter verification and
-independent review; environment-only repairs return to the originating check phase.
-Repair context/attempts survive restarts. After bounded failed repairs, the bot gives
-the exact diagnosis and 2-4 actionable choices in Slack/email; choosing to continue
-starts a fresh repair attempt, not another blind run. Product/scope changes or
-unobtainable external prerequisites still require a concrete decision. Legacy final
-check waits recover through the same path when the user replies; `VERIFY` is not
-needed to restart planning or reset state.
-
-In an existing workspace `WAIT_STUCK` caused by the old full-audit budget gate,
-plain `retry` deterministically resumes the same task, preserving prior guidance,
-approvals, registrations and audit reservations. The bot first reconciles a selected
-plan against the actual repository/harness diff, then runs required checks and
-continues normal checklist reconciliation and independent review. Interrupted
-plan-recovery turns do not spend completed-repair attempts. This does not authorize
-missing-evidence completion, publication, merge or DONE.
-
-Check-plan metadata accepts `timeout_seconds` as an alias for `timeout`; conflicting
-values, unknown fields and string-valued `argv` remain invalid. Validation names
-the check and offending field. Plan repairs use durable attempt/recovery revisions
-so rejected outputs are not replayed as new attempts; explicit `retry` resets the
-repair counter, not passing evidence or the full-E2E budget.
-
-Responses to user questions and their attachments are sent in the same thread in
-every phase before the continuation advances. Failed/partial delivery preserves the
-waiting phase and question rather than dropping the answer behind a progress banner.
-The completed reply and its continuation are saved before delivery. Pending Slack/
-email receipts retry transport only, without running the agent again or consuming
-the phase failure budget; confirmed delivery resumes the saved continuation
-automatically, including after a restart. Empty Slack attachments are sent as an
-explicit zero-byte-source notice, never as invented passing-check evidence.
-`.codebot/checks.json` can declare project-specific full/focused check plans.
-See [harness contract](docs/harness-contract.md) for preparation, resource locks,
-provider grouping and artifact manifests.
-
-`data/execution.sqlite` stores additive durable outcomes/checkpoints and delivery
-steps alongside the compatible `state.json` cursor. Keep both during migration;
-do not delete execution state while a task is active. See
-[delivery recovery](docs/delivery-recovery.md) and
-[performance results](docs/performance-results.md).
-
-```sh
-python scripts/performance_report.py data/execution.sqlite <task-branch>
-python scripts/benchmark_runtime.py
-python scripts/test_trusted_runtime.py
+```
+IDLE → pick → claim → branch <instance>-<slug>
+  → EXPLORING → PROPOSING (⇄ REPLANNING) → WAIT_APPROVAL
+  → approval: commit the approved change, push, open a draft PR
+  → IMPLEMENTING (one turn per tasks.md section; push after every turn)
+  → VERIFYING (controller) → INTERNAL_REVIEW (read-only reviewer)
+       ⇄ APPLY_FEEDBACK (one fix wave) → VERIFYING → one re-review
+  → E2E (controller final checks; evidence recorded) → ARCHIVING
+  → OPEN_PR (mark ready) → WAIT_REVIEW ⇄ ADDRESS_REVIEW → PUSHING
+  → WAIT_MERGE ⇄ ADDRESS_PR_THREADS / APPLY_FEEDBACK / RESOLVE_CONFLICTS → PUSHING
+  → merge → mark the item done → IDLE
+Failing checks at any gate → REPAIR_CHECKS → back to that gate.
 ```
 
-The benchmark uses controlled local fixtures; its modeled permission-wait savings
-are distinct from measurements of real Azure end-to-end throughput.
+### Planning
 
-```
-IDLE → pick item (see "Backlog sources") → claim it → branch <instance>-<slug>
-      → EXPLORING → PROPOSING → send proposal → WAIT_APPROVAL
-     → IMPLEMENTING → VERIFYING → INTERNAL_REVIEW → E2E (when present)
-     → ARCHIVING → OPEN_PR → WAIT_REVIEW ⇄ ADDRESS_REVIEW → PUSHING (if review fixes exist)
-     → send PR + evidence → WAIT_MERGE ⇄ ADDRESS_PR_THREADS → PUSHING
-     → merge → mark item done (Doc / GitHub board / Jira workflow) → IDLE
-WAIT_REVIEW / WAIT_MERGE ⇄ RESOLVE_CONFLICTS → PUSHING   (when the base branch moves)
-```
+EXPLORING and PROPOSING share one planning session. EXPLORE records a
+`classification` (`bounded`, `spike` or `architectural`) and a PR title. PROPOSE writes
+`openspec/changes/<slug>/`. Coderbot sends the proposal as one offline HTML file
+(proposal, design, tasks and every spec, with an index), stored under
+`data/review_packages/`. Revisions regenerate it and summarize what changed.
 
-If an E2E repair changes tracked files, coderbot repeats verification and internal
-review before retrying E2E. OpenSpec archive/spec sync occurs on the feature branch
-before PR creation, so it lands atomically with the implementation.
-Coderbot independently validates the active change and confirms OpenSpec apply progress
-is complete after the agent's verification report. Post-PR agent fixes enter a persisted
-`PUSHING` phase, so a failed or interrupted push retries without rerunning agent work.
-Archive retries include untracked OpenSpec files in cleanliness checks and stage only
-the validated spec, active-change, and archive paths. If archive recovery needs human
-guidance, the existing agent session may repair and commit only OpenSpec planning/spec
-files before coderbot retries archival.
+Planning turns run read-only or write only under `openspec/`, and cannot commit
+(see "Guardrails"). As a backstop, when a planning phase ends coderbot reverts any
+overreach: premature commits are undone, tracked changes outside `openspec/` are
+discarded, and the proposal message says what was cleaned up.
 
-### Review-friendly task messages
+### Approval and the draft PR
 
-Task conversations announce important results, blockers and decisions in concise text.
-Routine phase images and working check-ins are suppressed. STATUS reports live activity,
-the last effective progress and the next action without starting a coding turn.
-Completing or aborting without a confirmed merge never announces a merge.
+On approval (`CODEBOT_DRAFT_PR=on`, the default), coderbot commits the approved
+change, pushes the branch, reuses or opens a **draft PR** and posts its link. A failure
+is retried once; after that the PR is opened at the end instead. `off` keeps the PR
+for the end. The task inventory and an approval fingerprint of the change are frozen
+at approval. Later changes to requirements, design or task text are scope drift: you
+are asked to accept the current scope (re-baseline), reconcile the checklist with the
+approved scope, request a scope revision, or keep waiting.
 
-Proposal-review messages attach one **offline, self-contained HTML file** containing
-the actual change's `proposal.md`, `design.md`, `tasks.md` and all nested
-`specs/**/spec.md` files. Its left index links to files and headings and can be
-filtered; it uses no hosted assets. Each revision regenerates this package and
-summarizes changed sections against the last version sent. Generated files and
-snapshots are stored under git-ignored `data/review_packages/`, rather than in the
-target repo. If required artifacts are missing or the full attachment exceeds the
-configured mail limit, codebot asks for help instead of requesting approval of an
-incomplete package. Attachment failures have independent durable receipts and retries.
-Material feedback reopens planning and requires approval of the revised version; valid
-implementation and the existing PR are preserved, and archived work gets a complementary
-OpenSpec change. Localized corrections within approved intent proceed through verification.
+### Implementation
 
-Messages awaiting input start with the decision or question. Before asking for PR
-review, codebot presents recorded verification outcomes (including skipped checks),
-what changed, the PR and task links, and an index of evidence that was actually
-available. After feedback is pushed, it relates the request to the changes and
-new evidence. Upload failures are called out rather than passing for delivered files.
+The implementer starts a **fresh session** at approval, seeded with the approved change
+and a short handoff. Every later implementer turn (repairs, the review fix wave,
+review threads, conflicts, feedback) resumes it. When the change is architectural, the
+first turn writes `plan.md` in the change with Superpowers' `writing-plans`.
 
-Every tick starts by checking the mailbox for commands (ABORT / STATUS / DONE / HOLD /
-CONTINUE, see below). Any state that keeps failing detours through WAIT_STUCK (see
-"Failure handling"), and HOLD parks a task from any state.
-Any phase can detour through WAIT_REPLY: if the coding agent needs the user, its result has
-status `needs_input` and one question with options; codebot sends the question in the task's
-configured email or Slack thread (optionally with `ATTACH: <path>` screenshots/videos)
-and resumes the same session with the reply. When an exploration reply completes the
-phase without another question, its explanation is sent to that thread before proposing.
+Each IMPLEMENTING turn covers one `tasks.md` section. After every turn the controller:
 
-Task-thread messages are acknowledged as durably received before interpretation, without
-claiming that their instructions were applied. Routing gets only the current decision and
-bounded input references; detailed verification/history remains available to the separate
-answering session. Routing lowers configured reasoning effort to `low` (override via the
-existing `CODEBOT_OPENCODE_ROLE_EFFORTS` entry `routing`) and uses a 60-second budget, or
-the configured utility budget if longer. Coding model/effort and approval gates are unchanged.
-Classification, retry and terminal failure notices use independent, deduplicated delivery
-receipts. STATUS also shows message-processing progress. Timeouts report the effective
-inherited deadline and elapsed time, not a larger nominal coding-turn timeout.
+- runs the checks the agent declared (each distinct command once per plan; an
+  unchanged command reuses its result), except browser E2E, which waits for the final
+  checks;
+- moves committed evidence files out of the repo (`git rm` plus a commit) and into
+  the conversation;
+- checks the checklist through `openspec instructions apply`;
+- pushes to the draft PR.
 
-Evidence (screenshots, recordings, reports) is always routed to the task thread via that same
-`ATTACH: <path>` convention (saved under the outbox dir), in every phase — never
-committed to the target repo. Every resumed turn restates this rule. As a safety
-net, designated handoffs after implementation and review or feedback repairs scan
-the branch diff for evidence-looking files (video extensions, or paths naming
-"evidence"/"recording") and have the coding agent remove and re-route them via
-the configured channel if any are found.
+**Budget:** implementation gets `tasks.md` sections + 3 turns, at most 12, frozen at
+approval. When the turns run out, or after `CODEBOT_QUALITY_GATE_MAX_ROUNDS` (3) turns
+with no progress, coderbot retries **once in a fresh session** (with
+`CODEBOT_ESCALATION_MODEL` if set), which gets 3 more turns. If that also stalls, it
+asks you.
 
-## Phase discipline (planning never implements)
+### Verification
 
-EXPLORING and PROPOSING are planning phases: their prompts forbid implementing,
-committing, and pushing, and every WAIT_REPLY resume restates the active phase's
-rules. As a backstop, when either phase completes codebot **mechanically reverts
-overreach**: premature commits are undone (`git reset --soft` to the branch base),
-tracked changes outside `openspec/` are discarded, and a note about what was cleaned
-up is included in the proposal email. Openspec change artifacts are the phases'
-legitimate output and are always kept.
+VERIFYING normally runs no agent turn. The controller runs
+`openspec validate --strict`, checks the checklist counts, and uses the focused check
+results from the last turn. Pending implementation tasks send the task back to
+IMPLEMENTING; failing checks go to REPAIR_CHECKS. An agent VERIFY turn runs only when
+the controller cannot decide: approved `[codebot:verification]` tasks to reconcile, a
+change that does not validate, or a `VERIFY` request with guidance.
 
-Replies to a question (WAIT_REPLY) are classified first: an answer resumes the working
-session with the phase rules restated; "mark it complete" / "abort" act on the
-lifecycle directly instead of being forwarded to a session that cannot act on them.
+### Feature review
 
-## Failure handling (WAIT_STUCK)
+INTERNAL_REVIEW is one review of the whole feature. It runs in a **fresh, read-only
+session** (`CODEBOT_REVIEW_MODEL` if set) with Superpowers' `code-reviewer.md` template
+filled with the task, the change, the base SHA and HEAD; a built-in checklist is used if
+the template is missing. If the reviewer changes the tree anyway, its review is
+discarded (its edits are stashed). Above `CODEBOT_REVIEW_SPLIT_LINES` (2000) changed
+lines, the first review is split into two parts by changed files.
 
-No state retries forever in silence. Each state has a **consecutive-failure budget**
-(`CODEBOT_MAX_STATE_FAILURES`, default 5), tracked in `state.json` and reset on any
-successful tick. When a state exhausts its budget — or a phase asks more than
-`CODEBOT_QUESTION_MAX_ROUNDS` (default 8) questions in a row — codebot emails you
-(`stuck in <STATE>`, with the last error) and enters `WAIT_STUCK`. Reply on that
-thread with:
+Critical or Important findings get **one fix wave** in the implementer session
+(APPLY_FEEDBACK, with `receiving-code-review`), then VERIFYING, then **one re-review**
+of the fix commits only. After that, open Critical findings go back through the gate;
+Important and Minor leftovers do not block and are listed on the PR body and in the
+"PR ready" message. A passing review is reused only for the exact content it reviewed.
 
-- **retry** — try the failed step again (clears the counter),
-- **abort** — reset to a clean slate (same as the ABORT command below),
-- **complete** — mark the task done in the backlog and move on, or
-- **instructions** — free-form guidance; codebot applies it in the working session, then
-  resumes the failed step.
+### Final checks, evidence and archive
 
-Failure notices identify the concrete cause, impact, recorded recovery and verification
-evidence, followed by one decision menu. Diagnostics retain redacted rejected check plans
-and recorded results; repair counters alone are not proof of fresh provider calls.
-Provider-filter notices quote the user's message and available submitted request, or
-identify an internal bot request rather than asking the user to rephrase text they never
-wrote. Long requests have visible excerpts and complete redacted attachments. Withheld
-response text and unknown filter triggers are not invented; unchanged attempts are not
-automatically retried. Follow-up conversation receives these facts, not just a file path.
+The E2E state runs the controller's final checks (`src/final_checks.py`), with no
+agent turn:
 
-Every external `git`/`gh` call has a timeout (`CODEBOT_SUBPROCESS_TIMEOUT`, default 120s)
-so a hung command surfaces as a failure (feeding the budget) instead of wedging the loop.
+- unit/functional checks first, then the selected E2E specs. When the plan has no
+  focused E2E check, the specs this branch changed are selected (`e2e:changed`); if it
+  changed none, E2E is not required.
+- A structured reporter must prove that tests ran; zero tests is not a pass.
+  `CODEBOT_EMPTY_SUITE_FAILS=on` also fails declared non-E2E checks that ran zero tests.
+- Failures are compared with the same check on `base_sha`; failures that already exist
+  there do not block. New failures, unknown attribution and missing focused evidence
+  block.
+- Failures go to REPAIR_CHECKS: one FIX turn with the controller's report. A repair
+  that changed tracked files returns to VERIFYING (and to review if the content
+  changed); an environment-only repair returns to the gate it came from. After
+  `CODEBOT_QUALITY_GATE_MAX_ROUNDS` repairs, you get the diagnosis and choices.
 
-Every working turn gets one fixed system prompt with the runtime facts and working rules.
-Add project-specific ones (how to run the tests, what is NOT available in the
-container) in `data/environment.md` or `CODEBOT_ENVIRONMENT_NOTES`. Untrusted text
-(e2e output, review comments, email bodies) is fenced as data inside prompts so an
-embedded instruction cannot hijack the flow.
+The **evidence** video is recorded during that same E2E run (`PW_VIDEO=on`); see
+"Evidence". Then ARCHIVING archives the OpenSpec change on the feature branch, so it
+lands with the implementation. A failed archive is retried up to
+`CODEBOT_ARCHIVE_MAX_ROUNDS` (3) times, then one FIX_ARCHIVE turn may repair OpenSpec
+files only; after that coderbot asks you.
 
-## Decision reminders
+OPEN_PR edits the draft's title and body (concerns included) and runs `gh pr ready`;
+without a draft it opens the PR. The backlog item moves to review.
 
-Working phases and automated review do not generate periodic reminders. An unchanged
-pending decision gets at most one short reminder after 24 hours of no contact, stating
-the decision and valid response without quoting prior messages or uploading the same
-diagnostics again. `CODEBOT_PING_SCHEDULE=24h` enables this policy; `off` disables it.
-STATUS/KICK contacts refresh the quiet clock without resetting the once-per-decision rule.
-STATUS reports the last real email on the thread and how many check-ins followed it.
+### Review threads and merge
 
-During an in-flight phase, `status?` (or `STATUS`) gets an independent, **brief**
-answer in the task thread without waiting for the coding agent to finish. In Gmail
-the supervisor checks for status mail during long turns; in Slack it reads the
-durable Socket Mode inbox and, if an event was missed, reconciles the active thread
-through Slack's API at most once a minute. The first reconciliation scans the full
-thread; later scans cover only the last five minutes, so long conversations are not
-downloaded repeatedly. Slack SDK HTTP DEBUG dumps (including message bodies) are
-suppressed; its warnings and codebot's own DEBUG messages remain visible. The bot
-also accepts a top-level status request.
-Other task-changing commands remain queued for the main state machine except `KICK`,
-which can interrupt the current agent turn. The status reply names the task,
-phase and elapsed time. Codebot writes a small metadata-only turn snapshot to
-`data/agent_activity.sqlite`; when using OpenCode it also reads the running session
-and its subagents, tasks and latest event timestamps directly from OpenCode's own
-`opencode.db` in read-only mode (including its WAL). This works from the main bot or
-a separate status watcher, without sharing Python memory or starting another agent.
-The message includes the active task, task counts, up to two recent subagents and
-time since the last observable event. Neither reasoning content, prompts, shell
-commands nor tool output is included. The answer states when the last event was
-observed, without inferring whether the model is making progress from a quiet period;
-un-emitted LLM thoughts cannot be inspected. Claude's buffered runner may provide
-only turn-level signals until it completes. The supervisor never modifies task
-state; between turns regular `STATUS` still returns the full state snapshot.
+With a Code Review workflow, WAIT_REVIEW waits for a run to finish
+(`CODEBOT_REVIEW_WAIT_TIMEOUT`, default 45 min). The work queue is the PR's
+**unresolved** bot threads (GraphQL, paginated). ADDRESS_REVIEW hands them to the
+implementer; its result lists each thread as fixed, answered or declined with a
+reply. Coderbot pushes (PUSHING), then posts the replies and resolves those threads,
+then waits for the next run. If nothing was pushed, it does not wait for a new run.
+A bot finding that repeats one already declined is answered and resolved without an
+agent turn. Rounds are capped by `CODEBOT_REVIEW_MAX_ROUNDS` (3); leftovers are named
+in the "PR ready" message.
 
-If a bot was already executing an agent turn when updated code was copied to its
-bind-mounted `/app`, restarting that container would interrupt the turn. For a
-Slack task, `python3 /app/scripts/status_watch.py` may instead run as a separate
-container process until the task changes phase. It uses the same bounded Slack
-history reconciliation and read-only OpenCode progress reader, answers only
-`STATUS`, and never starts another agent or writes the bot's task state. The
-built-in supervisor takes over at the next normal container restart.
+In WAIT_MERGE coderbot keeps polling for unresolved threads from anyone
+(ADDRESS_PR_THREADS, capped by `CODEBOT_PR_THREAD_MAX_ROUNDS`). For human threads the
+agent sees the whole thread and the reviewer's word is final; a thread that only asked
+a question gets an answer and stays open. PUSHING re-runs the controller's final
+checks before it pushes, so any head you can merge has passed them.
+
+On `merge`, coderbot re-checks the PR: unresolved threads (or a failed query) block the
+merge with a list; reply `merge anyway` to force. It merges with
+`gh pr merge --squash --match-head-commit <reviewed head>`, so a head that moved since
+you saw it is not merged. A PR merged on GitHub by someone else finishes the task the
+same way; a PR closed without merging stops and asks.
+
+### Base-branch conflicts
+
+A `CONFLICTING` PR goes to RESOLVE_CONFLICTS. **Coderbot** fetches the base and starts
+`git merge origin/$CODEBOT_BASE_BRANCH` itself (merge, never rebase). A clean merge
+needs no agent turn. Otherwise the agent resolves the listed paths and commits;
+coderbot pushes and the review runs again. Attempts are capped by
+`CODEBOT_CONFLICT_MAX_ROUNDS` (3), then WAIT_STUCK.
+
+## How coderbot drives the agent
+
+- **One system prompt, short phase cards.** Working turns get a fixed system prompt of
+  about 2.4k characters (role, working rules, result protocol) on every call; it is not
+  repeated in the conversation. Each phase sends a short card naming the one
+  Superpowers/OpenSpec skill it uses, numbered steps, "Done when" and the result fields.
+  The bridge skill `coderbot-openspec-workflow` answers those skills' interactive steps
+  (questions, approvals, file locations, "which approach?" → inline, worktrees,
+  finishing) with coderbot's mechanisms.
+- **Turn facts.** Every working turn starts with a short YAML block built from state:
+  `phase`, `task`, `language`, `branch`, `base_sha`, `change`, `skill`,
+  `classification`, `e2e_harness`, and in IMPLEMENTING `pending_tasks` and `turn`
+  ("N of budget"). It is deterministic, so checkpoint replays still match.
+- **Structured results** (`src/turns.py`). Every working turn ends with one JSON object:
+  `status` (`done`, `done_with_concerns`, `needs_input`, `needs_approval`, `blocked`),
+  `summary`, and optional `question` (≤4 options), `concerns`, `attachments`,
+  `checks`, `e2e_specs`, `credential`, `classification`, `language`, `pr_title`,
+  `verification`, `review` and `threads`. Claude Code enforces it with
+  `--json-schema`; OpenCode is asked for a JSON block (its native json_schema mode is
+  broken, see [runtime checks](docs/runtime-checks.md)). When the object is missing in
+  VERIFYING, INTERNAL_REVIEW, ADDRESS_REVIEW or ADDRESS_PR_THREADS, coderbot asks once
+  more in the same session with tools off; otherwise the text is used. Internally the
+  object is rendered back to the controller's line markers for the existing parsers.
+- **Three sessions per task:** planning, implementer (fresh at approval), reviewer
+  (fresh, read-only). With OpenCode, a session above `CODEBOT_CONTEXT_TOKEN_BUDGET`
+  tokens is rotated with a handoff (Claude Code does not report the count, so it is not
+  rotated).
+- **Replies without a model where possible.** Commands, option numbers, plain
+  answers to a displayed decision (`yes`, `sí`, `no`, `ok`, `lgtm`, `dale`,
+  `adelante`, `go ahead`) and `retry`, `abort`, `complete`, `merge` are resolved
+  deterministically. Other replies cost one utility call: one classifier for
+  every wait (`src/replies.py`), on `CODEBOT_UTILITY_MODEL` if set (e.g. `haiku`).
+- Untrusted text (check output, review comments, email bodies) is fenced as data
+  inside prompts. Add project facts (how to run the tests, what the container lacks)
+  in `data/environment.md` or `CODEBOT_ENVIRONMENT_NOTES`.
+
+### Guardrails
+
+Lifecycle rules live in the runtime, not in prompt prose (`CODEBOT_TOOL_POLICY`,
+default on; `src/tool_policy.py`):
+
+- The agent cannot `git push`, create/merge/close/ready/edit PRs, `openspec archive`
+  or `git worktree add`. Claude Code gets deny rules plus a PreToolUse guard hook
+  (`agent-plugin/runtime/guard.py`) that also catches wrapped forms (`git -C . push`,
+  `bash -c "…"`, `env …`, `cd … &&`). OpenCode gets bash deny patterns.
+- Planning phases write only under `openspec/` and cannot commit, reset, checkout,
+  merge, rebase or stash. EXPLORING and the reviewer are read-only (no Edit/Write).
+- Working phases after approval cannot spawn subagents (`CODEBOT_EXECUTION=subagent`
+  re-allows them for an A/B test).
+- **Agents have no push credentials.** Their git and gh run with `GH_TOKEN` empty, an
+  empty `credential.helper` and no SSH identity, so a push the guard misses still
+  fails. Coderbot does every fetch, push and base merge itself.
+- The guard fails open: a broken hook never blocks a turn.
+
+### Budgets
+
+Every counter is per task. Only `_grant_budget` resets one, on a human decision
+(`retry` or instructions in WAIT_STUCK, an answer to a cap question, `VERIFY`); it logs
+the reset.
+
+| Counter | Default | At the cap |
+|---|---|---|
+| implementation turns | `tasks.md` sections + 3, at most 12 | one fresh session (3 turns), then ask |
+| no-progress turns, gate rounds, check repairs | `CODEBOT_QUALITY_GATE_MAX_ROUNDS` = 3 | ask with a report |
+| review fix waves / re-reviews | 1 / 1 | leftovers listed on the PR |
+| bot review rounds, PR thread rounds | 3 each | finalize with a note / help message |
+| conflict rounds | 3 | WAIT_STUCK |
+| archive rounds | 3 (`CODEBOT_ARCHIVE_MAX_ROUNDS`) | one FIX_ARCHIVE turn, then ask |
+| consecutive questions | 8 (`CODEBOT_QUESTION_MAX_ROUNDS`) | WAIT_STUCK |
+| failures per state | 5 (`CODEBOT_MAX_STATE_FAILURES`), agent faults only | WAIT_STUCK |
+| same transition on an unchanged repo | 4 | WAIT_STUCK (loop guard) |
+
+## Failure handling
+
+Errors are typed by kind, not by message text (`src/errors.py`):
+
+- **Transient** (network, outage, rate limit, disk full): retried with backoff
+  (1 s doubling to 1 h, or the service's `retry_after`). It never burns the failure
+  budget. After `CODEBOT_MAX_STATE_FAILURES` attempts you get one "service unavailable"
+  message and the task waits in WAIT_STUCK.
+- **Agent fault** (bad output, failed gate): burns the per-state budget; at the cap
+  the task goes to WAIT_STUCK.
+- **Fatal** (missing credential, broken configuration, wrong target): straight to
+  WAIT_STUCK with the diagnosis.
+
+In WAIT_STUCK reply with **retry**, **abort**, **complete**, or free-form
+**instructions** (applied in the working session, then the step resumes). Failure
+notices name the cause, impact and evidence, with a redacted diagnostic report.
+Every git/gh call has a timeout (`CODEBOT_SUBPROCESS_TIMEOUT`, default 120 s).
+
+A daily **retention sweep** removes `data/outbox/checks`, `data/diagnostics` and
+`data/workspaces` entries older than 14 days (keeping the current and held tasks'
+files and checkpoints) and prunes git worktrees. At startup a **runtime probe** checks
+the installed claude/opencode/openspec versions and required flags against the pins and
+notifies you once per mismatch; it never blocks startup.
+
+## Decisions and reminders
+
+Every human decision is presented in the conversation itself: Yes/No for one
+authorization, or numbered alternatives with consequences. Reply with the number (and
+any details) or in your own words; full replies such as `3. Dejemos el registro
+asíncrono` are interpreted in full. A selection applies only to the current task and
+wait, including after a restart. "No" keeps waiting; it does not abort.
+
+An unchanged pending decision gets at most one short reminder after 24 hours without
+contact (`CODEBOT_PING_SCHEDULE=24h`; `off` disables it). Working phases send no
+check-ins.
+
+`status?` (or `STATUS`) gets a brief answer in the task thread at any time, without
+waiting for the agent: task, phase, elapsed time, and for OpenCode the running
+subagents and the last event time (read-only from `opencode.db`). It never includes
+reasoning, prompts or tool output. For an older running container,
+`python3 /app/scripts/status_watch.py` can answer STATUS alone until the next restart.
+
+Reply `VERIFY` in the task thread (or `VERIFY codebot-<id>` by email) to move an
+existing, unarchived change to verification; optional guidance follows a colon. It
+interrupts a running turn without discarding changes and implies no approval, push or
+merge. `VERIFY --restore-plan <commit SHA>: guidance` restores the active change's
+proposal, design, tasks and specs from an ancestor commit with a complete checklist,
+after backing up the current ones under `data/verification-recovery/`.
 
 ## Mailbox commands: ABORT / STATUS / KICK / DONE / HOLD / CONTINUE
 
-Email codebot with a body of exactly `ABORT`, `STATUS`, `KICK`, `DONE`, `HOLD` (or `PAUSE`),
-or `CONTINUE` (or `RESUME`, which may be followed by a note) — case-insensitive,
-trailing punctuation tolerated — optionally with an instance name (`ABORT codebot-x7k2`)
-when several instances share the mailbox — see "Multiple instances" below for how bare
-commands are scoped.
-Commands are checked at the start of every tick; `KICK` also has an independent
-supervisor so it works **during** a blocked coding turn. Bare `KICK` is scoped to
-the task's thread (or its tagged email subject); outside it use `KICK <instance>`
-to avoid interrupting unrelated bots. The other commands work even when the agent
-is stuck waiting on a thread — or in
-WAIT_REVIEW, which never polls the inbox. **Only mail from `CODEBOT_USER_EMAIL` is
-honored** (it may be a comma-separated list) — a stranger emailing "ABORT" is ignored.
-Thread replies are held to the same rule: mail from any other sender in a task thread
-is logged and ignored.
+Send a body of exactly `ABORT`, `STATUS`, `KICK`, `DONE`, `HOLD` (or `PAUSE`), or
+`CONTINUE` (or `RESUME`, optionally with a note) — case-insensitive — optionally with
+an instance name (`ABORT codebot-x7k2`). Commands are read first in every tick. **Only
+mail from `CODEBOT_USER_EMAIL` is honored**; other senders in a task thread are logged
+and ignored.
 
-- **ABORT** discards the working-tree changes, returns to a clean, up-to-date base branch
-  (`git reset --hard` + `checkout -f $CODEBOT_BASE_BRANCH` + `clean -fd` + fast-forward
-  to `origin/$CODEBOT_BASE_BRANCH`), clears all task state, and goes back to IDLE —
-  then emails a confirmation. It only touches the **local** checkout: remote branches
-  and PRs are left as-is (clean those up on GitHub yourself if needed). The check runs
-  between phases, so an abort sent mid-phase takes effect once the current agent call
-  returns.
-- **STATUS** replies with a snapshot — instance, current state, task/slug/branch, PR
-  URL, pending question, stuck state and failure counters, last transition time, round
-  counters, heartbeat age, tasks on hold, the time of the last real email on the task
-  thread and the check-ins sent since, and the full text of the last email codebot
-  sent — without changing anything.
-- **KICK** ends the currently running Claude/OpenCode CLI turn and retries its phase
-  from the last saved FSM checkpoint. It keeps the claimed task, branch, approvals,
-  session and files; the resumed agent is instructed to inspect partial work and
-  completed tasks before continuing. It does not consume the phase failure budget,
-  merge anything or reset the checkout. If no coding turn is active, it answers that
-  nothing changed. A bare `KICK` in a Slack task thread works; a top-level Slack
-  command must name this installation (`KICK <instance>`). The standalone
-  `status_watch.py` used for older running containers reports STATUS only; the
-  in-process supervisor is needed for KICK.
-- **HOLD** (or **PAUSE**) parks the current task: any half-finished git operation is
-  aborted, all pending work is committed on the task branch (evidence files excluded),
-  the task's state is saved in `data/holds.json`, its bullet in the doc gets an
-  `[on hold: <instance>]` marker (no instance picks it), and codebot returns to IDLE
-  to take the next item. Reply **CONTINUE** (or **RESUME**, optionally followed by
-  instructions) on the held task's thread to bring it back: it becomes the very next
-  task codebot picks (after the one in progress, or immediately when idle), restored
-  on its branch and session; the instructions are handed to the task as the reply to
-  whatever it was waiting on, and without them codebot re-sends its last message so
-  you know what it is still waiting for. Held tasks are listed in `data/holds.json`
-  and by STATUS. A bare "continue" on the **active** task's thread is ordinary
-  conversation, not this command.
-- **DONE** marks the current task complete: strikes the item through in the backlog
-  doc, resets the local checkout to a clean base branch, and returns to IDLE to pick
-  the next item. Use it when the work turned out to already be done (e.g. an earlier
-  PR covered it) and the bot is waiting on a thread you'd rather not continue. A bare
-  reply on the **active task thread** is never treated as this command (so answering
-  "Done" to a question doesn't complete the task) — send it on any other thread or a
-  fresh email, or target the instance explicitly (`DONE codebot-x7k2`).
-
-## Automated code review (WAIT_REVIEW ⇄ ADDRESS_REVIEW)
-
-After opening the PR, codebot waits for the target repo's **`Code Review`** GitHub
-Action (OpenCodeReview) to finish (`CODEBOT_REVIEW_WAIT_TIMEOUT`, default 45 min per
-run). The work queue is the PR's **unresolved review threads** (queried through
-GraphQL, so a thread the agent skipped or one posted after a run stays in the queue
-instead of silently accumulating until merge time). For each thread opened by the
-reviewer bot the working session either fixes the issue (commit; codebot pushes via
-PUSHING, which re-triggers the action) or declares it not worth fixing — and either way
-emits `RESOLVE: <thread_id> <reason>`; codebot posts the reason as a reply on the
-thread and marks it resolved. Only thread ids codebot itself fetched are honored. The
-loop is capped by `CODEBOT_REVIEW_MAX_ROUNDS` (default 3); leftovers are mentioned in
-the "PR ready" email. A failed thread query is never read as "no threads".
-
-While waiting for your merge decision (WAIT_MERGE) codebot keeps polling the PR for
-unresolved threads from anyone (a human reviewer included) and addresses them
-(ADDRESS_PR_THREADS, capped by `CODEBOT_PR_THREAD_MAX_ROUNDS`). Human threads are
-handled differently from the bot reviewer's: the agent sees the **whole thread** (every
-comment, its own earlier replies labelled, the latest comment marked as the one to
-answer) and is told the reviewer's word is final — a change request is implemented, not
-debated, and a repeated request after an earlier explanation is implemented without
-further argument. A thread that only asked a question gets an `answered: …` reply and is
-**left open** for the reviewer to close; codebot does not touch it again until they post
-something new. On `merge` it re-checks: unresolved threads (or a failed query) **block
-the merge** with an email listing them; reply `merge anyway` to force. Merging is
-irreversible, so the classifier must return an explicit `force: true` for that.
-
-## Base-branch conflicts (RESOLVE_CONFLICTS)
-
-While a PR is open (WAIT_REVIEW / WAIT_MERGE), every reply-less tick checks the PR's
-state. A PR **merged on GitHub by someone else** finishes the task exactly as codebot's
-own merge would (item marked done, "task complete" email); one **closed without
-merging** stops with a stuck email asking whether to `complete`, `abort`, or reopen it
-and `retry`. A `CONFLICTING` PR (the base branch moved — another PR merged) detours
-through RESOLVE_CONFLICTS: the working session merges `origin/$CODEBOT_BASE_BRANCH`
-into the branch (**merge, never rebase** — the branch is pushed), re-runs the tests and
-commits; codebot pushes and the automated review re-runs before the PR can merge. A
-conflict with genuinely different reasonable resolutions is emailed as a question
-instead of guessed at. Attempts are capped by `CODEBOT_CONFLICT_MAX_ROUNDS` (default 3),
-then the task escalates to WAIT_STUCK. Replies the user sent against the pre-conflict
-PR content are set aside and the "PR ready" email says so.
+- **ABORT** discards working-tree changes, returns to a clean, up-to-date base branch,
+  clears task state and goes back to IDLE. Remote branches and PRs are left as they are.
+- **STATUS** replies with a snapshot (state, task, branch, PR, pending question,
+  counters, heartbeat age, holds, last message) without changing anything.
+- **KICK** ends the running agent turn and retries its phase from the last checkpoint,
+  keeping task, branch, approvals, session and files. It does not use the failure
+  budget. Bare `KICK` is scoped to the task's thread; elsewhere use `KICK <instance>`.
+- **HOLD** parks the task: pending work is committed on the task branch (evidence
+  excluded), state is saved in `data/holds.json`, the item gets an `[on hold: …]`
+  marker, and coderbot takes the next item. **CONTINUE** on the held task's thread
+  makes it the next task picked, restored on its branch and session; a note becomes the
+  reply to whatever it was waiting on.
+- **DONE** marks the task complete in the backlog, resets the checkout and returns to
+  IDLE. A bare `DONE` on the active task's thread is not this command.
 
 ## One-time setup
 
-**Recommended**: run the guided terminal setup on a macOS or Linux host.
-`scripts/setup.sh` works from bash or zsh, bootstraps a pinned Textual UI into
-`.venv/`, and falls back to a menu-driven text mode if that UI is unavailable.
-The first screen lists Repository, Backlog, Conversation, Agent, Evidence,
-Self-healing and Advanced. Open sections in any order; `Test` checks only the current section
-and its saved prerequisites, while `Save and Close` repeats that test and
-immediately saves that section to `.env` on success. Failures leave the section
-open with its draft intact and explain what to fix. A checkmark appears beside
-saved sections; changing a dependency clears affected checkmarks. The menu's
-`Test full setup` checks the whole saved configuration; `Exit` needs no final
-save. Text mode offers the same menu with `t`/`s`/`e`/`d` in each section.
-The main menu also has **Sync to VM** (`v` in text mode): enter `user@host`,
-choose code-only (default) or confirm an initial copy, and optionally recreate
-the remote bot container and wait for its health check. This runs against the
-saved configuration; the SSH host is not stored in `.env`.
-The preview masks secrets; Advanced searches every runtime setting, including
-inactive integrations and timeouts. On repeat runs setup preserves unknown
-keys, comments, untouched credentials and inactive settings in `.env`, backs
-up the original, and writes successful sections atomically:
+**Recommended**: run the guided setup on a macOS or Linux host. `scripts/setup.sh`
+works from bash or zsh, bootstraps a pinned Textual UI into `.venv/`, and falls back to
+a text menu (`--text`). Sections: Repository, Backlog, Conversation, Agent, Evidence,
+Self-healing and Advanced. `Test` checks the current section; `Save and Close` tests
+and saves it to `.env`. Advanced searches every runtime setting. Setup preserves
+unknown keys, comments and untouched secrets in `.env`, and backs up the original.
+**Sync to VM** (`v` in text mode) copies the code to an SSH host.
 
 ```bash
 scripts/setup.sh
-scripts/setup.sh --text    # also works: bash scripts/setup.sh / zsh scripts/setup.sh
+scripts/setup.sh --text
 ```
 
-Open **Self-healing** to select **Disabled** (`off`, default) or **Enabled**
-(`auto`, automatic validated Python repairs). **Observe** and **Propose** are
-available for a gradual rollout. Saving changes `.env` only; rebuild the image
-and recreate the container separately to apply the mode. See
-[self-healing](docs/self-healing.md) for repair boundaries and rollout guidance.
+All editable keys and their defaults are in [`.env.example`](.env.example) and
+`scripts/setup_catalog.py`; a test keeps the two in step with the code.
+
+Slack: create the `xoxb-` token under [OAuth & Permissions](https://api.slack.com/apps)
+with `channels:read`, `channels:history`, `chat:write` and `files:write`; reinstall
+after changing scopes. Enable Socket Mode and create the `xapp-` token with
+`connections:write`. Invite **that app's bot** to the public channel. Setup's `Test`
+checks both tokens, membership and history access.
+
+<details>
+<summary>Manual setup (what <code>scripts/setup.sh</code> automates)</summary>
+
+1. **Google OAuth client (email, GDoc or Drive upload)**: in Google Cloud Console
+   enable the needed Gmail, Docs and/or Drive APIs, create a *Desktop app* OAuth client
+   and download its JSON to `data/credentials.json`. Jira+Slack with evidence upload off
+   needs no Google credentials.
+2. **Consent flow** (on the host, from the repo root):
+   ```bash
+   pip install -r requirements.txt
+   python3 scripts/setup_oauth.py     # opens a browser; writes data/token.json
+   ```
+3. **Configuration**: copy `.env.example` to `.env` and fill in at least
+   `CODEBOT_REPO_PATH` (absolute host path; mounted at the same path in the
+   container), the backlog settings, the channel settings, `GH_TOKEN` (a PAT with
+   `repo`, plus `project` for GitHub Projects), and `CLAUDE_CODE_OAUTH_TOKEN`
+   (`claude setup-token` on the host) or the OpenCode provider and model. macOS keeps
+   Claude credentials in the Keychain, which the Linux container can't read — hence
+   the explicit token.
+4. **Coding-agent authentication**: Claude Code uses the host's `~/.claude` and
+   `~/.claude.json`. For OpenCode, `scripts/setup.sh` runs the provider's login in the
+   image and stores credentials under `data/opencode/`. Coderbot pushes over HTTPS with
+   `GH_TOKEN`; the agent itself gets no credentials.
+
+</details>
 
 ### One-time copy to an SSH VM
 
@@ -751,57 +527,24 @@ After configuring `.env`, stop any running bot on both machines and run:
 bash scripts/sync-to-vm.sh azureuser@74.235.122.91
 ```
 
-This uses `rsync` over SSH to copy this checkout to `~/codebot/app/`
-and the local checkout named by `CODEBOT_REPO_PATH` to `~/codebot/target/`.
-It includes `.git`, durable files in `data/`, `.env`, source and lockfiles, but excludes
-`node_modules/`, `.venv/`, `venv/` and `ms-playwright/`: binaries installed
-on an M1 Mac cannot run on an amd64 Linux VM. The target repo must install its
-dependencies and Chromium for Linux/amd64 in the environment where its tests
-run (the Coderbot image already installs Chromium's Linux system libraries;
-the target's `e2e/run.sh` installs its pinned browser at runtime). If you
-previously copied Mac-built dependencies to the VM, remove those stale copies
-before installing Linux versions; rsync deliberately does not delete VM files.
-The transient `data/heartbeat` is not copied; the container resets its
-heartbeat at each start so an old timestamp cannot trigger a restart loop.
-The script also copies your local `~/.npmrc` to the VM user's home with mode
-`0600` so `docker-compose.override.yml` can mount it. At container startup,
-the root entrypoint copies it from a read-only seed into the bot user's home
-with mode `0600`. Short-lived registry tokens will need refreshing on the VM;
-restart the container afterward so it picks up the replacement.
-The copy does not delete files already on the VM, but does replace files
-with the same names. Do not run both copies as separate bots against the same
-backlog: the copied `data/` includes this installation's ownership identity.
-On the VM, `~/codebot/app/.env.local` preserves the original local `.env`,
-and `.env` gets
-VM-specific paths (`CODEBOT_REPO_PATH` points to the target on that VM;
-absolute paths into the app become container paths under `/app`). The local
-`.env` is untouched. The script refuses to overwrite an existing `.env.local`;
-move that backup aside before running a new one-time copy. Other configured
-absolute paths outside these two checkouts must be configured separately;
-the script stops before copying if it cannot translate them. Check VM-specific
-mounts in the copied
-`docker-compose.override.yml` and the host's `~/.claude.json`/`~/.claude` as
-needed before starting Compose on the VM.
-OpenCode's `data/opencode/cache/` is excluded from the initial copy: the VM
-rebuilds its own platform-specific tools (including `rg`), while its credentials,
-sessions and state in `data/opencode/data/` remain part of the migration.
-For later code updates, use `bash scripts/sync-to-vm.sh azureuser@74.235.122.91 --code-only`.
-This leaves the VM's `data/`, `.env`, `.env.local`, `~/.npmrc` and target checkout
-untouched; restart the VM's bot container to load the new Python code.
-The script uses passwordless `sudo` on the VM to give uid/gid `501` ownership
-of `~/codebot/app/data` and `~/codebot/target`: the container's non-root bot
-must be able to write its instance fingerprint, state and Git working tree.
-If sudo is unavailable during the copy, run this on the VM before starting
-the container:
+This copies this checkout to `~/codebot/app/` and the target checkout to
+`~/codebot/target/` with `rsync` over SSH, including `.git`, durable `data/`, `.env`
+and lockfiles, but not `node_modules/`, `.venv/`, `venv/`, `ms-playwright/` or
+`data/opencode/cache/` (Mac binaries do not run on an amd64 VM). It also copies
+`~/.npmrc` (mode `0600`). On the VM, `.env.local` keeps the original `.env`, and `.env`
+gets VM paths; the script refuses to overwrite an existing `.env.local`. It never
+deletes VM files. Do not run both copies against the same backlog: `data/` holds this
+installation's identity. It uses passwordless `sudo` to give uid/gid `501` ownership of
+`~/codebot/app/data` and `~/codebot/target`; without sudo run
+`sudo chown -R 501:501 ~/codebot/app/data ~/codebot/target` on the VM.
 
-```bash
-sudo chown -R 501:501 ~/codebot/app/data ~/codebot/target
-```
+For later code updates:
+`bash scripts/sync-to-vm.sh azureuser@74.235.122.91 --code-only`, then restart the VM's
+bot container.
 
 ### Start with no previous task
 
-If the copied `data/state.json` refers to an earlier backlog or email thread,
-stop the bot and reset **only** its task/conversation state on the VM:
+If the copied `data/state.json` refers to an earlier backlog or thread:
 
 ```bash
 cd ~/codebot/app
@@ -810,292 +553,100 @@ sudo python3 -m scripts.reset_bot_state
 docker compose up -d codebot
 ```
 
-The script moves the old active task, holds, Slack inbox and heartbeat into a
-private timestamped directory under `data/`. It retains the installation's
-identity, OpenCode/Google credentials and email deduplication markers, and does
-not modify the target repo or the original backlog item. You can inspect the
-backup path printed by the command if the old task needs manual reconciliation.
-
-Slack: create the bot `xoxb-` token under [OAuth & Permissions](https://api.slack.com/apps)
-with `channels:read`, `channels:history`, `chat:write` and `files:write`; install
-or reinstall the app after changing scopes. Enable Socket Mode and create the
-`xapp-` app-level token with `connections:write` under Basic Information. Invite
-**that app's bot** to an active public channel using its Add people/apps menu.
-Conversation lists only public channels joined by that bot; `Test` checks both
-tokens, membership **and** `channels:history` read access. If it reports a
-missing scope, add the named bot scope and reinstall the app; if it reports
-non-membership, invite the bot and reload channels. Neither error saves `.env`.
-Backlog lists accessible Jira projects and workflow statuses or GitHub Projects
-boards after their credentials are available. Setup offers Google consent and
-OpenCode provider login actions in relevant sections, and requests only the
-Google APIs needed by the selected backlog, channel and Drive upload setting.
-All editable keys/defaults are in [`.env.example`](.env.example); a coverage
-test catches newly added runtime options missing from setup.
-
-<details>
-<summary>Manual setup (what <code>scripts/setup.sh</code> automates)</summary>
-
-1. **Google OAuth client (when using email, GDoc or Drive upload)**: in Google
-   Cloud Console create a project, enable the needed Gmail, Docs and/or Drive
-   APIs, create an OAuth client of type
-   *Desktop app*, and download its JSON to `data/credentials.json`. The consent
-   asks for full Drive access when the activity trail posts comments on a Doc or
-   evidence videos are uploaded to Drive. Jira+Slack with evidence upload off
-   needs no Google credentials.
-2. **Consent flow** (on the host, from the coderbot repo root):
-   ```bash
-   pip install -r requirements.txt
-   python3 scripts/setup_oauth.py     # opens a browser; writes data/token.json
-   ```
-3. **Configuration**: create `.env` at the repo root (see `.env.example`):
-   ```
-   # Required: absolute host path of the target git checkout. It is mounted into
-   # the container at the SAME path (Claude's per-project state and the e2e
-   # docker stack both depend on host==container paths).
-   CODEBOT_REPO_PATH=/absolute/path/to/target-repo
-   # Backlog: "gdoc" (default), "github" or "jira"
-   CODEBOT_TASK_SOURCE=gdoc
-   # Required when gdoc: Google Doc id of the improvements backlog
-   CODEBOT_DOC_ID=<the id from the doc's URL>
-   # Required when github: the Projects v2 board (GH_TOKEN then also needs "project")
-   CODEBOT_GH_PROJECT_URL=https://github.com/orgs/<owner>/projects/<n>
-   # Required for Jira: site, project, account and API token; map real statuses
-   CODEBOT_JIRA_URL=https://<site>.atlassian.net
-    # Example: ENG is the project key in issue ENG-42
-    CODEBOT_JIRA_PROJECT_KEY=ENG
-   CODEBOT_JIRA_EMAIL=<account@example.com>
-    CODEBOT_JIRA_API_TOKEN=<Atlassian API token>
-    CODEBOT_JIRA_PICK_LABEL=codebot-ready
-   CODEBOT_JIRA_PICK_STATUS=Ready
-   CODEBOT_JIRA_ACTIVE_STATUS=In progress
-   CODEBOT_JIRA_REVIEW_STATUS=In review
-   CODEBOT_JIRA_DONE_STATUS=Done
-   # Independent channel: "email" (default) or "slack"
-   CODEBOT_COMM_CHANNEL=email
-   # Required when email: address codebot sends to and reads replies from
-   CODEBOT_USER_EMAIL=you@example.com
-   # Required when slack: dedicated app/bot credentials for this instance
-   CODEBOT_SLACK_CHANNEL_ID=C123456
-   CODEBOT_SLACK_BOT_TOKEN=<xoxb-token>
-   CODEBOT_SLACK_APP_TOKEN=<xapp-token>
-   GH_TOKEN=<a PAT with repo scope, e.g. from `gh auth token`>
-   # Select "claude" (default) or "opencode".
-   CODEBOT_AGENT=claude
-   CLAUDE_CODE_OAUTH_TOKEN=<output of `claude setup-token` on the host>
-   GIT_AUTHOR_NAME=codebot
-   GIT_AUTHOR_EMAIL=codebot@example.com
-   # Optional: project name used in prompts; defaults to the repo dir name
-   CODEBOT_PROJECT_NAME=
-   # Optional; defaults to claude-fable-5 / medium (the claude CLI pin in the
-   # Dockerfile must support the model you choose — see "Troubleshooting")
-   CLAUDE_MODEL=claude-fable-5
-   CLAUDE_EFFORT=medium
-   # Optional; model to switch to when CLAUDE_MODEL runs out of usage credits
-   # (defaults to claude-opus-5; empty disables the fallback), and how long to stay
-   # on it before probing the primary model again (defaults to 3600 seconds)
-   CLAUDE_FALLBACK_MODEL=claude-opus-5
-   CLAUDE_FALLBACK_COOLDOWN_SECONDS=3600
-   # Required when CODEBOT_AGENT=opencode. Run scripts/setup.sh to complete the
-   # provider's browser/device-code/API-key flow; credentials stay in data/opencode/.
-   OPENCODE_PROVIDER=
-   OPENCODE_MODEL=<provider/model>
-   # Optional GPT reasoning effort; low favors speed, medium balances speed/depth.
-   # Choices: none, minimal, low, medium, high, xhigh (model/provider dependent).
-   # Empty preserves OpenCode defaults. Also editable in setup's Agent section.
-   OPENCODE_EFFORT=
-   # Optional; DEBUG (default) or INFO — DEBUG traces every email, video, and git call
-   CODEBOT_LOG_LEVEL=DEBUG
-   # Optional; maximum verification/internal-review repair rounds (default 3)
-   CODEBOT_QUALITY_GATE_MAX_ROUNDS=3
-   # Optional; maximum OpenSpec archive repair rounds (default 3)
-   CODEBOT_ARCHIVE_MAX_ROUNDS=3
-   # Optional; defaults to "main" — the trunk branch codebot syncs from, branches off
-   # of, opens PRs against, and resets to on abort
-   CODEBOT_BASE_BRANCH=main
-   # Optional; only needed if the target repo's own .claude/settings.json defines an
-   # "apiKeyHelper" that reads this variable — see "Troubleshooting" below
-   CLAUDE_API_KEY=
-   # Optional (gdoc); only bullets under this heading of the backlog doc are picked
-   CODEBOT_DOC_SECTION=
-   # Optional; hand-picked instance name (see "Multiple instances")
-   CODEBOT_INSTANCE=
-   ```
-   Every other knob (failure budgets, timeouts, review/conflict round caps, heartbeat
-   thresholds, project-specific environment notes) is optional, editable in Advanced
-   and documented with its default in `.env.example`.
-   (macOS keeps Claude credentials in the Keychain, which the Linux container
-   can't read — hence the explicit token.)
-
-</details>
-
-4. **Coding-agent authentication**: Claude Code uses the host's `~/.claude` and
-   `~/.claude.json`. OpenCode is installed in the Codebot Docker image; `scripts/setup.sh`
-   runs its authentication flow there and stores credentials privately under
-   `data/opencode/`. This includes browser and device-code provider flows. Git pushes
-   use HTTPS with `GH_TOKEN` (no SSH needed).
+The script moves the active task, holds, Slack inbox and heartbeat into a timestamped
+directory under `data/`, keeping the instance identity, credentials and email markers.
 
 ## Run
-
-From the coderbot repo root:
 
 ```bash
 docker compose up -d --build
 docker compose logs -f
 ```
 
-State lives in `data/state.json`; the container restarts safely from any state.
-To abort the current task, email `ABORT` (see "Mailbox commands") — or stop the
-container, delete `data/state.json`, remove the task's `[implementing: …]` marker in
-the doc, clean the git branch, restart.
+State lives in `data/state.json` (one schema, atomic writes; a corrupt file is moved
+aside and you are notified) and `data/execution.sqlite`; the container restarts safely
+from any state. Saved tasks from older builds load: removed states are mapped forward
+(RECOVERING and EVIDENCE_REVIEW → VERIFYING). Both compose files bind-mount `data/`
+from the host, so it survives container recreation and image rebuilds; back it up
+before replacing a host.
 
-Everything codebot must remember across restarts lives in `data/` — Google
-OAuth when needed, `state.json`, `holds.json`, `instance_id`,
-`instance_fingerprint`, the processed-mail list and `slack_inbox.sqlite` when
-using Slack — and both compose files bind-mount that directory from the host (never a
-named volume), so it survives container recreation, `docker compose down -v`, and
-image rebuilds. On a disposable server, back up `data/` (or restore it from your
-provisioning) before replacing the host.
-
-Only one codebot may run against a `data/` dir: startup takes a lock on
-`data/state.lock` and a second process exits immediately. The container reports
-Docker health from a heartbeat the tick loop maintains (`docker inspect --format
-'{{.State.Health.Status}}' coderbot-codebot-1`); a loop wedged beyond any plausible
-operation (past `CODEBOT_HEARTBEAT_HARD`, ~2.5h) is force-restarted via the
-`restart: unless-stopped` policy.
+Only one coderbot may run against a `data/` dir (`data/state.lock`). The tick loop
+touches `data/heartbeat` while the current tick is younger than
+`CODEBOT_HEARTBEAT_MAX_TICK` (agent timeout + 15 min). `healthcheck.sh` reports
+unhealthy after `CODEBOT_HEARTBEAT_STALE` (360 s) of silence and kills PID 1 after
+`CODEBOT_HEARTBEAT_HARD` (600 s), so `restart: unless-stopped` restarts it.
 
 ### On a Linux server (EC2)
 
 `docker-compose.ec2.yml` is the same stack with fixed host paths: this repo at
-`/opt/coderbot`, the `.env` at `/opt/codebot/codebot.env`, the bot's `~/.claude` at
-`/opt/codebot/claude` (with `.credentials.json`), a read-only `~/.claude.json` seed at
-`/opt/codebot/claude.json`, and the Google OAuth files in `/opt/coderbot/data/`. The
-target repo path comes from `CODEBOT_REPO_PATH` in the env file. Provision those files
-(e.g. from a secrets manager in the instance's user-data), `chown -R 501` both trees,
-then:
+`/opt/coderbot`, the env file at `/opt/codebot/codebot.env`, the bot's `~/.claude` at
+`/opt/codebot/claude`, a read-only `~/.claude.json` seed at `/opt/codebot/claude.json`,
+and the Google OAuth files in `/opt/coderbot/data/`. Provision those files,
+`chown -R 501` both trees, then:
 
 ```bash
 cd /opt/coderbot && docker compose -f docker-compose.ec2.yml up -d --build
 ```
 
-For a fleet of agents on cheap interruptible instances, each with a persistent disk so
-a reclaimed agent resumes its task, there are two self-contained deployments:
-[`deploy/aws/`](deploy/aws/README.md) (CloudFormation, Spot instances and an EBS volume
-per agent) and [`deploy/azure/`](deploy/azure/README.md) (Bicep, Spot VMs and a managed
-disk per agent). Each is driven entirely by its cloud's CLI.
+For a fleet on interruptible instances with a persistent disk per agent, see
+[`deploy/aws/`](deploy/aws/README.md) (CloudFormation, Spot, EBS) and
+[`deploy/azure/`](deploy/azure/README.md) (Bicep, Spot VMs, managed disks).
 
 ## Multiple instances
 
-Any number of codebots can share a backlog. New installations generate a stable
-readable name in `data/instance_id` (e.g. `codebot-warty-warthog`) and an opaque
-ownership fingerprint in `data/instance_fingerprint`. Existing `codebot-x7k2`
-names are retained. The readable name tags email subjects and git branches;
-`CODEBOT_INSTANCE` may override it. **Back up both files** with the rest of `data/`.
+Any number of coderbots can share a backlog. Each installation generates a readable
+name in `data/instance_id` (e.g. `codebot-warty-warthog`) and an ownership fingerprint
+in `data/instance_fingerprint`; `CODEBOT_INSTANCE` may override the name. **Back up
+both files.** Instances coordinate only through the backlog's claim markers/labels: in
+the Doc the claim write carries the revision it read, and on a board both instances
+back off when two labels land.
 
-Instances coordinate only through the backlog. In the Doc, picking a task atomically
-appends `[implementing: <instance>@<fingerprint>]` to its bullet (the write carries the doc revision
-it was read at, so two instances can't both win). On a GitHub board, picking adds the
-`codebot:<instance>@<fingerprint>` label to the issue and re-reads it; if another instance's label
-landed too, both back off and repick next tick. Claimed tasks are invisible to the
-others' PICK until the marker/label is removed on completion or abort. Legacy
-name-only markers are adopted only when locally saved task state identifies them;
-otherwise they need manual reconciliation. If an
-installation is retired mid-task, send it `ABORT <name>` first (which unclaims) or
-remove the marker/label by hand.
-
-Email-mode instances can share a Gmail account; each one only reads replies on its own
-threads (subjects carry its prefix). Address mailbox commands to one instance —
-`ABORT codebot-x7k2`, `STATUS codebot-x7k2`, `DONE codebot-x7k2`, `HOLD codebot-x7k2`
-— or reply with the bare command on one of its threads. A bare `ABORT` or `STATUS`
-sent anywhere else is honored by **every** instance (fleet-wide stop / fleet status —
-their last-resort role); a bare `DONE`, `HOLD` or `CONTINUE` outside an instance's
-threads is ignored, since they act on one instance's task. Only the instance that put
-a task on hold can resume it; delete its `[on hold: …]` marker by hand to free the task
-for anyone. In Slack mode each instance uses separate app credentials; commands
-only work as replies in that app's own task threads, never as fleet-wide top-level
-messages.
+Email-mode instances can share a Gmail account; each reads only its own threads.
+Address commands to one instance (`ABORT codebot-x7k2`) or reply on one of its threads.
+A bare `ABORT` or `STATUS` elsewhere is honored by **every** instance; a bare `DONE`,
+`HOLD` or `CONTINUE` outside an instance's threads is ignored. In Slack mode commands
+work only as replies in that app's own task threads.
 
 ## Secrets for live checks (optional)
 
-Some changes can only be proven against the real third-party API (payments, email
-providers, LLM APIs). With `CODEBOT_CREDENTIAL_REQUESTS=on` the agent can ask for a
-credential it is missing, and you never paste the value into Slack or email.
+With `CODEBOT_CREDENTIAL_REQUESTS=on` the agent can ask for a credential it is missing
+(the `credential` field of its result: `env`, `service`, `purpose`). Coderbot pauses
+and offers: **1** send it through a secure one-time link, **2** continue without it,
+**3** pause.
 
-How it works:
+On **1**, coderbot starts a temporary [PrivateBin](https://privatebin.info) container
+(`CODEBOT_PRIVATEBIN_IMAGE`, burn-after-reading) behind a
+[localhost.run](https://localhost.run) SSH tunnel and sends you the address. Paste the
+value, press Create, and reply with the link. Coderbot reads the paste once, decrypts
+it locally (the key is in the link's `#fragment`) and resumes the agent. On **2**,
+checks that need it are reported as **skipped**, never as passed.
 
-1. The agent ends a turn with
-   `CREDENTIAL_REQUEST: {"env": "STRIPE_KEY", "service": "Stripe", "purpose": "live refund test"}`.
-   Codebot pauses the phase (`WAIT_REPLY`) and offers three options:
-   **1** send it through a secure one-time link, **2** continue without it, **3** pause.
-   Numbers, short phrases ("sigue sin la clave", "send me the link") and free text are
-   accepted; anything it cannot classify is handled as a normal answer.
-2. On **1**, codebot starts a temporary [PrivateBin](https://privatebin.info) container
-   (`CODEBOT_PRIVATEBIN_IMAGE`, burn-after-reading on, no discussions or attachments) and
-   exposes it through a [localhost.run](https://localhost.run) SSH tunnel. It sends you
-   the `https://….lhr.life` address. Paste only the value, press Create, and reply with
-   the link PrivateBin gives you.
-3. Codebot reads the paste once through the local container address, decrypts it
-   locally (the key is in the link's `#fragment`, which PrivateBin's server never sees),
-   closes the page and resumes the agent. The paste is destroyed by that first read.
-4. On **2**, the agent continues; checks that need the credential are reported as
-   **skipped**, never as passed. On **3**, nothing happens until you reply 1 or 2.
-
-Where the value goes: `data/secrets/<task>/<NAME>.json` (directory `0700`, file `0600`)
-for `CODEBOT_SECRET_TTL_SECONDS` (default 4 h), deleted when the task ends. It is injected
-as environment variable `NAME` into the agent (Claude Code and OpenCode, from the next
-turn) and into controller-run checks, and registered with the log redactor. It is never
-written to `state.json`, transcripts, prompts, PR bodies or Git. Names that would shadow
-the bot's own settings (`GH_TOKEN`, `PATH`, `CODEBOT_*`, `CLAUDE_*`, `SLACK_*`…) are refused.
-
-Optional checks: a check in the agent's `CHECK_PLAN` (or `.codebot/checks.json`) that
-calls a live API lists its credentials in `"env_keys"` and sets `"optional": true`. Without
-those values it is reported as `skipped (missing credential NAME)`; with them it runs
-normally.
-
-Requirements and limits:
-
-- The bot needs the Docker CLI with access to the daemon and outbound SSH (port 22) to
-  `localhost.run`; the image already has both. Inside Docker the page joins the bot's
-  network namespace and listens on `127.0.0.1:48080`. If the page cannot start, codebot
-  says why and options 2 and 3 still work.
-- `CODEBOT_PRIVATEBIN_INSTANCES` (comma-separated HTTPS base URLs) accepts links from
-  PrivateBin instances you already run, without the temporary page.
-- The full link you reply with stays in Slack or the mailbox. It is useless after codebot
-  reads it (burn after reading), but prefer short-lived, least-privilege credentials.
-- Codebot replaces any PrivateBin-shaped link with `[secure-link]` before logging or
-  showing a reply to the agent, and scrubs its local Slack inbox copy once handled.
+The value is stored in `data/secrets/<task>/<NAME>.json` (`0700`/`0600`) for
+`CODEBOT_SECRET_TTL_SECONDS` (4 h), deleted when the task ends, injected as `NAME` into
+the agent and controller-run checks, and registered with the log redactor. It is never
+written to `state.json`, prompts, PR bodies or Git. Names that would shadow the bot's
+settings (`GH_TOKEN`, `PATH`, `CODEBOT_*`, `CLAUDE_*`, `SLACK_*`…) are refused. A check
+that calls a live API lists its credentials in `env_keys` and sets `"optional": true`.
+`CODEBOT_PRIVATEBIN_INSTANCES` accepts links from your own PrivateBin instances.
 
 ## Optional Caveman mode
 
-In `scripts/setup.sh`, open **Agent** and select **Usar Caveman: YES/NO**.
-YES saves `USE_CAVEMAN=true`; NO saves `USE_CAVEMAN=false`.
-Only the exact lowercase string `true` enables the mode; every other value
-(including unset, empty, `TRUE`, `yes`, `1` or surrounding spaces) disables it.
-Recreate the container after changing `.env`.
-
-The image includes the official `JuliusBrussee/caveman` plugin, pinned to v3.2.0
-commit `e20f07e8152a0c0360f58c09e79d30ac94329991`. Rebuild the image once to install it.
-When enabled, the selected Claude Code or OpenCode coding harness starts in
-Caveman mode and supports `/caveman`; text-only utility/conversation sessions
-retain their plugin isolation. No proxy, global installer or target-repo rules
-are installed. Machine-readable output contracts and permission settings stay unchanged.
+In `scripts/setup.sh`, open **Agent** and select **Usar Caveman: YES/NO**. Only the
+exact value `USE_CAVEMAN=true` enables it. The image includes the
+`JuliusBrussee/caveman` plugin, pinned to v3.2.0 commit
+`e20f07e8152a0c0360f58c09e79d30ac94329991`; the coding harness starts in Caveman mode,
+utility sessions do not. Output contracts and permissions are unchanged. Recreate the
+container after changing `.env`.
 
 ## Toolchain versions
 
-The image pins exact versions for reproducible rebuilds: the base image
-(`python:3.12.13-slim`), the claude-code, opencode and openspec CLIs (`@<version>` in
-the `Dockerfile`), the Superpowers plugin (`config.SUPERPOWERS_VERSION`), Node (major
-`22` via nodesource), and the Python deps (`==` in `requirements.txt`). To bump: read
-the version currently working in the running container (`docker compose exec codebot
-claude --version`, `… openspec --version`), edit the pin, and rebuild
-(`docker compose up -d --build`). Don't switch these to floating/`latest` — a silent
-CLI behavior change between rebuilds is exactly what the pins prevent.
-
-The image also installs Docker CLI, Compose and Buildx from Docker's apt
-repository. Buildx is required for target harnesses that prepare images using
-BuildKit secrets; it is checked during the image build, including as user `bot`.
-Rebuild the image to add these tools to an existing deployment; restarting alone
-does not update installed packages. Private registry credentials remain external
-to the image and are required only when the target harness needs preparation.
+The image pins exact versions: the base image (`python:3.12.13-slim`), the claude-code,
+opencode and openspec CLIs (`@<version>` in the `Dockerfile`), Superpowers
+(`config.SUPERPOWERS_VERSION`), Node 22 and the Python deps (`requirements.txt`). The
+startup probe reports a mismatch. To bump: check the running version
+(`docker compose exec codebot claude --version`), edit the pin, re-run the runtime
+checks in [docs/runtime-checks.md](docs/runtime-checks.md), and rebuild. The image also
+installs Docker CLI, Compose and Buildx.
 
 ## Smoke tests
 
@@ -1104,155 +655,98 @@ Inside the container (`docker compose exec codebot bash`):
 ```bash
 claude -p 'say ok' --model "$CLAUDE_MODEL" --dangerously-skip-permissions  # CODEBOT_AGENT=claude
 opencode run --auto --model "$OPENCODE_MODEL" 'say ok' # when CODEBOT_AGENT=opencode
-gh auth status                                       # GH token works
-docker buildx version                                # BuildKit secret support is installed
-git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN works
+gh auth status
+docker buildx version
+git -C "$CODEBOT_REPO_PATH" fetch
 cd src && python3 -c 'import task_source; task_source.validate(); print(task_source.list_pending_items())'
 cd src && python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hello"))'  # email mode
-cd src && python3 -c 'import slack_client; slack_client.validate(); print("Slack app and public channel accessible")' # Slack mode
+cd src && python3 -c 'import slack_client; slack_client.validate(); print("Slack ok")' # Slack mode
 ```
 
-Unit tests, on the host from the repo root:
+Unit tests, on the host from the repo root, and on the image's Python 3.12:
 
 ```bash
 python3 -m unittest discover -s tests -t .
+scripts/test.sh                      # rebuilds the image; extra args go to unittest
 ```
 
 ### Manual integration smoke (using a disposable task)
 
-1. Run `scripts/setup.sh` on macOS or Linux and review/save a configuration
-   with Jira+Slack. Repeat with `scripts/setup.sh --text`, change one Advanced
-   value, and verify the old `.env` backup still has every untouched line,
-   secret and comment. Verify GDoc+Slack and Jira+email selections separately.
-2. In the selected Jira project create a disposable issue in the configured pick
-   **status** with `CODEBOT_JIRA_PICK_LABEL`, and another issue in the same status
-   without that label. Start Coderbot; the unlabeled issue must stay untouched.
-   Confirm one fingerprinted claim label on the labeled issue and one
-   root Slack message bearing the issue link and instance name. With a second
-   bot app in the same public channel, check that only the owning app responds
-   to replies in that thread. Reply `STATUS`, then `HOLD`; the issue should be
-   held and the bot can claim another issue. Reply `CONTINUE` on the original
-   thread to recover it. Restart the container while a reply is pending and
-   confirm that the reply is handled once.
-3. Approve the proposal in the same thread. When the PR opens, verify
-   `Closes <JIRA-KEY>` plus a Jira URL in its body, a PR link in a Jira comment,
-   and Jira's review status (not done). Review the PR and reply `merge`; Jira
-   should transition to done and lose only this bot's ownership label. Repeat
-   with `DONE` and `ABORT` on disposable issues to verify each transition.
-4. In Slack mode with a dirty checkout before any issue is claimed, confirm one
-   operational announcement, ignored replies to it, and automatic retry once
-   the checkout is cleaned. If evidence is available, inspect the Drive video
-   link and an uploaded report/image in the task thread. Test long proposal
-   messages and a post-conflict stale merge reply on a disposable PR.
+1. Save a Jira+Slack configuration with `scripts/setup.sh`; repeat with `--text`,
+   change one Advanced value and check the `.env` backup kept every untouched line.
+2. Create a disposable Jira issue in the pick status with the pick label, and one
+   without it. Start coderbot: only the labeled issue is claimed, with one root Slack
+   message. Reply `STATUS`, then `HOLD`, then `CONTINUE`. Restart the container while a
+   reply is pending; the reply is handled once.
+3. Approve the proposal; check the draft PR appears right away and receives pushes.
+   When it is marked ready, check `Closes <JIRA-KEY>` in its body, the Jira comment and
+   review status. Reply `merge`; Jira moves to done. Repeat `DONE` and `ABORT` on
+   disposable issues.
 
 ## Troubleshooting
 
-**`managed runtime unavailable: missing ...`**: coderbot fails closed at startup if
-the image's managed Superpowers, coderbot/OpenSpec bridge or generated OpenSpec skill
-files are absent. Rebuild the image from this repository and check that no volume
-mount replaces `/opt/coderbot/plugins`, `/opt/coderbot/agent-plugin` or
-`/opt/coderbot/openspec-skills`; do not install Superpowers or run `openspec init` in
-the target repo or host profile as a workaround.
+**`managed runtime unavailable: missing ...`**: the image's managed Superpowers,
+bridge or OpenSpec skill files are absent. Rebuild the image and check that no volume
+replaces `/opt/coderbot/plugins`, `/opt/coderbot/agent-plugin` or
+`/opt/coderbot/openspec-skills`.
 
-**`Claude Code X does not support this model; version Y or newer is required`** (or
-`There's an issue with the selected model`): the `@anthropic-ai/claude-code@<version>`
-pin in the `Dockerfile` predates `CLAUDE_MODEL`. Bump the pin to a version that knows
-the model (see "Toolchain versions") and rebuild; also double-check the model id
-spelling (`claude-fable-5-1`, dashes only).
+**`Claude Code X does not support this model`**: the claude-code pin in the
+`Dockerfile` predates `CLAUDE_MODEL`. Bump the pin (see "Toolchain versions") and
+rebuild; also check the model id spelling.
 
-**OpenCode provider authentication fails or returns `401 Unauthorized`**: rerun
-`scripts/setup.sh` and complete authentication for `OPENCODE_PROVIDER`, then retry the
-OpenCode smoke command above. A provider 401 is a failed smoke test; never treat the
-CLI starting or returning structured output as a pass when the provider rejected the
-request.
+**OpenCode returns `401 Unauthorized`**: rerun `scripts/setup.sh` and complete the
+provider's authentication. A provider 401 is a failed smoke test.
 
-**`claude exited 1: apiKeyHelper failed: did not return a value`**: the target repo
-has its own `.claude/settings.json` (project-level, applies to any `claude` invocation
-with cwd in that repo) that defines an `apiKeyHelper` script codebot doesn't satisfy.
-Claude Code's authentication precedence always tries `apiKeyHelper` *before*
-`CLAUDE_CODE_OAUTH_TOKEN`, with **no fallback** if the helper fails or returns
-nothing — so this silently breaks codebot's OAuth auth for that repo regardless of a
-valid `CLAUDE_CODE_OAUTH_TOKEN`. Check what env var the helper reads (e.g.
-`cat "$CODEBOT_REPO_PATH/.claude/settings.json"`) and set it to a real key from
-[console.anthropic.com](https://console.anthropic.com/) via `CLAUDE_API_KEY` in
-`.env` (see `.env.example`) — codebot's work in that repo will then bill via that
-API key instead of your OAuth/subscription plan. Note some apps regenerate
-`.claude/settings.json` at their own startup (check whether it's gitignored); if so,
-the setting will keep reappearing and `CLAUDE_API_KEY` is the durable fix rather than
-hand-editing the file.
+**`claude exited 1: apiKeyHelper failed`**: the target repo's own
+`.claude/settings.json` defines an `apiKeyHelper`. Claude Code tries it before
+`CLAUDE_CODE_OAUTH_TOKEN`, with no fallback. Set the variable it reads with a real key
+via `CLAUDE_API_KEY` (billed per token).
+
+**The agent's `git push` fails**: expected. Agents have no push credentials; coderbot
+pushes after the turn.
 
 ## Logs
 
-All activity is logged to stdout (visible via `docker compose logs -f`). At the
-default `DEBUG` level you see every state transition, each coding-agent invocation
-(model, effort, prompt size, returned session/output size, whether it hit the
-`NEED_USER_INPUT` sentinel), every email sent (subject, thread, attachment count
-and byte totals, any size-skipped files), reply and command received, git/gh
-commands, the e2e suite result, review-thread activity, and the evidence-video
-harvest (which `.webm` files were found and their sizes — with explicit warnings if
-none were produced or a feature shipped without e2e specs). Failures are logged with
-their per-state count (`cycle failed in E2E (2/5)`). Set `CODEBOT_LOG_LEVEL=INFO` for
-a quieter feed; STATUS by email gives the same picture without the logs.
+All activity goes to stdout (`docker compose logs -f`). At the default `DEBUG` level you
+see every state transition, each agent call (model, effort, prompt size, session),
+every message sent, git/gh commands, check results, review-thread activity and the
+evidence harvest. Failures are logged with their per-state count
+(`cycle failed in VERIFYING (2/5)`). `CODEBOT_LOG_LEVEL=INFO` is quieter.
 
 ## Evidence
 
-If the target repo has an e2e harness, the implementation phase adds coverage for
-it and, once the suite passes, codebot re-runs the feature's own tests to capture
-evidence for the PR handoff in the selected conversation channel:
+If the target has an e2e harness, the implementation adds coverage for it, and one
+Playwright test per feature is the demo: its title contains `@evidence`.
 
-- **Playwright**: the implementation must include one demo test tagged `@evidence`
-  that walks through the feature visibly. Codebot first re-runs only that test
-  (`./run.sh <spec> --grep @evidence`), falling back to the feature's full specs when
-  no clip appears, with `PW_VIDEO=on` exported (the target harness can use it to enable
-  `video: "on"` in `e2e/playwright.config.ts`). The resulting `.webm` clips from
-  `e2e/test-results/` are stitched into a single H.264 `data/evidence.mp4` with ffmpeg
-  (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate cleanly).
-  If ffmpeg is unavailable or stitching fails, it falls back to attaching the raw
-  `.webm` clips.
-- **Newman**: re-runs the feature's collection(s) and attaches the newest
-  generated report file from `e2e/test-results/`.
+- **Playwright**: the final-check E2E run exports `PW_VIDEO=on` (the harness can use it
+  to enable `video: "on"`), and coderbot keeps the clips of the `@evidence` tests from
+  that run, so nothing is re-run. Only if that harvest is incomplete does it record
+  separately (`--grep @evidence`, then the full selected specs). Clips are stitched into
+  one H.264 `data/evidence.mp4` with ffmpeg (each scaled/padded to 1280x720); without
+  ffmpeg the raw `.webm` clips are attached.
+- **Newman**: the run's newest report from `e2e/test-results/` is attached.
 
-The stitched mp4 is not attached when Drive upload is enabled: it is uploaded to Google Drive
-(`CODEBOT_EVIDENCE_UPLOAD`, default on) and linked from the PR email — and, because
-the activity trail mirrors email bodies, from the issue comment or doc thread too,
-so reviewers reading the ticket can watch it. Videos land in a `Codebot evidence`
-folder found or created at the root of the bot account's My Drive, or in the folder
-given by `CODEBOT_DRIVE_FOLDER_ID` (shared drives work). Each file is named
-`<branch>-<timestamp>.mp4` and shared as "anyone with the link" (reader); if a
-Workspace policy forbids link sharing the upload still succeeds and the link is
-sent, but only the bot account can open it. Any upload failure — including a
-`data/token.json` issued before the full `drive` scope was requested (re-run
-`python3 scripts/setup_oauth.py`) — is logged and the mp4 is attached instead,
-subject to `CODEBOT_MAX_ATTACH_BYTES` as before. Newman reports and agent-supplied
-screenshots are always attached, never uploaded.
+With `CODEBOT_EVIDENCE_UPLOAD=on` (default) the mp4 is uploaded to Google Drive (a
+`Codebot evidence` folder, or `CODEBOT_DRIVE_FOLDER_ID`) with the folder's own
+permissions, and linked from the PR, the "PR ready" message and the activity trail. A
+failed upload attaches the file instead, up to `CODEBOT_MAX_ATTACH_BYTES`. See
+[evidence delivery](docs/evidence-delivery-recovery.md).
 
-If no e2e harness is present for the task, no evidence is produced and the PR
-email is sent without an attachment.
+Evidence never belongs in the target repo: committed videos and evidence-named images
+or HTML are moved to the outbox and removed by a controller commit.
 
-A `run.sh` that exceeds `CODEBOT_E2E_TIMEOUT` is killed, which skips its own cleanup
-trap; codebot then tears down the harness's compose stack itself
-(`docker compose -f $CODEBOT_E2E_COMPOSE_FILE down -v`, default
-`docker-compose.e2e.yaml`, skipped when the file doesn't exist) so leaked containers
-don't collide with the next run.
+A `run.sh` that exceeds `CODEBOT_E2E_TIMEOUT` (900 s) is killed; coderbot then tears
+down the harness's compose stack (`docker compose -f $CODEBOT_E2E_COMPOSE_FILE down -v`,
+default `docker-compose.e2e.yaml`).
+
 ## Explicit verification scope
 
-Questions, decisions and explanatory context stay visible in the conversation
-body in both Slack and email, even when long. Slack splits long text within the
-same thread. Raw JSON diagnostics, tracebacks and logs belong in supporting
-`.txt` reports; opening an attachment is not required to discover the question.
-
 Targets can define `.codebot/checks.json` (version 1) to replace automatic check
-discovery with an explicit list of active suites. `inputs` selects source inputs;
-`dependency_inputs` optionally selects dependency manifests relevant to each
-check (for example `backend/requirements*.txt`). Historical trees omitted from
-those lists do not affect these checks. Document their exclusion in the target's
-OpenSpec so exploration, review and recovery preserve the same scope. This is a
-scope decision, not a passing result for excluded tests.
+discovery with an explicit list of suites. `inputs` selects source inputs;
+`dependency_inputs` selects dependency manifests per check (e.g.
+`backend/requirements*.txt`). Document excluded trees in the target's OpenSpec so
+exploration and review keep the same scope; exclusion is a scope decision, not a pass.
 
-Baseline comparisons reuse installed dependencies only when the relevant
-manifests match. If they differ, the controller prepares the immutable baseline's
-own npm lockfile/Python requirements in its disposable worktree; installs are never
-mixed with the feature checkout. Preparation failures include their actual log and
-enter diagnosis/repair rather than being reported as preexisting failures. Controller
-final-task completion commits only its exact checkbox delta, with provenance,
-before archival; unrelated edits remain protected.
+Baseline comparisons reuse installed dependencies only when the relevant manifests
+match. Otherwise the controller prepares the baseline's own lockfile/requirements in a
+disposable worktree; installs are never mixed with the feature checkout.

@@ -1,6 +1,7 @@
 # Recuperación de entrega
 
-RECORD, CONVERT, UPLOAD y NOTIFY tienen claves durables por contenido. Los pasos
+RECORD, CONVERT, UPLOAD, ACCESS, NOTIFY y NOTIFY_FILES (`src/evidence_delivery.py`)
+tienen claves durables por contenido. Los pasos
 completados se reutilizan después de restart. Drive reconcilia uploads por hash
 en appProperties antes de crear un archivo; PR creation ya consulta el PR abierto
 de la rama antes de crear otro.

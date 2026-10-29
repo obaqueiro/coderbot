@@ -15,7 +15,10 @@ del hilo autorizado de una tarea; no crea tareas nuevas ni atiende hilos ajenos.
 - El contexto se entrega al siguiente turno; alcance nuevo requiere revisión y
   aprobación explícita. Una sustitución conserva el historial de la solicitud anterior.
 
-Sin `/btw`, el bot clasifica el mensaje completo antes de actuar. Las selecciones
+Sin `/btw`, el bot clasifica el mensaje completo antes de actuar. Comandos, números
+de opción y palabras clave (`retry`, `abort`, `complete`, `merge`) se resuelven sin
+modelo; el resto cuesta una llamada de utilidad, y la respuesta a una espera pasa por
+el clasificador único de `src/replies.py`. Las selecciones
 numéricas requieren opciones válidas y detalles completos. Mensajes ambiguos o
 condicionados (“antes de reintentar agrega X”) no ejecutan la acción por sí solos.
 Las respuestas se revalidan contra la decisión vigente, no contra una opción antigua.
