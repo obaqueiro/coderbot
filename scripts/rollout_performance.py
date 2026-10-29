@@ -5,10 +5,7 @@ Backups contain private runtime config and are created mode 0700/0600.
 """
 import argparse
 import json
-import os
 from pathlib import Path
-import shutil
-import sqlite3
 import subprocess
 import time
 

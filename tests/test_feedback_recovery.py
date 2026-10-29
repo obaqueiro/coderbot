@@ -195,11 +195,7 @@ class FeedbackRecoveryTests(unittest.TestCase):
         self.assertEqual(state["replan"]["original_archive"], "openspec/changes/archive/old")
         self.assertNotIn("approved_proposal", state)
 
-    def test_coverage_and_review_provenance(self):
-        inventory = [{"id": "model", "title": "Model selector"}, {"id": "effort", "title": "Effort"}]
-        report = {"snapshot": "head", "requirements": [{"id": "effort", "status": "implemented",
-                   "implementation": "toolbar", "verification": "tests"}]}
-        self.assertEqual(verification_ledger.validate_coverage(inventory, report, "head"), ["Model selector"])
+    def test_review_provenance(self):
         self.assertEqual(review_intent.provenance({"author": "custom-reviewer", "body": "ai-review-inline"}), "automated")
         self.assertEqual(review_intent.provenance({"author": "unknown"}), "unknown")
 

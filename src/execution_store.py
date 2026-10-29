@@ -25,12 +25,6 @@ class ExecutionStore:
         return self.put("check_run", task_id=task_id, identity=identity, status=status,
                         data={"result": result, "tdd": tdd})
 
-    def interrupt_running(self, task_id):
-        with self.connection() as db:
-            for entity in ("operation", "check_run", "phase_attempt"):
-                db.execute(f"UPDATE {entity} SET status='interrupted',updated=? "
-                           "WHERE task_id=? AND status='running'", (time.time(), task_id))
-
     def task_identity(self, state, repo):
         """Derivable for legacy state even if its new cursor was never saved."""
         if state.get("execution_task_id"):
@@ -42,17 +36,6 @@ class ExecutionStore:
         raw = json.dumps([str(Path(repo).resolve()), state.get("branch"),
                           state.get("item_id") or state.get("item"), state.get("base_sha")])
         return hashlib.sha256(raw.encode()).hexdigest()
-
-    def repository_identity(self, state, repo, repository):
-        """Independent operation namespace beneath a stable workspace feature."""
-        raw = json.dumps([self.task_identity(state, repo), repository.identity])
-        return hashlib.sha256(raw.encode()).hexdigest()
-
-    def record_repository(self, entity, state, workspace, repository, identity, data,
-                          *, status="running"):
-        task_id = self.repository_identity(state, workspace.root, repository)
-        return self.put(entity, task_id=task_id, identity=identity, status=status,
-                        parent_id=self.task_identity(state, workspace.root), data=data)
 
     def reconcile(self, state, repo):
         task_id = self.task_identity(state, repo)
@@ -66,18 +49,6 @@ class ExecutionStore:
             state["execution_checkpoint_id"] = checkpoint["id"]
             state.update(checkpoint["data"].get("state_patch", {}))
         return task_id
-
-    def begin_attempt(self, state, repo):
-        task_id = self.reconcile(state, repo)
-        phase = state.get("state", "IDLE")
-        active = self.list("phase_attempt", task_id, identity=phase, status="running")
-        if active:
-            id = active[0]["id"]
-        else:
-            id = self.put("phase_attempt", task_id=task_id, identity=phase,
-                          data={"phase": phase})
-        state["execution_attempt_id"] = id
-        return id
 
     def __init__(self, path):
         self.path = Path(path)

@@ -9,7 +9,6 @@ from urllib.parse import urlsplit
 
 import markdown
 
-import config
 
 
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")

@@ -9,7 +9,6 @@ and safe_substitute never rescans the substituted values.
 from string import Template
 
 import config
-import handoffs
 
 
 def render(template: str, **kwargs) -> str:

@@ -56,5 +56,3 @@ class DecisionReminders(unittest.TestCase):
         state["reviewed_proposal"] = "new-version"
         self.assertTrue(main._ping_due(state, 1e12))
 
-    def test_phase_descriptions_cover_recovery_and_replanning(self):
-        self.assertEqual(set(main.PHASES) - {"IDLE"}, set(main._PHASE_ACTIVITY))

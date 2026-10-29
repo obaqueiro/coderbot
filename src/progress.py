@@ -5,7 +5,6 @@ import threading
 from collections import OrderedDict, deque
 from contextvars import ContextVar
 
-import config
 import redaction
 
 _context: ContextVar[dict | None] = ContextVar("progress_task", default=None)

@@ -99,14 +99,6 @@ class WorkspaceStateTests(unittest.TestCase):
         task = store.task_identity(state, context.root)
         state = repository_record(state, context, "ui", reason="UI change")
         self.assertEqual(task, store.task_identity(state, context.root))
-        api, ui = context.repository("api"), context.repository("ui")
-        self.assertNotEqual(store.repository_identity(state, context.root, api),
-                            store.repository_identity(state, context.root, ui))
-        id = store.record_repository("checkpoint", state, context, api, "publication",
-                                     {"pr_url": "accepted"}, status="complete")
-        row = store.get("checkpoint", id)
-        self.assertEqual(row["parent_id"], task)
-        self.assertEqual(row["task_id"], store.repository_identity(state, context.root, api))
 
     def test_runtime_load_rejects_mismatch_before_durable_migration(self):
         import main

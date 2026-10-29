@@ -19,23 +19,6 @@ def requirements(repo, state):
     return result
 
 
-def validate_coverage(inventory, report, snapshot):
-    if report.get("snapshot") != snapshot:
-        raise ValueError("Requirement coverage is stale")
-    values = report.get("requirements", [])
-    if not isinstance(values, list) or any(not isinstance(entry, dict) or not entry.get("id") for entry in values):
-        raise ValueError("Invalid requirement coverage entries")
-    if len({entry["id"] for entry in values}) != len(values):
-        raise ValueError("Duplicate requirement coverage entries")
-    entries = {entry["id"]: entry for entry in values}
-    missing = []
-    for requirement in inventory:
-        entry = entries.get(requirement["id"], {})
-        if entry.get("status") != "implemented" or not entry.get("implementation") or not entry.get("verification"):
-            missing.append(requirement["title"])
-    return missing
-
-
 def waiver(state, text, scope, snapshot):
     value = {"instruction": text, "reason": text, "scope": scope, "snapshot": snapshot}
     if value not in state.setdefault("check_waivers", []):

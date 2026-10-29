@@ -3,13 +3,11 @@ import json
 import logging
 import os
 import subprocess
-import signal
 import time
 from pathlib import Path
 
 import config
 import secret_store
-import turn_control
 import operations
 import check_plan
 import prompts

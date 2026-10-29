@@ -1,7 +1,7 @@
 """Optional target harness protocol; legacy run.sh remains supported."""
 import json
 from pathlib import Path
-from check_plan import Check, parse
+from check_plan import parse
 
 
 def load(repo):

@@ -44,7 +44,6 @@ import evidence_delivery
 import message_templates
 import performance
 import config
-import drive_client
 import evidence
 import handoffs
 import milestones
@@ -236,10 +235,6 @@ def _language_state_for_thread(state: dict, thread_id: str | None) -> dict:
 def _reply_here() -> str:
     return ("Reply in this Slack thread to continue." if config.COMM_CHANNEL == "slack"
             else "Reply to this email to continue.")
-
-
-def _contact_name() -> str:
-    return "Slack message" if config.COMM_CHANNEL == "slack" else "email"
 
 
 RESEND_WINDOW_SECONDS = 600
@@ -2867,13 +2862,6 @@ def check_pr_status(state: dict) -> bool:
     return _check_pr_conflicts(state, pr_state, mergeable)
 
 
-def check_pr_conflicts(state: dict) -> bool:
-    """Conflict check alone (see check_pr_status for the per-tick entry point)."""
-    if not state.get("pr_url"):
-        return False
-    return _check_pr_conflicts(state, *_pr_merge_state(state["pr_url"]))
-
-
 def _check_pr_conflicts(state: dict, pr_state, mergeable) -> bool:
     """While waiting with an open PR, watch for the base branch having moved under it
     (another PR merged). A CONFLICTING PR is routed to RESOLVE_CONFLICTS; returns True
@@ -3227,7 +3215,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
         return
     if action == "changes":
         if state.get("execution_task_id"):
-            row = feedback.receive(phase_checkpoint.store(), state, config.REPO_PATH,
+            feedback.receive(phase_checkpoint.store(), state, config.REPO_PATH,
                 "pr-feedback-" + hashlib.sha256(reply.encode()).hexdigest(), verdict.get("feedback") or reply)
             _dispatch_feedback(state)
             return
@@ -3497,33 +3485,8 @@ def do_push(state: dict) -> None:
 # which STATUS and the check-ins quote as "what I'm waiting on". They are sent from the
 # tick loop, so one can lag while a single long agent call runs (bounded by
 # CODEBOT_AGENT_TIMEOUT); it goes out as soon as that call returns.
-PING_KEYS = ("last_contact", "ping_count", "last_ping_at")
 # Waits whose next move is the user's: the check-in spells out what is expected in full.
 USER_SIDE_WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN"}
-
-_PHASE_ACTIVITY = {
-    "EVIDENCE_REVIEW": "reviewing and fixing evidence recovery changes before controller checks and recording",
-    "REPAIR_CHECKS": "diagnosing failing checks and implementing repairs before controller verification",
-    "RECOVERING": "diagnosing and repairing a task-owned repository condition",
-    "REPLANNING": "revising the proposal to incorporate material feedback",
-    "APPLY_FEEDBACK": "applying the requested localized corrections",
-    "EXPLORING": "exploring the codebase to understand the task before writing a proposal",
-    "PROPOSING": "writing the OpenSpec proposal (design, specs, tasks) for your review",
-    "IMPLEMENTING": "implementing the approved proposal on branch {branch}",
-    "VERIFYING": "running the verification gate (tests and checks) on the implementation",
-    "INTERNAL_REVIEW": "running an internal code review of the implementation and fixing "
-                       "its findings",
-    "E2E": "running the e2e test harness against the implementation",
-    "ARCHIVING": "archiving the OpenSpec change on the task branch before opening the PR",
-    "OPEN_PR": "pushing branch {branch} and opening the pull request",
-    "ADDRESS_REVIEW": "working through {n_review} unresolved thread(s) from the automated "
-                      "reviewer on the PR {pr_url}",
-    "ADDRESS_PR_THREADS": "working through {n_pr} unresolved review thread(s) on the PR "
-                          "{pr_url} before it can merge",
-    "RESOLVE_CONFLICTS": "resolving merge conflicts between the task branch and {base} "
-                         "on the PR {pr_url}",
-    "PUSHING": "pushing the latest commits to the PR branch {branch}",
-}
 
 
 def _fmt_dur(seconds: float) -> str:
@@ -3548,12 +3511,6 @@ def _note_contact(state: dict) -> None:
     state.pop("last_ping_at", None)
 
 
-def _ping_interval(count: int) -> int:
-    """Silence tolerated before check-in number `count + 1` (the last interval repeats)."""
-    schedule = config.PING_SCHEDULE_SECONDS
-    return schedule[min(count, len(schedule) - 1)]
-
-
 def _ping_due(state: dict, now: float) -> bool:
     if state.get("state") not in USER_SIDE_WAITS:
         return False
@@ -3574,95 +3531,6 @@ def _ping_due(state: dict, now: float) -> bool:
         state["last_contact"] = now
         return False
     return now - anchor >= 86400
-
-
-def _expected_from_user(state: dict) -> str:
-    """What the current wait needs from the user, spelled out in full: a check-in must
-    stand on its own, never "see my earlier email"."""
-    st = state["state"]
-    decision = state.get("pending_decision")
-    if isinstance(decision, dict) and decision.get("wait_state") == st:
-        return handoffs.render_decision(decision)
-    if st == "WAIT_APPROVAL":
-        return ("your decision on the proposal I sent for this task. Reply with an explicit "
-                "approval to start implementing, with the changes you want made to the "
-                "proposal, 'complete' to mark the task done without further work, or "
-                "'abort' to drop it.")
-    if st == "WAIT_MERGE":
-        text = (f"your decision on the pull request: {state.get('pr_url', '?')}\n"
-                "Reply 'merge' to merge it, with the changes you want made to the PR, "
-                "'complete' to mark the task done without merging, or 'abort' to drop it.")
-        if state.get("pr_thread_notified"):
-            text += (f"\nThe PR still has unresolved review threads I could not clear after "
-                     f"{config.PR_THREAD_MAX_ROUNDS} round(s): resolve them on GitHub, or "
-                     "reply 'merge anyway' to merge regardless.")
-        return text
-    if st == "WAIT_REPLY":
-        question = state.get("pending_question") or "(question not recorded; see my last message below)"
-        return (f"your answer to the question I asked during {state.get('return_state', '?')}:"
-                f"\n\n{question}")
-    if st == "WAIT_STUCK":
-        text = (f"help with the step I'm stuck on ({state.get('stuck_return', '?')}). Reply "
-                "'retry' to try that step again, 'abort' to reset to a clean slate, "
-                "'complete' to mark the task done as-is, or reply with instructions and "
-                "I'll apply them and continue.")
-        if state.get("stuck_error"):
-            text += f"\nThe problem was:\n\n{state['stuck_error']}"
-        return text
-    if st == "WAIT_CLEAN":
-        return (f"a clean working tree in {config.REPO_PATH}: it has uncommitted changes to "
-                "tracked files and I won't start a task on top of them. Commit, stash or "
-                "discard them, then reply to this thread (any text) and I'll retry.")
-    return "your reply to my last message (quoted below)."
-
-
-def _review_wait_status(state: dict, now: float) -> str:
-    pr_url = state.get("pr_url", "?")
-    lines = [f"I'm waiting for the 'Code Review' GitHub Action to finish on the PR: {pr_url}"]
-    since = state.get("review_since")
-    if since:
-        remaining = config.REVIEW_WAIT_TIMEOUT_SECONDS - (now - since)
-        line = f"Waiting since {_fmt_ts(since)} ({_fmt_dur(now - since)} so far)"
-        if remaining > 0:
-            line += (f"; if it hasn't finished in another {_fmt_dur(remaining)} I'll message "
-                     "you the PR without it.")
-        else:
-            line += "; that is past my wait limit, so I'm about to message you the PR without it."
-        lines.append(line)
-    try:
-        check = code_review_check(pr_url)
-    except Exception:  # noqa: BLE001 — a gh hiccup must not sink the check-in
-        log.exception("could not query the Code Review check for the check-in")
-        check = None
-    if check is None:
-        lines.append("GitHub does not report a Code Review run for the PR's latest commit yet.")
-    elif check.get("link") and check.get("link") == state.get("review_run_link"):
-        lines.append(f"GitHub still reports the run I already processed ({check.get('bucket')}); "
-                     "I'm waiting for the new run my latest push triggers.")
-    else:
-        lines.append(f"GitHub reports the run as: {check.get('bucket', '?')}"
-                     + (f" ({check['link']})" if check.get("link") else ""))
-    if state.get("review_round"):
-        lines.append(f"Automated review round {state['review_round']} of at most "
-                     f"{config.REVIEW_MAX_ROUNDS}.")
-    lines.append("When it finishes I'll fix or answer any unresolved review threads, then "
-                 "send you the PR.")
-    return "\n".join(lines)
-
-
-def _bot_side_activity(state: dict, now: float) -> str:
-    st = state["state"]
-    if st == "WAIT_REVIEW":
-        return _review_wait_status(state, now)
-    what = _PHASE_ACTIVITY.get(st, f"working through the {st} step").format(
-        branch=state.get("branch", "?"), base=config.BASE_BRANCH,
-        pr_url=state.get("pr_url", "?"), n_review=len(state.get("review_threads", [])),
-        n_pr=len(state.get("pr_threads", [])))
-    lines = [f"I'm {what}."]
-    started = state.get("last_transition")
-    if started:
-        lines.append(f"This step started at {_fmt_ts(started)} ({_fmt_dur(now - started)} ago).")
-    return "\n".join(lines)
 
 
 def _ping_body(state: dict, now: float, count: int) -> str:
@@ -5481,13 +5349,6 @@ def _handle_held_command(msg_id: str, thread_id: str, command: str, note: str) -
 
 def _fmt_ts(epoch: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch))
-
-
-def _heartbeat_age() -> float | None:
-    try:
-        return time.time() - config.HEARTBEAT_PATH.stat().st_mtime
-    except OSError:
-        return None
 
 
 def _send_status(state: dict, thread_id: str) -> None:

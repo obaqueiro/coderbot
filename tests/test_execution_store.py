@@ -6,24 +6,19 @@ from execution_store import ENTITIES, ExecutionStore
 
 
 class ExecutionStoreTests(unittest.TestCase):
-    def test_interrupted_checks_are_not_reusable_and_tdd_is_durable(self):
+    def test_running_checks_are_not_reusable_and_tdd_is_durable(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
             store.record_check("t", "input", result={"exit": 1}, status="running", tdd="RED")
             self.assertIsNone(store.reusable_check("t", "input"))
-            store.interrupt_running("t")
-            self.assertEqual(store.list("check_run", "t")[0]["status"], "interrupted")
             store.record_check("t", "green", result={"exit": 0}, tdd="GREEN")
             self.assertEqual(store.reusable_check("t", "green")["data"]["tdd"], "GREEN")
 
-    def test_legacy_cursor_and_attempt_reconcile_after_crash(self):
+    def test_reconcile_replays_the_last_complete_checkpoint(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
-            legacy = {"state": "VERIFYING", "branch": "feature", "base_sha": "abc"}
-            first = store.begin_attempt(dict(legacy), root)
-            restored = dict(legacy)
-            self.assertEqual(store.begin_attempt(restored, root), first)
-            task_id = restored["execution_task_id"]
+            restored = {"state": "VERIFYING", "branch": "feature", "base_sha": "abc"}
+            task_id = store.reconcile(restored, root)
             checkpoint = store.put("checkpoint", task_id=task_id, status="complete",
                 data={"state_patch": {"state": "INTERNAL_REVIEW"}})
             store.reconcile(restored, root)

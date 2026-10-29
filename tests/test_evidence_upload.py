@@ -43,10 +43,8 @@ class OffloadHelperTests(unittest.TestCase):
         self.assertNotIn("evidence_url", self.state)
 
     def test_disabled_upload_is_a_no_op(self):
-        with patch.object(main.config, "EVIDENCE_UPLOAD", False), \
-             patch.object(main.drive_client, "upload_evidence") as upload:
+        with patch.object(main.config, "EVIDENCE_UPLOAD", False):
             self.assertEqual(main._offload_evidence_video(self.state, [MP4]), ([MP4], None))
-        upload.assert_not_called()
 
     def test_two_videos_get_distinct_names(self):
         with patch.object(main.evidence_delivery, "publish",

@@ -11,10 +11,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 
 import config
-import ownership
 import safe_download
 import task_source
 from task_text import normalize, priority_of

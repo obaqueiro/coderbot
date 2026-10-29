@@ -293,8 +293,7 @@ class MergeGate(unittest.TestCase):
 class Conflicts(unittest.TestCase):
     def test_check_routes_conflicting_pr(self):
         state = {"state": "WAIT_REVIEW", "pr_url": PR}
-        with patch.object(main, "_pr_merge_state", return_value=("OPEN", "CONFLICTING")):
-            self.assertTrue(main.check_pr_conflicts(state))
+        self.assertTrue(main._check_pr_conflicts(state, "OPEN", "CONFLICTING"))
         self.assertEqual(state["state"], "RESOLVE_CONFLICTS")
         self.assertEqual(state["conflict_return"], "WAIT_REVIEW")
         self.assertNotIn("stale_replies", state)
@@ -302,11 +301,9 @@ class Conflicts(unittest.TestCase):
     def test_check_ignores_unknown_and_keeps_the_per_task_budget_when_mergeable(self):
         # A per-burst reset let conflict resolution run forever across bursts.
         state = {"state": "WAIT_MERGE", "pr_url": PR, "conflict_rounds": 2}
-        with patch.object(main, "_pr_merge_state", return_value=(None, None)):
-            self.assertFalse(main.check_pr_conflicts(state))
+        self.assertFalse(main._check_pr_conflicts(state, None, None))
         self.assertEqual(state["conflict_rounds"], 2)
-        with patch.object(main, "_pr_merge_state", return_value=("OPEN", "MERGEABLE")):
-            self.assertFalse(main.check_pr_conflicts(state))
+        self.assertFalse(main._check_pr_conflicts(state, "OPEN", "MERGEABLE"))
         self.assertEqual(state["conflict_rounds"], 2)
 
     def test_status_finishes_task_when_merged_externally(self):

@@ -140,15 +140,6 @@ class StagedChecksTests(unittest.TestCase):
         path.write_text("- [x] Verified\n")
         self.assertTrue(checks.execute(check, self.root, self.store, "task", audit_task="task")["reused"])
 
-    def test_reserved_crashed_launches_are_not_forgotten_on_restart(self):
-        import checks
-        for _ in range(2):
-            self.store.put("operation", task_id="task", identity="full-e2e-launch", data={})
-        self.store.interrupt_running("task")
-        result = checks.execute(check_plan.Check("full", ["echo", "full"], kind="e2e"), self.root,
-                                ExecutionStore(self.store.path), "task", audit_task="task")
-        self.assertEqual(result["reason"], "full_e2e_budget_exhausted")
-
     def test_environment_revision_invalidates_cache_without_resetting_budget(self):
         import checks
         check = check_plan.Check("full", ["echo", "full"], kind="e2e")

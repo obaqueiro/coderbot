@@ -51,16 +51,6 @@ class Heartbeat(unittest.TestCase):
                     main._heartbeat_loop()
             self.assertFalse(beat.exists())
 
-    def test_status_reports_heartbeat_age(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            beat = pathlib.Path(tmp) / "heartbeat"
-            beat.write_text("1")
-            with patch.object(main.config, "HEARTBEAT_PATH", beat):
-                self.assertIsNotNone(main._heartbeat_age())
-            with patch.object(main.config, "HEARTBEAT_PATH", pathlib.Path(tmp) / "missing"):
-                self.assertIsNone(main._heartbeat_age())
-
-
 class HealthcheckScript(unittest.TestCase):
     def run_check(self, age: int | None, **env):
         with tempfile.TemporaryDirectory() as tmp:

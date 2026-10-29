@@ -1,7 +1,6 @@
 """Run the configured headless coding agent and normalize its result."""
 import json
 import logging
-import os
 import signal
 import subprocess
 import threading
