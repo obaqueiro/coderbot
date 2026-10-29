@@ -523,8 +523,29 @@ def poll_prs(ws, state):
     if pending:
         return main.handle_wait(state)
     if any(record.get("pr_url") for record in records.values()):
-        release(ops, records)
-        main._finish_task(state, "All feature PRs merged.\n" + status_body(state), reset_repo=False, merged=True)
+        release(ops, records)  # children now sit on the merged bases
+        main._finish_task(state, "All feature PRs merged.\n" + integrated_check(ws, state, context)
+                          + status_body(state), reset_repo=False, merged=True)
+
+
+def integrated_check(ws, state, context):
+    """W7: the shared integration checks once more on the merged bases. Informational:
+    the PRs are merged, so a failure is reported for a follow-up, never reverted."""
+    import checks
+    import main
+    try:
+        plan = [check for check in ws.check_plan_for(state, context) if check.cwd in (".", "e2e")]
+        if not plan:
+            return ""
+        store = main.phase_checkpoint.store()
+        results = checks.execute_plan(plan, context.root, store, store.task_identity(state, context.root))
+    except Exception as error:  # noqa: BLE001 - best effort after the merge
+        log.warning("integrated check after merge could not run: %s", error)
+        return "Integrated check after merge could not run: " + str(error)[:300] + "\n"
+    lines = [f"- {r.get('check')}: {r.get('status')}" for r in results]
+    failed = any(r.get("status") not in ("pass", "skipped") for r in results)
+    return ("Integrated check on the merged bases " + ("FAILED; a follow-up is needed:" if failed else "passed:")
+            + "\n" + "\n".join(lines) + "\n")
 
 
 def merge_all(ws, state, force=False):

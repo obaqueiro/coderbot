@@ -155,6 +155,8 @@ class WorkspaceWalk(unittest.TestCase):
         subjects = [m["subject"].split(" — ")[-1] for m in result["sent"]]
         self.assertIn("draft PR", subjects, context)
         self.assertFalse(any("stuck" in s for s in subjects), context)
+        self.assertTrue(any("Integrated check on the merged bases passed" in m["body"] for m in result["sent"]),
+                        context)  # W7: the shared checks ran again on the merged code
         working = self.agent(logs)
         self.assertEqual([a["phase"] for a in working], ["EXPLORE", "PROPOSE", "IMPLEMENT", "REVIEW"], context)
         self.assertTrue(all(a["gh_token"] == "" and a["credential_helper"] == "" for a in working), context)
