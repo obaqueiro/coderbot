@@ -163,3 +163,18 @@ class ReviewGuide(unittest.TestCase):
         rendered = main._internal_review_prompt({"slug": "s", "base_sha": "abc", "item": "x"})
         self.assertNotRegex(rendered, r"\$[a-z_]+")
         self.assertIn("do not dispatch another reviewer", rendered)
+
+
+class TurnRequest(unittest.TestCase):
+    def test_facts_are_a_short_deterministic_yaml_block(self):
+        state = {"item": "Exportar CSV", "task_language": "Spanish", "branch": "b", "base_sha": "abc",
+                 "slug": "export-csv", "implement_budget": 5, "implementation_turn": 1,
+                 "implementation_progress": {"pending": ["2.1 API"]}}
+        block = turns.request(state, "IMPLEMENTING")
+        self.assertEqual(block, turns.request(dict(state), "IMPLEMENTING"))
+        self.assertTrue(block.startswith("```yaml\nphase: \"IMPLEMENTING\"\ntask: \"Exportar CSV\""))
+        for line in ('skill: "openspec-apply-change, test-driven-development"', 'turn: "2 of 5"',
+                     'pending_tasks: ["2.1 API"]', 'language: "Spanish"'):
+            self.assertIn(line, block)
+        self.assertNotIn("pending_tasks", turns.request(state, "INTERNAL_REVIEW"))
+        self.assertEqual(turns.request({}, None), "")

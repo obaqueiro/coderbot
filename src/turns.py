@@ -61,6 +61,29 @@ PROTOCOL = """End every turn with the result object (JSON):
 - Fill the phase's extra field when the card asks for it (verification, review, threads, classification, pr_title)."""
 
 
+SKILLS = {"EXPLORING": "brainstorming", "PROPOSING": "openspec-propose", "REPLANNING": "openspec-update-change",
+          "IMPLEMENTING": "openspec-apply-change, test-driven-development", "REPAIR_CHECKS": "systematic-debugging",
+          "INTERNAL_REVIEW": "requesting-code-review", "ADDRESS_REVIEW": "receiving-code-review",
+          "ADDRESS_PR_THREADS": "receiving-code-review", "APPLY_FEEDBACK": "receiving-code-review",
+          "VERIFYING": "verification-before-completion"}
+
+
+def request(state: dict, phase: str | None) -> str:
+    """The facts of this turn as a short YAML block (JSON scalars are valid YAML), at
+    the top of the user turn. Deterministic: no clocks, so a replayed turn matches."""
+    progress = state.get("implementation_progress") or {}
+    facts = {"phase": phase, "task": (state.get("item") or "")[:300], "language": state.get("task_language"),
+             "branch": state.get("branch"), "base_sha": state.get("base_sha"), "change": state.get("slug"),
+             "skill": SKILLS.get(phase or ""), "classification": state.get("classification"),
+             "e2e_harness": state.get("has_e2e_harness"),
+             "pending_tasks": progress.get("pending", [])[:12] if phase == "IMPLEMENTING" else None,
+             "turn": (f"{state.get('implementation_turn', 0) + 1} of {state['implement_budget']}"
+                      if phase == "IMPLEMENTING" and state.get("implement_budget") else None)}
+    lines = [f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in facts.items()
+             if value not in (None, "", [])]
+    return "```yaml\n" + "\n".join(lines) + "\n```\n\n" if len(lines) > 1 else ""
+
+
 def valid(data) -> bool:
     """The minimal contract the controller relies on; unknown keys are ignored."""
     if not isinstance(data, dict) or data.get("status") not in STATUSES or not isinstance(data.get("summary"), str):

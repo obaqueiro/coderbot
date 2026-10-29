@@ -651,6 +651,11 @@ def converse(prompt: str, session_id: str | None = None, *, on_session=None):
 
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
+def _with_facts(context, prompt):
+    """The turn's facts lead the user turn; checkpoints stay keyed on the card alone."""
+    return turns.request(context, tool_policy.current_phase()) + prompt if context else prompt
+
+
 def read(prompt: str):
     """A fresh read-only session: it may inspect the repository and run commands, but
     the runtime denies edits and commits (feedback investigation, attribution)."""
@@ -693,7 +698,7 @@ def run(prompt: str, contract: bool = True):
         if context and config.AGENT == "opencode":
             _invocation.set({"state": context, "prompt": original_prompt})
         if contract:
-            prompt = _language_prompt(_after_kick(prompt))
+            prompt = _language_prompt(_after_kick(_with_facts(context, prompt)))
         if config.AGENT == "claude":
             result = claude_runner.run(prompt, contract=contract)
         elif config.AGENT == "opencode":
@@ -772,7 +777,7 @@ def resume(session_id: str, prompt: str):
                 prompt = handoff_context.render(context, phase) + "\n\n" + prompt
                 session_id = None
                 context["session_context_tokens"] = 0
-        prompt = _language_prompt(_after_kick(prompt))
+        prompt = _language_prompt(_after_kick(_with_facts(context, prompt)))
         if context and config.AGENT == "opencode" and session_id:
             phase_checkpoint.remember_session(context, original_prompt, session_id)
         if config.AGENT == "claude":
