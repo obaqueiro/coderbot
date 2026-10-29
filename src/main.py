@@ -426,6 +426,10 @@ def trail(state: dict, headline: str, body: str = "", *, localized: bool = False
     message = f"[{config.INSTANCE_ID}] {headline}"
     if body:
         message += f"\n\n{body}"
+    # The same note within the resend window is a retried step, not news.
+    original = message
+    if _recently_sent(state, "trail", original, None, None):
+        return
     try:
         if state.get("task_language") and not localized:
             message = _localized(state, message)
@@ -433,6 +437,7 @@ def trail(state: dict, headline: str, body: str = "", *, localized: bool = False
                                         state.get("trail_ref"))
         if isinstance(ref, str) and ref:
             state["trail_ref"] = ref
+        _record_sent(state, "trail", original, None, None)
     except Exception:  # noqa: BLE001
         log.exception("could not note activity on the backlog item: %r", headline)
 
@@ -3214,8 +3219,10 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
             # Remember the verdict: the bot re-raising the same finding gets it again
             # without another agent turn (see handle_review_wait).
             state.setdefault("declined_findings", {})[_finding_key(thread)] = reason
+        receipt = digest([thread_id, reason])[:16]
+        posted = state.setdefault("thread_replies", [])
         try:
-            if thread.get("comment_id"):
+            if thread.get("comment_id") and receipt not in posted:  # a retried step never replies twice
                 reply = operations.tool(
                     ["gh", "api", f"repos/{owner_repo}/pulls/{number}/comments/"
                      f"{thread['comment_id']}/replies", "-f", f"body={reason}"], cwd=config.REPO_PATH)
@@ -3224,6 +3231,9 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
                                 thread_id, reply.stderr[-300:])
                 else:
                     _remember_bot_comment(state, reply.stdout)
+                    posted.append(receipt)
+                    del posted[:-200]
+                    save_state(state)
             if _answered_only(thread, reason):
                 # A human's thread that got an answer but no code change stays open:
                 # closing it over the reviewer's head is their call, not the bot's. It is

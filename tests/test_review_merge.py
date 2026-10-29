@@ -139,6 +139,15 @@ class ThreadHelpers(unittest.TestCase):
         self.assertIn("body=fixed: renamed", commands[0])
         self.assertTrue(any("resolveReviewThread" in arg for arg in commands[1]))
 
+    def test_a_retried_step_does_not_reply_on_a_thread_twice(self):
+        state = {"pr_url": PR, "review_threads": [ocr("T1")]}
+        ok = subprocess.CompletedProcess([], 0, "{}", "")
+        with patch.object(main.operations, "tool", return_value=ok) as run, patch.object(main, "save_state"):
+            main._resolve_review_threads(state, "RESOLVE: T1 fixed: renamed")
+            main._resolve_review_threads(state, "RESOLVE: T1 fixed: renamed")
+        replies = [c for c in run.call_args_list if "comments/7/replies" in c.args[0][2]]
+        self.assertEqual(len(replies), 1)
+
     def test_resolve_closes_human_thread_when_fixed(self):
         state = {"pr_url": PR, "pr_threads": [human_thread()]}
         ok = subprocess.CompletedProcess([], 0, "{}", "")
@@ -513,3 +522,14 @@ class RepeatedFindings(unittest.TestCase):
         self.assertEqual(left, [other])
         self.assertEqual([c.args[0] for c in resolve.call_args_list], ["T1", "T2"])
         self.assertEqual(state["review_threads"], [bot])
+
+
+class TrailReceipts(unittest.TestCase):
+    def test_a_retried_step_notes_the_backlog_once(self):
+        state = {"item": "task", "item_id": "1"}
+        with patch.object(main.config, "ACTIVITY_TRAIL", True), \
+             patch.object(main.task_source, "note_activity", return_value=None) as note:
+            main.trail(state, "Implementation complete; verifying")
+            main.trail(state, "Implementation complete; verifying")
+            main.trail(state, "Internal review passed")
+        self.assertEqual(note.call_count, 2)
