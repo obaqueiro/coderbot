@@ -329,14 +329,9 @@ PR_THREAD_MAX_ROUNDS = _int("CODEBOT_PR_THREAD_MAX_ROUNDS", 3)
 # moving while other PRs merge); past this the task escalates to WAIT_STUCK.
 CONFLICT_MAX_ROUNDS = _int("CODEBOT_CONFLICT_MAX_ROUNDS", 3)
 
-# Silence check-ins. While a task is in flight, codebot emails a short check-in on the
-# task thread whenever the thread has been quiet — no email sent or received on it —
-# for the next interval of this back-off schedule: 30 min after the last real email,
-# then 1 h after that check-in, then 2 h, 3 h, 5 h, and every 8 h from there (the last
-# interval repeats). Any real email in either direction restarts the schedule. Each
-# check-in says whose move it is: what codebot is doing or waiting for, or exactly what
-# it needs from the user. Comma-separated durations with an s/m/h suffix; "off"
-# disables them.
+# Decision reminder: while the task waits on the user, one reminder after the thread
+# has been quiet for this long (default 24h); working tasks get no check-ins. A
+# duration with an s/m/h/d suffix; "off" disables it.
 def _parse_durations(spec: str) -> list[int]:
     spec = (spec or "").strip()
     if spec.lower() in ("off", "none", "0", "false"):

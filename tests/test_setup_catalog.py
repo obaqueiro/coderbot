@@ -26,6 +26,11 @@ def runtime_names() -> set[str]:
                     and node.func.value.attr == "environ" and node.args
                     and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
                 found.add(node.args[0].value)
+            # config's typed readers: _int("CODEBOT_X", default), _seconds(...), ...
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id.startswith("_")
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str) and node.args[0].value.startswith("CODEBOT_")):
+                found.add(node.args[0].value)
             if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
                     and node.value.attr == "environ" and isinstance(node.slice, ast.Constant)
                     and isinstance(node.slice.value, str)):

@@ -5425,6 +5425,7 @@ def _grant_budget(state: dict, reason: str, *counters: str) -> None:
     used = {counter: state.pop(counter) for counter in counters if state.get(counter)}
     if used:
         log.info("budget granted by %s: %s", reason, used)
+        trail(state, f"Attempt counters reset by {reason}", ", ".join(f"{k}={v}" for k, v in used.items()))
 
 
 def _continue_implementing(state: dict, result) -> None:

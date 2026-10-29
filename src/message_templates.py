@@ -84,6 +84,7 @@ PHRASES = {
     "What changed: Current implementation and verification are documented in the PR.\n":
         "Qué cambió: la implementación y la verificación actuales están documentadas en el PR.\n",
     "Review cover: ": "Resumen de revisión: ",
+    "Attempt counters reset by ": "Contadores de intentos reiniciados por ",
     "Open review findings (not blocking):\n": "Hallazgos de revisión abiertos (no bloquean):\n",
     "\n\nOpenSpec archive: `": "\n\nArchivo de OpenSpec: `",
     "Reply with change requests, or tell me to merge.": "Responde con los cambios que quieras, o dime que haga merge.",
