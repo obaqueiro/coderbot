@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Fake `claude -p` for the workspace walk (tests/test_workspace_walk.py).
+
+It runs at the workspace root, plans in the root openspec/, edits and commits in the
+`api` and `ui` children (never `unused`) on whatever branch coderbot checked out, and
+prints the CLI's JSON envelope. Calls are logged to $WALK_DIR/claude.log; an
+unrecognised prompt exits 1 so the walk names it."""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+argv = sys.argv[1:]
+after = argv[argv.index("-p") + 1] if "-p" in argv and argv.index("-p") + 1 < len(argv) else "--"
+raw_prompt = sys.stdin.read() if after.startswith("--") else after
+prompt = " ".join(raw_prompt.split())
+utility = "--tools" in argv and argv[argv.index("--tools") + 1] == ""
+session = argv[argv.index("--resume") + 1] if "--resume" in argv else f"ses-{os.getpid()}"
+walk = Path(os.environ["WALK_DIR"])
+slug = os.environ["WALK_SLUG"]
+change = Path("openspec/changes") / slug
+
+PROPOSAL = """## Why
+The UI needs a greeting from the API.
+
+## What Changes
+- `api`: add `greet(name)` returning `Hello, <name>!`.
+- `ui`: show the greeting banner.
+
+## Capabilities
+### New Capabilities
+- `greeting`: greet a person by name across api and ui.
+
+## Impact
+- `api/greet.py`, `ui/banner.txt`.
+"""
+SPEC = """## ADDED Requirements
+
+### Requirement: Greeting
+The system SHALL greet a person by name.
+
+#### Scenario: Named greeting
+- **WHEN** `greet("Ada")` is called
+- **THEN** it returns `Hello, Ada!`
+"""
+CHECKS = [{"id": "api-unit", "argv": ["python3", "-m", "unittest", "-q"], "cwd": "api", "scope": "focused",
+           "inputs": ["api"]},
+          {"id": "integration", "argv": ["python3", "-c", "import pathlib, sys; sys.exit(0 if pathlib.Path("
+           "'ui/banner.txt').read_text().startswith('Hello') else 1)"], "cwd": ".", "scope": "focused"}]
+
+
+def commit(repo, files, message):
+    for name, text in files.items():
+        (Path(repo) / name).write_text(text)
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", repo, "commit", "-qm", message], check=True, capture_output=True)
+
+
+def respond(answer):
+    envelope = {"type": "result", "subtype": "success", "session_id": session, "is_error": False}
+    if isinstance(answer, dict):
+        envelope.update(result=answer["summary"], structured_output={"status": "done", **answer})
+    else:
+        envelope["result"] = answer
+    print(json.dumps(envelope))
+    sys.exit(0)
+
+
+def phase():
+    if utility:
+        rules = [("Identify the language", {"language": "English"}),
+                 ("Classify an authorized task-thread message",
+                  {"intent": "answer", "resolves_pending_question": True, "requested_action": None,
+                   "action_depends_on_change": False, "inputs": []}),
+                 ("replied to the proposal-review", {"action": "approve", "feedback": ""}),
+                 ("replied to the pull-request review", {"action": "merge", "force": True, "feedback": ""}),
+                 # A "merge" sent before the PR closed reaches the stuck wait: not an answer.
+                 ("Codebot got stuck on a task", {"action": "unclear", "feedback": ""}),
+                 ("title for a GitHub pull request", {"title": "Add greeting"})]
+        for marker, answer in rules:
+            if marker in prompt:
+                return "utility:" + marker, json.dumps(answer)
+        return None, None
+    if "explore this backlog item" in prompt:
+        return "EXPLORE", {"summary": "api needs greet(); ui shows it. unused is unrelated.",
+                           "classification": "bounded", "pr_title": "Add greeting"}
+    if "turn the exploration into OpenSpec change" in prompt:
+        (change / "specs/greeting").mkdir(parents=True, exist_ok=True)
+        (change / "proposal.md").write_text(PROPOSAL)
+        (change / "design.md").write_text("## Context\nTwo repositories; no shared state.\n")
+        (change / "tasks.md").write_text("## 1. Greeting\n\n- [ ] 1.1 api: add greet() with a unit test\n"
+                                         "- [ ] 1.2 ui: show the banner\n")
+        (change / "specs/greeting/spec.md").write_text(SPEC)
+        return "PROPOSE", {"summary": PROPOSAL}
+    if "The user approved OpenSpec change" in prompt:
+        commit("api", {"greet.py": 'def greet(name):\n    return f"Hello, {name}!"\n',
+                       "test_greet.py": "import unittest\nfrom greet import greet\n\n\nclass Greet(unittest.TestCase):\n"
+                                        "    def test_named(self):\n        self.assertEqual(greet('Ada'), 'Hello, Ada!')\n"},
+               "Add greet() with a unit test")
+        commit("ui", {"banner.txt": "Hello, Ada!\n"}, "Show the greeting banner")
+        tasks = change / "tasks.md"
+        tasks.write_text(tasks.read_text().replace("- [ ]", "- [x]"))
+        return "IMPLEMENT", {"summary": "Implemented greet() and the banner test-first.", "checks": CHECKS}
+    if "fresh, read-only reviewer of feature" in prompt:
+        assert "- api: base" in raw_prompt and "- ui: base" in raw_prompt and "- unused:" not in raw_prompt
+        return "REVIEW", {"summary": "Reviewed api and ui; nothing to fix.",
+                          "review": {"critical": 0, "important": 0, "tests": ["python3 -m unittest: pass"]}}
+    return None, None
+
+
+name, text = phase()
+with (walk / "claude.log").open("a") as log:
+    log.write(json.dumps({"phase": name, "utility": utility, "resume": "--resume" in argv,
+                          "chars": len(prompt), "gh_token": os.environ.get("GH_TOKEN"),
+                          "credential_helper": os.environ.get("GIT_CONFIG_VALUE_0")}) + "\n")
+if name is None:
+    (walk / f"unknown-prompt-{os.getpid()}.txt").write_text(raw_prompt)
+    print(json.dumps({"type": "result", "subtype": "error", "is_error": True,
+                      "result": "fake claude: unrecognised prompt"}))
+    sys.exit(1)
+respond(text)
