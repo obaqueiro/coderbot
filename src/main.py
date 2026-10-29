@@ -1307,6 +1307,10 @@ def do_approval_reply(state: dict, reply: str) -> None:
         state["approved_task_inventory"] = task_phases.inventory(config.REPO_PATH, state["slug"])
         state["approved_scope_fingerprint"] = proposal_package.scope_fingerprint(current_files)
         state.pop("verified_task_inventory", None)
+        # The implementer starts fresh from the approved change, not the planning chat.
+        state["planning_session_id"] = state.get("session_id")
+        state["fresh_session"] = True
+        state["implement_budget"] = _implement_budget(state["slug"])
         announce_milestone(state, "implementing", "Proposal approved; implementation is starting.")
         return
     # changes: revise the proposal in the working session and go back to waiting.
@@ -1387,6 +1391,33 @@ def do_implement(state: dict) -> None:
     _complete_implementation(state, result)
 
 
+IMPLEMENT_MAX_TURNS = 12
+IMPLEMENT_FRESH_TURNS = 3  # what the one fresh-session escalation gets
+
+
+def _implement_budget(slug: str) -> int:
+    """Implementation turns for a change: one per tasks.md section plus three, at most 12.
+    Frozen at approval so a growing checklist cannot extend it."""
+    try:
+        text = (config.REPO_PATH / "openspec/changes" / _validated_slug(slug) / "tasks.md").read_text()
+    except (OSError, ValueError):
+        return IMPLEMENT_MAX_TURNS
+    return min(IMPLEMENT_MAX_TURNS, len(re.findall(r"(?m)^##\s+\d+", text)) + 3)
+
+
+def _retry_fresh(state: dict, reason: str) -> None:
+    """Superpowers' "blocked: more context" step at feature level: one new implementer
+    session, seeded with the approved change and the progress so far, before asking."""
+    log.warning("implementer %s; retrying once in a fresh session", reason)
+    trail(state, f"Implementation {reason}; continuing in a fresh session")
+    state["fresh_retries"] = 1
+    state["fresh_session"] = True
+    state["implementation_turn"] = state.get("implement_budget", IMPLEMENT_MAX_TURNS)
+    state["implementation_no_progress"] = 0
+    state["state"] = "IMPLEMENTING"
+    save_state(state)
+
+
 def _complete_implementation(state: dict, result) -> None:
     """A completed agent turn is not a completed plan. Both entry paths use this gate."""
     if _scope_drift(state):
@@ -1431,10 +1462,16 @@ def _complete_implementation(state: dict, result) -> None:
         state["state"] = "IMPLEMENTING"
         state["implementation_turn"] = state.get("implementation_turn", 0) + 1
         save_state(state)
-        if state["implementation_no_progress"] >= config.QUALITY_GATE_MAX_ROUNDS:
+        budget = state.setdefault("implement_budget", _implement_budget(state["slug"]))
+        stalled = state["implementation_no_progress"] >= config.QUALITY_GATE_MAX_ROUNDS
+        if (stalled or state["implementation_turn"] >= budget) and not state.get("fresh_retries"):
+            _retry_fresh(state, "made no progress" if stalled else f"used its {budget} turns")
+            return
+        if stalled or state["implementation_turn"] >= budget + IMPLEMENT_FRESH_TURNS:
             state["implementation_stall_round"] = config.QUALITY_GATE_MAX_ROUNDS - 1
             _gate_failed(state, "IMPLEMENTING", "implementation_stall_round",
-                         "Repeated implementation turns made no observable progress",
+                         "Repeated implementation turns made no observable progress" if stalled else
+                         "Implementation used its turn budget, including a fresh session, without finishing",
                          state["implementation_feedback"],
                          [Path(path) for path in state["implementation_attachments"]])
             return
@@ -5283,7 +5320,7 @@ def _grant_budget(state: dict, reason: str, *counters: str) -> None:
 
 
 def _continue_implementing(state: dict, result) -> None:
-    state.pop("implementation_no_progress", None)
+    _grant_budget(state, "answer during IMPLEMENTING", "implementation_no_progress", "implementation_turn")
     _complete_implementation(state, result)
 
 

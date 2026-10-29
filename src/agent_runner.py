@@ -748,7 +748,9 @@ def resume(session_id: str, prompt: str):
         if context:
             phase = context.get("state")
             sessions = context.setdefault("phase_sessions", {})
-            fresh = (phase == "INTERNAL_REVIEW" and phase not in sessions) or (
+            # The controller asks for a new session at approval (planning stays behind)
+            # and for one escalation when an implementer stalls.
+            fresh = context.pop("fresh_session", False) or (phase == "INTERNAL_REVIEW" and phase not in sessions) or (
                 context.get("session_context_tokens", 0) > config.CONTEXT_TOKEN_BUDGET)
             if recovering:
                 session_id = recovering
