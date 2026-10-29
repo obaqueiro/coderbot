@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +56,37 @@ class Guard(unittest.TestCase):
         self.assertEqual(guard(bash("git commit -am wip"), planning), (0, "deny"))
         self.assertEqual(guard(write("/repo/src/app.py"), self.policy), (0, "allow"))
 
+    def test_workspace_guard_denies_root_init_github_writes_and_controller_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = os.path.realpath(temp)
+            os.makedirs(os.path.join(root, "api"))
+            policy = {**self.policy, "repo": root, "workspace": True,
+                      "protected": [os.path.join(root, "workspace.json")]}
+            call = lambda command, cwd=root: {**bash(command), "cwd": cwd}
+            for command in ("git init", "git init .", f"git -C {root} init", "cd api && cd .. && git init",
+                            "GIT_DIR=.git git init", "git --git-dir=./.git init", "true; (git init)",
+                            "gh api -X POST repos/o/r/issues/1/comments -f body=x", "gh api --method=PATCH x",
+                            "gh api repos/o/r/pulls/1/reviews -f event=APPROVE",
+                            "gh api graphql -f query='mutation { resolveReviewThread }'",
+                            "echo '{}' > workspace.json", "cp other.json workspace.json",
+                            "sed -i s/a/b/ api/.codebot/checks.json", "bash -c 'tee .codebot/checks.json'"):
+                with self.subTest(command=command):
+                    self.assertEqual(guard(call(command), policy), (0, "deny"))
+            for command in ("cd api && git init", "git -C api init", "git init api/sub", "gh api repos/o/r/pulls",
+                            "gh api graphql -f query='query { viewer { login } }'", "cat workspace.json",
+                            "echo x > api/notes.txt", "git status"):
+                with self.subTest(command=command):
+                    self.assertEqual(guard(call(command), policy), (0, "allow"))
+            write = lambda path: {"tool_name": "Write", "tool_input": {"file_path": path}}
+            self.assertEqual(guard(write(os.path.join(root, "workspace.json")), policy), (0, "deny"))
+            self.assertEqual(guard(write("api/.codebot/checks.json"), policy), (0, "deny"))
+            self.assertEqual(guard(write("api/src/app.py"), policy), (0, "allow"))
+            # Single-repo policies keep today's behaviour.
+            self.assertEqual(guard(call("git init"), {**self.policy, "repo": root}), (0, "allow"))
+            planning = {**policy, "phase": "PROPOSING", "write_scope": ["openspec"]}
+            self.assertEqual(guard(write(os.path.join(root, "openspec/changes/x/tasks.md")), planning), (0, "allow"))
+            self.assertEqual(guard(write(os.path.join(root, "api/src/app.py")), planning), (0, "deny"))
+
     def test_any_error_fails_open_with_exit_zero(self):
         # Claude Code blocks a tool call on exit code 2; the guard must never do that by accident.
         for call, policy in (("not json", self.policy), (bash("git push"), "{broken"), ({}, {})):
@@ -87,6 +119,14 @@ class Runtime(unittest.TestCase):
         self.assertEqual(policy["write_scope"], ["openspec"])
         self.assertIn("git commit", policy["denied"])
         self.assertEqual(env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"], "1")
+
+    def test_workspace_policy_names_protected_controller_files(self):
+        with patch.object(config, "TARGET_MODE", "workspace"), patch.object(config, "REPO_PATH", Path("/ws")), \
+             patch.object(config, "WORKSPACE_MANIFEST", "workspace.json"):
+            policy = json.loads(tool_policy.environment("IMPLEMENTING")["CODEBOT_POLICY"])
+        self.assertTrue(policy["workspace"])
+        self.assertEqual(policy["protected"], ["/ws/workspace.json", "/ws/.codebot/checks.json"])
+        self.assertNotIn("workspace", json.loads(tool_policy.environment("IMPLEMENTING")["CODEBOT_POLICY"]))
 
     def test_opencode_bash_rules_deny_after_allow_all(self):
         rules = tool_policy.opencode_bash("IMPLEMENTING")

@@ -78,37 +78,44 @@ def _repository_entries(repo, inputs, prefix=""):
             # Link identity is relevant; never follow links into external secret/caches.
             selected.append((identity_name, "link", str(full.readlink())))
         elif full.is_file():
-            selected.append((identity_name, full.stat().st_mode & 0o111, hashlib.sha256(full.read_bytes()).hexdigest()))
+            try:
+                selected.append((identity_name, full.stat().st_mode & 0o111, hashlib.sha256(full.read_bytes()).hexdigest()))
+            except OSError:
+                selected.append((identity_name, "unreadable"))
         else:
             selected.append((identity_name, "missing"))
     return selected
 
 
 def workspace_snapshot(root, inputs=None, *, exclude=()):
-    from workspace import EXCLUDED_DIRS as caches
+    import workspace
     root = Path(root).resolve()
     selected = []
     patterns = inputs or ["*"]
+    ignore = workspace.ignore_patterns(root)
 
     def walk(directory):
-        for full in sorted(directory.iterdir()):
+        for full in workspace.children(directory):
             name = full.relative_to(root).as_posix()
-            if full.name in caches or full.name in {"output", "data", ".DS_Store"}:
+            if full.name in workspace.EXCLUDED_DIRS or workspace.ignored(name, ignore):
                 continue
             if full.name == ".env" or full.name.startswith(".env.") and not full.name.endswith("example"):
                 continue
-            if full.is_symlink():
-                selected.append((name, "link", str(full.readlink())))
-            elif full.is_dir() and directory == root and (full / ".git").exists():
-                # Discover only immediate Git children, including worktrees. Their
-                # ignored build outputs must not invalidate workspace evidence.
-                selected.extend(_repository_entries(full, patterns, prefix=name + "/"))
-            elif full.is_dir():
-                walk(full)
-            elif full.is_file() and any(p in ("*", ".", "./") or fnmatch.fnmatch(name, p)
-                    or name.startswith(p.rstrip("/") + "/") for p in patterns):
-                if full.suffix in {".pem", ".key", ".mp4", ".webm"} or full.name in {"credentials.json", "token.json"}:
-                    continue
-                selected.append((name, full.stat().st_mode & 0o111, hashlib.sha256(full.read_bytes()).hexdigest()))
+            try:
+                if full.is_symlink():
+                    selected.append((name, "link", str(full.readlink())))
+                elif full.is_dir() and directory == root and (full / ".git").exists():
+                    # Discover only immediate Git children, including worktrees. Their
+                    # ignored build outputs must not invalidate workspace evidence.
+                    selected.extend(_repository_entries(full, patterns, prefix=name + "/"))
+                elif full.is_dir():
+                    walk(full)
+                elif full.is_file() and any(p in ("*", ".", "./") or fnmatch.fnmatch(name, p)
+                        or name.startswith(p.rstrip("/") + "/") for p in patterns):
+                    if full.suffix in {".pem", ".key", ".mp4", ".webm"} or full.name in {"credentials.json", "token.json"}:
+                        continue
+                    selected.append((name, full.stat().st_mode & 0o111, hashlib.sha256(full.read_bytes()).hexdigest()))
+            except (OSError, subprocess.SubprocessError):
+                selected.append((name, "unreadable"))
     walk(root)
     return digest(_without(selected, exclude))

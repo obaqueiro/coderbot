@@ -223,6 +223,16 @@ Steps:
 Done when: no Critical or Important finding is open. Fill review: critical and important = findings still open (0 when all fixed), minor, tests as "<command>: <result>", findings as one line each.
 """
 
+FEATURE_REVIEW = """Task: you are the fresh, read-only reviewer of feature $slug across the repositories below (requesting-code-review). Change no files and do not dispatch another reviewer; coderbot's implementer fixes what you find.
+
+$review_guide
+
+Plan: $plan. For each repository run `git -C <repository> diff <base>...HEAD` yourself; the stats below are only a starting point:
+$repositories
+
+Done when: every repository is reviewed, spec compliance first, then code quality and cross-repository contract mismatches. Fill review: critical, important and minor = open findings; findings as one line each "<repository>/<path>: <issue>"; tests as "<command>: <result>" you relied on.
+"""
+
 # Used when the pinned Superpowers reviewer template is unavailable.
 REVIEW_GUIDE_FALLBACK = """Review checklist: does the change do what the OpenSpec requirements and scenarios say, and nothing they exclude? Are errors, edge cases and security handled? Are there tests for each changed behaviour, and do they test real behaviour? Is the code as simple as it can be and consistent with the codebase? Classify each finding as Critical (bug, data loss, security), Important (missing requirement, poor error handling, missing test) or Minor (style, small improvement)."""
 

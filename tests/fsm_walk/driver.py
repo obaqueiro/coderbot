@@ -18,7 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 record = {"states": [], "sent": [], "done": [], "notes": [], "outcome": None}
 # The human answers the decision questions themselves, not progress banners (the
 # OPEN_PR banner already reads "PR ready for review" before the PR exists).
-REPLIES = [("Do you authorize implementing", "approve"), ("What should I do with this PR?", "merge")]
+REPLIES = json.loads(os.environ.get("WALK_REPLIES") or "null") or [
+    ("Do you authorize implementing", "approve"), ("What should I do with this PR?", "merge")]
+# WALK_REPLY_EACH=1 answers every message matching a trigger (subject or body), not only the first.
+EACH = os.environ.get("WALK_REPLY_EACH") == "1"
 answered = set()
 
 
@@ -48,9 +51,11 @@ def _send_envelope(envelope, receipts, confirm):
 def _poll_reply(thread_id):
     """The human answers each decision once: the first message naming it."""
     for trigger, text in REPLIES:
-        first = next((i for i, m in enumerate(record["sent"]) if trigger in m["body"]), None)
-        if first is not None and f"reply-{first}" not in answered:
-            return f"reply-{first}", text
+        matches = [i for i, m in enumerate(record["sent"])
+                   if trigger in (m["subject"] + "\n" + m["body"] if EACH else m["body"])]
+        for i in matches if EACH else matches[:1]:
+            if f"reply-{i}" not in answered:
+                return f"reply-{i}", text
     return None
 
 

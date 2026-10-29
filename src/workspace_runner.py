@@ -1,20 +1,28 @@
 """Feature coordinator for a writable, non-Git root containing independent repos.
 
-No permission sandbox: the configured workspace is trusted and wholly writable.
-Git publication is still scoped to explicit repositories and never resets user work.
+The agent edits and commits inside child repositories; the controller owns branches,
+fetches, pushes, PRs, verification, review and merges (lifecycle.py). The workspace is
+trusted and wholly writable; nothing here resets, cleans or force-pushes user work.
 """
 from dataclasses import replace
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import secrets
-import subprocess
+import sys
 
 import config
+import errors
+import lifecycle
 import workspace
 import workspace_state
 from execution_identity import verification_snapshot as snapshot
+
+log = logging.getLogger("coderbot")
+LEGACY = {"E2E": "VERIFYING", "EVIDENCE_REVIEW": "VERIFYING", "RECOVERING": "VERIFYING",
+          "APPLY_PR_FEEDBACK": "APPLY_FEEDBACK", "ADDRESS_REVIEW": "ADDRESS_PR_THREADS"}
 
 
 def target():
@@ -22,34 +30,23 @@ def target():
 
 
 def command(repo, argv):
-    process = subprocess.run(argv, cwd=repo, capture_output=True, text=True, errors="replace",
-                             timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-    if process.returncode:
-        import diagnostics
-        raise RuntimeError(diagnostics.redact(f"{argv[0]} failed in {repo}: "
-                                               + process.stderr + process.stdout))
-    return process.stdout.strip()
-
-
-def git(repo, *args):
-    return command(repo.path, ["git", *args])
-
-
-def gh(repo, *args):
-    if not repo.remote.startswith("github.com/"):
-        raise workspace.WorkspaceError(f"PR publication requires a GitHub origin: {repo.relative_path}")
-    return command(repo.path, ["gh", *args, "--repo", repo.remote.removeprefix("github.com/")])
+    return lifecycle.run(argv, repo)
 
 
 def inspect_repositories(context):
     import repo_provenance
     return {repo.relative_path: {**repo_provenance.inspect(repo.path),
-            "branch": git(repo, "branch", "--show-current")} for repo in context.repositories}
+            "branch": lifecycle.RepoOps(repo.path, repo.relative_path, repo.remote, repo.base_branch).branch()}
+            for repo in context.repositories}
+
+
+def observe(context):
+    """One observation of the workspace: child repositories plus shared root files."""
+    return {"repos": inspect_repositories(context), "shared": _shared_files(context)}
 
 
 def preflight(context):
     # Existing work is not permission-protected, but cannot be attributed to the bot.
-    # Capture/check before letting the agent write anywhere in the workspace.
     inventory = inspect_repositories(context)
     dirty = [name for name, value in inventory.items() if value["files"] or value["operations"]]
     if dirty:
@@ -64,26 +61,26 @@ def bind(state, context):
     state.update(validated)
 
 
-def record_changes(state, context, before):
-    """Autonomously track every changed repository, including late discoveries."""
-    after = inspect_repositories(context)
+def record_changes(state, context, before, after=None):
+    """Enrol every repository the agent changed, on this attempt's own branch."""
+    after = after or inspect_repositories(context)
     records = state["workspace"]["repositories"]
-    baseline = state["workspace"].get("baseline", {})
+    ops = lifecycle.Target.of(context)
     for repo in context.repositories:
         name = repo.relative_path
         old = before.get(name)
         if old is None:
-            raise workspace.WorkspaceError(f"New repository appeared during a turn: {name}; inspect before continuing")
+            log.warning("repository %s appeared during the turn; it is baselined, not adopted", name)
+            continue
         changed = after[name]["fingerprint"] != old["fingerprint"] or after[name]["branch"] != old["branch"]
         if changed and name not in records:
             validated = workspace_state.repository_record(state, context, name, reason="Detected feature edits")
             state["workspace"] = validated["workspace"]
             records = state["workspace"]["repositories"]
-            base = workspace.git(repo.path, "rev-parse", "--verify",
-                                 f"refs/remotes/origin/{repo.base_branch}^{{commit}}", required=False)
-            records[name].update(base_sha=base or baseline.get(name, old)["head"],
-                                 branch=after[name]["branch"], state="IMPLEMENTING")
+            records[name].update(base_sha=ops.repo(name).base_sha(old["head"]), branch=state["branch"],
+                                 state="IMPLEMENTING")
         if name in records:
+            lifecycle.adopt(ops.repo(name), records[name], old)
             records[name]["last_head"] = after[name]["head"]
             records[name]["last_fingerprint"] = after[name]["fingerprint"]
     return after
@@ -91,23 +88,23 @@ def record_changes(state, context, before):
 
 def instructions(state, context):
     import prompts
-    branches = {repo.relative_path: {"base": repo.base_branch,
-                "branch": state["workspace"]["repositories"].get(repo.relative_path, {}).get("branch")
-                          or state["branch"]} for repo in context.repositories}
+    records = state["workspace"]["repositories"]
+    branches = {repo.relative_path: {"base": repo.base_branch, "branch": records.get(repo.relative_path, {}).get("branch")}
+                for repo in context.repositories}
     return ("\nWORKSPACE EXECUTION\nThis root is NOT a Git repository. All files and child repositories "
             "within it are writable; there is no repository-selection permission gate. Discover the relevant "
             "subset yourself and leave unrelated work alone. Read workspace and applicable child AGENTS.md. "
             "Never git init this root. Run every Git command in the appropriate child repository. "
-            "Before editing a child, checkout/create its feature branch from origin/<base> using the mapping below; preserve "
-            "existing work and never reset/clean/force-push. Do not push, create PRs, or merge: the controller "
-            "publishes all changed repositories. Shared root files remain local. Do not commit evidence or secrets. "
+            "Coderbot owns branches: it creates each repository's feature branch, fetches, pushes and opens the PRs; "
+            "you have no push credentials. Stay on the checked-out branch and commit there; never switch branches, "
+            "reset, clean or force-push. Shared root files remain local. Do not commit evidence or secrets. "
             "Use the root openspec/ for the shared feature plan; include repository paths in tasks. "
-            "Adding another repository does not require selection approval. Honor the current functional phase.\n"
+            "Honor the current functional phase.\n"
             + json.dumps(branches, sort_keys=True)
             + "\n" + prompts.MINIMAL_CHANGE_POLICY + prompts.TESTING_POLICY
-            + "\nFor verification emit CHECK_PLAN with explicit commands and workspace-relative cwd; "
-              "include repository checks AND a root integration/E2E check. Never invent passing evidence. "
-              "Do not run development-stack cleanup or prune shared Docker resources.\n")
+            + "\nIn checks, give explicit commands with a workspace-relative cwd: each affected repository's checks "
+              "AND a root integration/E2E check (cwd \".\" or \"e2e\"). Do not run development-stack cleanup or "
+              "prune shared Docker resources.\n")
 
 
 def _shared_files(context):
@@ -116,16 +113,20 @@ def _shared_files(context):
     import diagnostics
     result = {}
     repo_roots = {repo.path for repo in context.repositories}
+    ignore = workspace.ignore_patterns(context.root)
+
     def walk(directory):
-        for path in sorted(directory.iterdir()):
-            if path.is_symlink() or path.name in workspace.EXCLUDED_DIRS | {"data", "output", ".DS_Store"}:
-                continue
-            if path in repo_roots:
-                continue
-            if path.is_dir():
-                walk(path)
-                continue
+        for path in workspace.children(directory):
             relative = path.relative_to(context.root).as_posix()
+            try:
+                if (path.is_symlink() or path.name in workspace.EXCLUDED_DIRS or path in repo_roots
+                        or workspace.ignored(relative, ignore)):
+                    continue
+                if path.is_dir():
+                    walk(path)
+                    continue
+            except OSError:
+                continue
             if not any(fnmatch.fnmatch(relative, pattern) or relative.startswith(pattern.rstrip("/") + "/")
                        for pattern in context.manifest.shared_inputs):
                 continue
@@ -134,12 +135,12 @@ def _shared_files(context):
                 continue
             try:
                 text = path.read_text()
+                mode = path.stat().st_mode & 0o777
             except (UnicodeError, OSError):
                 continue
             if diagnostics.redact(text) != text:
                 continue
-            result[relative] = {"text": text, "mode": path.stat().st_mode & 0o777,
-                                "hash": hashlib.sha256(text.encode()).hexdigest()}
+            result[relative] = {"text": text, "mode": mode, "hash": hashlib.sha256(text.encode()).hexdigest()}
     walk(context.root)
     return result
 
@@ -183,13 +184,15 @@ def turn(state, prompt, *, fresh=False):
     import main
     context = target()
     bind(state, context)
-    before = inspect_repositories(context)
+    ops = lifecycle.Target.of(context)
+    for name, record in state["workspace"]["repositories"].items():
+        lifecycle.on_branch(ops.repo(name), record)
+    before = observe(context)
     initial = state["workspace"].get("baseline", {})
-    for name, entry in before.items():
+    for name, entry in before["repos"].items():
         if name not in state["workspace"]["repositories"] and name in initial:
             if entry["fingerprint"] != initial[name]["fingerprint"]:
                 raise workspace.WorkspaceError(f"Unattributed changes in {name}; save user work before continuing")
-    shared = _shared_files(context)
     agent_runner.set_task_context(state)
     try:
         prompt += instructions(state, context)
@@ -197,13 +200,13 @@ def turn(state, prompt, *, fresh=False):
                   else agent_runner.resume(state["session_id"], prompt))
     finally:
         # Keep partial edits attributed even after interruption; do not discard them.
-        record_changes(state, context, before)
-        shared_after = _shared_files(context)
+        after = observe(context)
+        record_changes(state, context, before["repos"], after["repos"])
         # An existing file newly excluded as sensitive is not a deletion: never
         # retain its former contents as a publicly reportable bot edit.
-        shared = {name: value for name, value in shared.items()
-                  if name in shared_after or not (context.root / name).exists()}
-        journal(state, context, shared, shared_after)
+        shared = {name: value for name, value in before["shared"].items()
+                  if name in after["shared"] or not (context.root / name).exists()}
+        journal(state, context, shared, after["shared"])
         main.save_state(state)
     if fresh:
         # A fresh reviewer never replaces the implementer's session: later fix turns
@@ -225,11 +228,14 @@ def pick(state):
     if requested:
         main._resume_held_task(state, requested[0])
         return
+    # Children left on a finished, aborted or held attempt's branch go back to base.
+    ops = lifecycle.Target.of(context)
+    lifecycle.release(ops, {r.name: {} for r in ops.repos if r.branch().startswith(config.INSTANCE_ID + "-")})
     try:
         baseline = preflight(context)
     except workspace.WorkspaceError as error:
-        # Dirty child repositories (e.g. after HOLD or ABORT) used to fail every IDLE
-        # tick. Say so once and recheck quietly from WAIT_CLEAN until they are saved.
+        # Dirty child repositories (e.g. after HOLD or ABORT): say so once and recheck
+        # quietly from WAIT_CLEAN until they are saved.
         if not state.get("dirty_notified"):
             main.email(state, "blocked: dirty working tree", f"{error}. I will recheck automatically and "
                        "start the next task once every repository is clean.", new_thread=True)
@@ -258,10 +264,11 @@ def pick(state):
     state.pop("workspace", None)
     state["state"] = "IDLE"
     bind(state, context)
+    # A unique branch per attempt: re-picking a slug never adopts an old (merged) PR.
     state.update(item=chosen["text"], item_detail=chosen.get("detail", ""),
                  item_images=chosen.get("images", []), item_id=chosen.get("id"),
                  item_url=chosen.get("url"), item_key=chosen.get("key"), slug=slug,
-                 branch=f"{config.INSTANCE_ID}-{slug}", state="EXPLORING", thread_id=None)
+                 branch=f"{config.INSTANCE_ID}-{slug}-{secrets.token_hex(3)}", state="EXPLORING", thread_id=None)
     state["workspace"]["baseline"] = baseline
     main.task_records.migrate(state, main.phase_checkpoint.store(), context.root)
     main._ensure_task_language(state)
@@ -276,67 +283,53 @@ def pick(state):
 
 def run_phase(state):
     import main
-    phase = state["state"]
-    if phase == "IDLE":
-        return pick(state)
-    if phase == "EXPLORING":
-        prompt = main.prompts.render(main.prompts.EXPLORE, project=config.PROJECT_NAME,
-            branch=state["branch"], item=state["item"], detail=state.get("item_detail", ""),
-            images=main.render_images(state.get("item_images", []))) + "\n" + state.get("pending_feedback", "")
-        result = turn(state, prompt, fresh=True)
-        if not main.handle_result(state, result, phase):
-            state["state"] = "PROPOSING"
+    state["state"] = LEGACY.get(state["state"], state["state"])
+    handler = PHASES.get(state["state"])
+    if handler:
+        return handler(state)
+    if state["state"] in main.WAITS:
+        return main.handle_wait(state)
+    state["state"] = "VERIFYING" if state.get("approved_scope_fingerprint") else "IDLE" if not state.get("item") else "EXPLORING"
+
+
+def explore(state):
+    import main
+    prompt = main.prompts.render(main.prompts.EXPLORE, project=config.PROJECT_NAME,
+        branch=state["branch"], item=state["item"], detail=state.get("item_detail", ""),
+        images=main.render_images(state.get("item_images", []))) + "\n" + state.get("pending_feedback", "")
+    result = turn(state, prompt, fresh=True)
+    if not main.handle_result(state, result, "EXPLORING"):
+        state["state"] = "PROPOSING"
+
+
+def propose(state):
+    import main
+    result = turn(state, main.prompts.render(main.prompts.PROPOSE, slug=state["slug"],
+                  e2e_note="Add checks for affected repos and shared workspace integration/E2E tests.")
+                  + "\n" + state.get("pending_feedback", ""))
+    if not main.handle_result(state, result, "PROPOSING"):
+        main._send_proposal_review(state, result.output)
+
+
+def replan(state):
+    import main
+    result = turn(state, main.replanning.prompt(state, config.REPO_PATH))
+    if not main.handle_result(state, result, "REPLANNING"):
+        main._send_proposal_review(state, result.output, revised=True,
+                                   feedback=state.get("replan", {}).get("feedback", ""))
+
+
+def implement(state):
+    import main
+    if main._scope_drift(state):
         return
-    if phase == "PROPOSING":
-        result = turn(state, main.prompts.render(main.prompts.PROPOSE, slug=state["slug"],
-                      e2e_note="Add checks for affected repos and shared workspace integration/E2E tests.")
-                      + "\n" + state.get("pending_feedback", ""))
-        if not main.handle_result(state, result, phase):
-            main._send_proposal_review(state, result.output)
-        return
-    if phase == "REPLANNING":
-        result = turn(state, main.replanning.prompt(state, config.REPO_PATH))
-        if not main.handle_result(state, result, phase):
-            main._send_proposal_review(state, result.output, revised=True,
-                                       feedback=state.get("replan", {}).get("feedback", ""))
-        return
-    if phase == "IMPLEMENTING":
-        if main._scope_drift(state):
-            return
-        result = turn(state, main.prompts.render(main.prompts.IMPLEMENT, slug=state["slug"],
-            branch=state["branch"], e2e_note="Implement tests in each affected repo plus shared E2E tests.",
-            e2e_report_note="Emit CHECK_PLAN for actual repo and integration commands.")
-            + "\n" + state.get("implementation_feedback", ""))
-        if not main.handle_result(state, result, phase):
-            complete_implementation(state, result)
-        return
-    if phase in ("VERIFYING", "INTERNAL_REVIEW", "E2E", "REPAIR_CHECKS", "EVIDENCE_REVIEW"):
-        return verify(state)
-    if phase == "ARCHIVING":
-        return archive(state)
-    if phase in ("OPEN_PR", "PUSHING"):
-        return publish(state)
-    if phase in ("WAIT_REVIEW", "WAIT_MERGE"):
-        return poll_prs(state)
-    if phase in ("ADDRESS_REVIEW", "ADDRESS_PR_THREADS", "RESOLVE_CONFLICTS", "APPLY_FEEDBACK", "RECOVERING"):
-        result = turn(state, "Address the recorded feedback/recovery below across relevant repositories. "
-            "Preserve user changes; resolve Git operations safely without resets or force push. "
-            "Emit CHECK_PLAN and RESOLVE lines with truthful fixes.\n" + json.dumps({
-                "feedback": state.get("pending_feedback", ""), "review": state.get("workspace_review", {}),
-                "recovery": state.get("stuck_error", ""), "phase": phase}))
-        if not main.handle_result(state, result, phase):
-            remember_checks(state, result.output)
-            state["workspace"]["review_output"] = result.output
-            state["state"] = "VERIFYING"
-        return
-    if phase == "WAIT_CLEAN":
-        try:
-            preflight(target())
-        except workspace.WorkspaceError:
-            return  # still dirty: keep waiting without failing the tick
-        state["state"] = "IDLE"
-        return
-    return main.handle_wait(state)
+    result = turn(state, main.prompts.render(main.prompts.IMPLEMENT, slug=state["slug"],
+        branch=state["branch"], e2e_note="Implement tests in each affected repo plus shared E2E tests.",
+        e2e_report_note="In checks, list the actual repository and integration commands.")
+        + "\n" + state.get("implementation_feedback", ""))
+    lifecycle.rails(_self, state)
+    if not main.handle_result(state, result, "IMPLEMENTING"):
+        complete_implementation(state, result)
 
 
 def remember_checks(state, output):
@@ -377,7 +370,9 @@ def check_plan_for(state, context):
     plan.extend(check_plan.Check(**entry) for entry in state.get("reported_check_plan", []))
     unique = {}
     for check in plan:
-        workspace.contained(context.root, check.cwd)
+        if workspace.inside(context.root, check.cwd) is None:
+            log.warning("ignoring check %s: its cwd leaves the workspace", check.id)
+            continue
         previous = unique.get(check.id)
         if previous:
             check = replace(check, resources=sorted(set(previous.resources) | set(check.resources)),
@@ -386,205 +381,186 @@ def check_plan_for(state, context):
     return check_plan.normalize(list(unique.values()), context.root)
 
 
+def _problem(check, reason, status="not_run"):
+    return {"check": check, "status": status, "reason": reason, "gate": {"status": "indeterminate"}}
+
+
+def validate_plan(state, context):
+    """`openspec validate --strict` on the shared change; a missing CLI fails open."""
+    if state.get("archive_path"):
+        return None
+    try:
+        command(context.root, ["openspec", "validate", state["slug"], "--strict", "--no-interactive"])
+    except errors.Fatal as error:
+        log.warning("openspec validation skipped: %s", error)
+    except errors.CoderbotError as error:
+        return _problem("openspec validate", str(error)[-2000:], "fail")
+    return None
+
+
 def verify(state):
+    """Controller-only verification: checklist, OpenSpec, declared and discovered checks."""
     import main
-    import checks
+    import check_plan
+    import staged_checks
     context = target()
     if not state.get("archive_path") and main._verify_preflight(state):
         return
-    if state.get("reported_check_plan_error"):
-        attempt = state.get("check_plan_repair_round", 0) + 1
-        if attempt > config.QUALITY_GATE_MAX_ROUNDS:
-            main._enter_stuck(state, "VERIFYING", state["reported_check_plan_error"]
-                              + "\nCheck-plan repair exhausted; no malformed plan was executed.")
+    ops = lifecycle.Target.of(context)
+    for name, record in state["workspace"]["repositories"].items():
+        lifecycle.on_branch(ops.repo(name), record)  # a held task's children were returned to base
+    tasks = context.root / "openspec/changes" / state["slug"] / "tasks.md"
+    if not state.get("archive_path") and tasks.is_file():
+        pending = main.task_phases.inspect(context.root, state["slug"])
+        if pending["implementation"]:
+            if verification_attempt(state, "implementation", "Approved implementation tasks remain incomplete"):
+                state["implementation_feedback"] = ("Complete these approved tasks before verification:\n"
+                                                    + "\n".join(pending["implementation"]))
+                state["state"] = "IMPLEMENTING"
             return
-        result = turn(state, f"Check-plan repair attempt {attempt}/{config.QUALITY_GATE_MAX_ROUNDS}; "
-            f"recovery revision {state.get('check_plan_repair_revision', 0)}.\n"
-            "Correct only the malformed check plan; do not repeat exploration or implementation. "
-            "Return it in checks: each {id, argv as an array of strings, workspace-relative cwd, "
-            "timeout in seconds}.\n"
-            "Kinds are auto, unit, functional or e2e; scopes are full or focused. Preserve registered checks and "
-            "actual commands/selections. Do not run full suites or claim verification passed.\n"
-            + main.prompts.fenced("check-plan validation error", state["reported_check_plan_error"])
-            + ("\n" + main.prompts.fenced_authoritative("user recovery guidance", state["pending_feedback"])
-               if state.get("pending_feedback") else ""))
-        if main.handle_result(state, result, "VERIFYING"):
-            return
-        if state.get("reported_check_plan_error"):
-            state["check_plan_repair_round"] = attempt
-            main.save_state(state)
-            if state["check_plan_repair_round"] >= config.QUALITY_GATE_MAX_ROUNDS:
-                main._enter_stuck(state, "VERIFYING", state["reported_check_plan_error"] + "\n"
-                    f"The agent could not produce a valid check plan after {attempt} completed repair attempts; no malformed plan was executed.")
-            return
-        state.pop("check_plan_repair_round", None)
-    if (state.get("final_check_report", {}).get("stage") == "full_e2e_budget_exhausted"
-            and not state.get("focused_scope_reconciled")):
-        attempt = state["workspace"].get("verification_rounds", {}).get("focused_scope", 0) + 1
-        if attempt > config.QUALITY_GATE_MAX_ROUNDS:
-            main._enter_stuck(state, "VERIFYING", "Focused-plan reconciliation is still missing after bounded recovery; "
-                              "preserve the task and historical audit evidence.")
-            return
-        result = turn(state, main.prompts.TESTING_POLICY + f"\nFocused-plan recovery attempt {attempt}. "
-            "Recover this SAME task from the legacy full-audit gate. "
-            "Inspect the actual diff across affected repositories and shared/local harness files. "
-            "Emit a CHECK_PLAN with genuinely selected E2E cases covering changed behavior AND changed harness paths; "
-            "retain required unit/functional checks. Do not repeat the broad-failure investigation, run a full suite, "
-            "erase historical registrations/evidence, reset the audit budget, or expand product scope. "
-            "Legacy checklist duties to repeat a full audit are superseded by focused verification; reconcile their "
-            "verification purpose honestly without claiming the full audit passed or completing missing implementation. "
-            "Preserve approvals and user work. No DONE, publication or merge is authorized by this recovery.\n"
-            + main.prompts.fenced_authoritative("existing task guidance", state.get("pending_feedback", "")))
-        if main.handle_result(state, result, "VERIFYING"):
-            return
-        remember_checks(state, result.output)
-        state["workspace"].setdefault("verification_rounds", {})["focused_scope"] = attempt
-        if (state.get("reported_check_plan_error") or not any(
-                main.check_plan.is_e2e(c, context.root) and main.check_plan.has_e2e_selection(c)
-                for c in main.check_plan.reported(result.output))):
-            main.save_state(state)
-            return
-        state["focused_scope_reconciled"] = True
-        main.save_state(state)
-        return
     plan = check_plan_for(state, context)
-    if not plan or not any(check.cwd in (".", "e2e") for check in plan):
-        if not verification_attempt(state, "shared_plan", "No runnable shared integration check was supplied"):
-            return
-        result = turn(state, "Inspect the whole feature and run cross-repository verification. "
-            "Emit CHECK_PLAN for each affected repository and a root/shared integration or E2E check. "
-            "Include runnable commands and workspace-relative cwd. Do not claim checks passed without running them. "
-            "Fix discovered problems within the approved feature.")
-        if main.handle_result(state, result, "VERIFYING"):
-            return
-        remember_checks(state, result.output)
-        plan = check_plan_for(state, context)
-    if not plan or not any(check.cwd in (".", "e2e") for check in plan):
-        raise workspace.WorkspaceError("Workspace verification requires a shared integration check; emit CHECK_PLAN or configure a manifest")
+    problems = [p for p in [validate_plan(state, context)] if p]
+    if state.get("reported_check_plan_error"):
+        problems.append(_problem("check_plan", state["reported_check_plan_error"]))
+    if not any(check.cwd in (".", "e2e") for check in plan):
+        problems.append(_problem("shared_integration", "No root integration/E2E check (cwd \".\" or \"e2e\") is "
+                                 "declared; add one to checks or the manifest"))
     from workspace_checks import HarnessBlocked
-    try:
-        for check in main.check_plan.feature_checks(plan, context.root):
+    for check in check_plan.feature_checks(plan, context.root):
+        try:
             validate_check(context, check)
-    except HarnessBlocked as error:
-        state["workspace"]["harness_repair_round"] = state["workspace"].get("harness_repair_round", 0) + 1
-        if state["workspace"]["harness_repair_round"] > config.QUALITY_GATE_MAX_ROUNDS:
-            main._enter_stuck(state, "VERIFYING", "Workspace harness still needs repair: " + str(error))
-            return
-        result = turn(state, "Repair the shared local test harness/configuration, not application scope. "
-            f"Repair attempt {state['workspace']['harness_repair_round']}: re-evaluate the current blocker; "
-            "a previous repair response did not resolve it. "
-            "Keep all required repository and integration tests; do not skip them. Use an explicit dedicated "
-            "Compose test project with only project-scoped volumes/networks, no external/shared cleanup or prune. "
-            "Guard macOS report opening on Linux. Reuse local Docker socket paths; configure host_root only for remote Docker. "
-            "Do not execute cleanup until the controller validates it. Emit the corrected CHECK_PLAN.\nBlocker: " + str(error))
-        if not main.handle_result(state, result, "VERIFYING"):
-            remember_checks(state, result.output)
-            state["state"] = "VERIFYING"
-        return
-    state["workspace"].pop("harness_repair_round", None)
+        except HarnessBlocked as error:
+            problems.append(_problem(check.id, "Harness blocked (repair the shared harness/configuration, not "
+                                     "application scope): " + str(error), "blocked"))
+    if problems:
+        return repair(state, {"status": "indeterminate", "checks": problems})
     before = snapshot(context.root)
-    import staged_checks
     store = main.phase_checkpoint.store()
     staged = staged_checks.run(state, plan, context.root, store,
-        evaluate=lambda c, r: workspace_gate(c, r, state, context, store))
-    outcomes = staged["checks"]
-    if staged["stage"] in ("needs_focused_e2e", "full_e2e_budget_exhausted"):
-        state["final_check_report"] = {"status": "indeterminate", **staged}
-        if staged["stage"] == "full_e2e_budget_exhausted":
-            main._enter_stuck(state, "VERIFYING", "The two full E2E regression audits have been consumed. "
-                "Focused feature evidence is preserved; the broad audit is not green. "
-                "Do not repeat an already answered scope decision or expand unrelated product functionality. "
-                "Recorded audit failures require attribution/repair before publication, not another identical full run.")
+                               evaluate=lambda c, r: workspace_gate(c, r, state, context, store))
+    report = main.final_checks.report(staged, context.root)
+    report["source_changed"] = snapshot(context.root) != before
+    if report["source_changed"]:
+        report["status"] = "indeterminate"
+    state["final_check_report"] = report
+    if report["status"] != "pass":
+        if report["source_changed"] and not main.check_repair.unresolved(report):
+            # Files changed under passing checks: run them again, a bounded number of times.
+            verification_attempt(state, "source_changed", "Files keep changing while the checks run")
             return
-        if not verification_attempt(state, "focused_selection", "A genuinely selected focused E2E check is still missing"):
-            return
-        result = turn(state, main.prompts.TESTING_POLICY + "\nController stage: " + staged["stage"] +
-            "\nProvide explicit focused E2E selections for the approved feature with kind=e2e and scope=focused. "
-            "Declare a structured reporter and prove a positive executed-test count; a filename/zero exit alone is insufficient. "
-            "Do not run or re-register the full suite to evade its two-run budget. Preserve all full-suite tests. "
-            "Repair the named registrations below using the SAME IDs; adding a new focused ID alone does not fix "
-            "an old unfiltered entry still labeled focused. Give a broad command scope=full, or add real case selections; "
-            "do not execute the full suite yourself. Shell syntax validation is a cheap check, not browser evidence. "
-            "Do not repeat already answered scope questions. Report existing regression-audit failures separately; "
-            "do not claim a green audit or expand product scope. Emit CHECK_PLAN for cheap/focused diagnostics.\n"
-            + main.prompts.fenced("controller selection defects", json.dumps(staged.get("selection_issues", [])))
-            + ("\n" + main.prompts.fenced_authoritative("user recovery guidance", state["pending_feedback"])
-               if state.get("pending_feedback") else ""))
-        main.handle_result(state, result, "VERIFYING")
-        return
-    state["workspace"].get("verification_rounds", {}).pop("focused_selection", None)
-    failed = main.check_repair.unresolved({"checks": outcomes})
-    after = snapshot(context.root)
-    state["final_check_report"] = main.final_checks.report(staged, context.root)
-    state["final_check_report"].update(source_changed=before != after)
-    if before != after:
-        state["final_check_report"]["status"] = "indeterminate"
-    if failed:
-        if not verification_attempt(state, "failures", "Verification remains unresolved: " + json.dumps(failed)):
-            return
-        result = turn(state, main.prompts.TESTING_POLICY + "\nFix these verification failures within the approved feature; do not hide or skip tests.\n"
-                        "The controller deduplicates identical checks, locks shared E2E execution, and manages bounded timeouts. "
-                        "Do not ask the user to configure the controller or approve a timeout increase. "
-                        "Emit an explicit timeout in CHECK_PLAN when more time is justified. "
-                        "Diagnose authentication/fixture and endpoint failures before claiming "
-                       "they are outside scope. Ask only a concrete product-scope or missing-secret decision, "
-                       "with numbered options and consequences.\n"
-                       + ("Source also changed during checks; their evidence is stale and verification must run again after repairs.\n"
-                          if before != after else "")
-                       + json.dumps(failed))
-        if not main.handle_result(state, result, "VERIFYING"):
-            remember_checks(state, result.output)
-            state["state"] = "VERIFYING"
-        return
-    if before != after:
-        raise workspace.WorkspaceError("Source changed during workspace checks; verification must run again")
-    if staged["stage"] != "complete":
-        # No prefix of successful checks can stand in for the remaining stages.
-        verification_attempt(state, "incomplete_stage", "Required stage remains incomplete: " + staged["stage"])
-        return
-    path = context.root / "openspec/changes" / state["slug"] / "tasks.md"
-    if not state.get("archive_path") and path.is_file():
-        pending = main.task_phases.inspect(context.root, state["slug"])
-        if pending["implementation"] or pending["verification"]:
-            if not verification_attempt(state, "tasks", "Approved implementation/evidence tasks remain unresolved"):
-                return
-            result = turn(state, main.prompts.TESTING_POLICY + "\nComplete/reconcile these approved tasks using real focused evidence. "
-                "Legacy full-audit repetition duties are superseded; explain that without claiming a green full suite. "
-                "Do not mark missing evidence complete, expand scope, or rerun full E2E.\n" + json.dumps(pending))
-            main.handle_result(state, result, "VERIFYING")
-            return
+        return repair(state, report)
+    rounds = state["workspace"].setdefault("verification_rounds", {})
+    for kind in ("repair", "implementation", "source_changed"):
+        rounds.pop(kind, None)
+    state.pop("check_repair", None)
     state["workspace"]["verified_snapshot"] = before
     state["workspace"]["verification_repositories"] = [repo.relative_path for repo in context.repositories]
-    if state["workspace"].get("reviewed_snapshot") != before:
-        rounds = state["workspace"]["review_rounds"] = state["workspace"].get("review_rounds", 0) + 1
-        if rounds > config.QUALITY_GATE_MAX_ROUNDS:
-            main._enter_stuck(state, "INTERNAL_REVIEW", f"Internal review still reports open findings after "
-                              f"{config.QUALITY_GATE_MAX_ROUNDS} fix rounds.")
-            return
-        result = turn(state, "Task: independently review this completed cross-repository feature with "
-            "requesting-code-review. Read-only: change no files.\n"
-            "Look for critical or important bugs and contract mismatches between the shared requirements "
-            "and each affected repository.\n"
-            "Done when: you have reviewed every affected repository. Fill review: critical and important = "
-            "number of open findings, tests = actual verification references, findings = one line each.", fresh=True)
-        if main.handle_result(state, result, "INTERNAL_REVIEW"):
-            return
-        review, reason = main.parse_internal_review(result.output)
-        if reason:
-            # The reviewer is coderbot's own agent: its findings are data for the fix
-            # turn, not owner instructions.
-            findings = (result.data or {}).get("review", {}).get("findings") if getattr(result, "data", None) else None
-            state["pending_feedback"] = ("Fix these findings from coderbot's internal reviewer (not from the user):\n"
-                                         + ("\n".join(f"- {f}" for f in findings) if findings else result.output))
+    state["state"] = ("INTERNAL_REVIEW" if state["workspace"].get("reviewed_snapshot") != before
+                      else "OPEN_PR" if state.get("archive_path") else "ARCHIVING")
+
+
+def repair(state, report):
+    """One FIX turn (REPAIR_CHECKS) with the controller's report, bounded per task."""
+    import main
+    if not verification_attempt(state, "repair", main.check_repair.summary(report)):
+        return
+    previous = state.get("check_repair", {})
+    state["check_repair"] = {"attempt": state["workspace"]["verification_rounds"]["repair"], "resume": "VERIFYING",
+                             "checks": main.check_repair.unresolved(report), "previous": previous.get("previous", ""),
+                             "guidance": state.pop("pending_feedback", "") or previous.get("guidance", "")}
+    state["state"] = "REPAIR_CHECKS"
+
+
+def repair_checks(state):
+    import main
+    context = state.get("check_repair")
+    if not isinstance(context, dict):
+        state["state"] = "VERIFYING"
+        return
+    result = turn(state, main.check_repair.prompt(state, context))
+    if main.handle_result(state, result, "REPAIR_CHECKS"):
+        return
+    state["check_repair"]["previous"] = result.output.strip()[-5000:]  # turn() rebinds state
+    state["state"] = "VERIFYING"
+
+
+def review(state):
+    """One fresh, read-only feature review over every repository's diff."""
+    import main
+    context = target()
+    ops = lifecycle.Target.of(context)
+    records = state["workspace"]["repositories"]
+    rounds = state["workspace"].setdefault("verification_rounds", {})
+    rounds["review"] = rounds.get("review", 0) + 1
+    before = snapshot(context.root)
+    result = turn(state, main.prompts.render(main.prompts.FEATURE_REVIEW, slug=state["slug"],
+        plan=state.get("archive_path") or f"openspec/changes/{state['slug']}/", review_guide=main._review_guide(state),
+        repositories=lifecycle.diff_summary(ops, records, config.REVIEW_CONTEXT_CHARS)), fresh=True)
+    if main.handle_result(state, result, "INTERNAL_REVIEW"):
+        return
+    if snapshot(context.root) != before:
+        log.warning("the read-only reviewer changed files; discarding its review")
+        state["state"] = "VERIFYING"
+        return
+    value = (getattr(result, "data", None) or {}).get("review") or {}
+    critical, important = int(value.get("critical") or 0), int(value.get("important") or 0)
+    findings = [str(f) for f in value.get("findings") or []]
+    if critical or important:
+        if rounds["review"] <= config.REVIEW_MAX_ROUNDS:
+            # The reviewer is coderbot's own agent: its findings are data for the fix wave.
+            state["workspace"]["findings"] = findings or [result.output[-3000:]]
             state["state"] = "APPLY_FEEDBACK"
             return
-        state["workspace"].pop("review_rounds", None)
-        if snapshot(context.root) != before:
-            state["state"] = "VERIFYING"
+        if critical:
+            main._enter_stuck(state, "INTERNAL_REVIEW", f"The feature review still reports {critical} critical "
+                              "finding(s) after the bounded fix waves:\n" + "\n".join(findings))
             return
-        state["workspace"]["reviewed_snapshot"] = before
-    state["state"] = "ARCHIVING" if not state.get("archive_path") else "OPEN_PR"
-    state["workspace"].pop("verification_rounds", None)
+    state["workspace"]["concerns"] = findings if critical or important else [f for f in findings if f][:20]
+    state["workspace"]["reviewed_snapshot"] = before
+    state["state"] = "OPEN_PR" if state.get("archive_path") else "ARCHIVING"
+
+
+CARDS = {
+    "APPLY_FEEDBACK": "Task: apply the feedback below across the relevant repositories. Internal review findings "
+                      "come from coderbot's reviewer: use receiving-code-review and answer each one fixed or declined "
+                      "with evidence in the summary.",
+    "ADDRESS_PR_THREADS": "Task: address the unresolved PR review threads below (grouped by repository). For each "
+                          "thread fill threads: {id, action fixed|answered|declined, reply}.",
+    "RESOLVE_CONFLICTS": "Task: in each repository below, merge origin/<base> (already fetched by coderbot; merge, "
+                         "never rebase or force) and resolve every conflict preserving both sides' intent; commit.",
+}
+
+
+def address(state):
+    """One implementer turn for owner feedback, review findings, PR threads or conflicts."""
+    import main
+    phase = state["state"]
+    review_data = state.get("workspace_review", {})
+    if phase == "RESOLVE_CONFLICTS":
+        ops = lifecycle.Target.of(target())
+        for name in review_data.get("conflicts", [review_data.get("repository")]):
+            if name:
+                ops.repo(name).fetch()
+    data = {"findings": state["workspace"].get("findings"), "threads": lifecycle.threads_by_repo(review_data),
+            "conflicts": review_data.get("conflicts") or ([review_data["repository"]] if review_data.get("conflict") else None)}
+    prompt = (CARDS.get(phase, CARDS["APPLY_FEEDBACK"]) + " Preserve user changes; commit in each repository.\n"
+              + main.prompts.fenced("controller data", json.dumps({k: v for k, v in data.items() if v}, ensure_ascii=False))
+              + ("\n" + main.prompts.fenced_authoritative("owner feedback", state["pending_feedback"])
+                 if state.get("pending_feedback") else ""))
+    result = turn(state, prompt)
+    if main.handle_result(state, result, phase):
+        return
+    remember_checks(state, result.output)
+    if phase == "RESOLVE_CONFLICTS":
+        ops = lifecycle.Target.of(target())
+        for name in data["conflicts"] or []:
+            record = state["workspace"]["repositories"].get(name)
+            if record:  # the merged base is the PR's new base for review and diffs
+                record["base_sha"] = ops.repo(name).base_sha()
+    state.pop("pending_feedback", None)
+    state["workspace"].pop("findings", None)
+    state["workspace"]["review_output"] = result.output
+    state["state"] = "VERIFYING"
 
 
 def verification_attempt(state, kind, detail):
@@ -625,29 +601,31 @@ def workspace_gate(check, result, state, context, store):
 def validate_check(context, check):
     """Allow cleanup only after validating an explicit dedicated test project."""
     from workspace_checks import HarnessBlocked, validate_cleanup, validate_docker
-    cwd = workspace.contained(context.root, check.cwd)
+    cwd = workspace.inside(context.root, check.cwd)
+    if cwd is None:
+        raise HarnessBlocked(f"Check {check.id} runs outside the workspace")
     text = " ".join(check.argv)
     visited = set()
     scripts = []
+
     def script(path):
         nonlocal text
-        if path in visited or not path.is_file() or path.suffix not in (".sh", ".py", ".js", ".mjs"):
+        if path is None or path in visited or not path.is_file() or path.suffix not in (".sh", ".py", ".js", ".mjs"):
             return
         visited.add(path)
-        body = path.read_text()
+        try:
+            body = path.read_text()
+        except (OSError, UnicodeError):
+            return
         scripts.append(body)
         text += "\n" + body
         # Shell harnesses commonly delegate cleanup to a sibling/root script.
         for name in re.findall(r"(?:\$ROOT/|\$\{ROOT\}/|\$root/|\$\{root\}/|\./)([A-Za-z0-9_./-]+\.sh)", body):
             for root in (context.root, path.parent):
-                candidate = workspace.contained(context.root, root / name)
-                script(candidate)
+                script(workspace.inside(context.root, root / name))
     for arg in check.argv:
-        if arg.startswith("-"):
-            continue
-        candidate = cwd / arg
-        if candidate.exists() and candidate.is_relative_to(context.root):
-            script(candidate)
+        if not arg.startswith("-"):
+            script(workspace.inside(context.root, cwd / arg))
     if re.search(r"\b(?:system|volume|container|network)\s+prune\b|\bvolume\s+rm\b", text):
         raise HarnessBlocked(f"Check {check.id} performs global destructive Docker cleanup")
     if re.search(r"\bdown\b[^\n]*(?:--volumes|-v\b)", text):
@@ -683,168 +661,6 @@ def archive(state):
     state["state"] = "OPEN_PR"
 
 
-def _validate_pr(repo, record, value):
-    expected = "https://github.com/" + repo.remote.removeprefix("github.com/") + "/pull/"
-    if (not isinstance(value, dict) or not isinstance(value.get("url"), str)
-            or not re.fullmatch(re.escape(expected) + r"\d+", value["url"])
-            or value.get("headRefName") != record["branch"] or value.get("baseRefName") != repo.base_branch
-            or value.get("isCrossRepository") is not False):
-        raise workspace.WorkspaceError("PR does not match the expected repository/branch: " + repo.relative_path)
-
-
-def status_body(state):
-    records = state["workspace"]["repositories"]
-    lines = ["Feature: " + state.get("item", "")]
-    for name, record in records.items():
-        if record.get("pr_url"):
-            lines.append(f"- {name}: {record['pr_url']} ({record.get('merge', {}).get('status', 'OPEN')})")
-    edits = sorted({entry["path"] for entry in state["workspace"].get("local_edits", [])})
-    if edits:
-        lines += ["", "Local-only workspace changes (NOT delivered by merging PRs):", *["- " + p for p in edits]]
-    lines += ["", "Each repository PR is independent; the feature completes only after all required merges and integration checks."]
-    return "\n".join(lines)
-
-
-def publish(state):
-    import main
-    context = target()
-    if main._scope_drift(state):
-        return
-    if main._conversation_delivery_blocked(state):
-        return
-    bind(state, context)
-    if state["workspace"].get("verified_snapshot") != snapshot(context.root):
-        state["state"] = "VERIFYING"
-        return
-    records = state["workspace"]["repositories"]
-    for name, record in records.items():
-        repo = context.repository(name)
-        if record.get("merge", {}).get("status") == "MERGED":
-            continue
-        current = git(repo, "branch", "--show-current")
-        branch = record.get("branch") or state["branch"]
-        if current == repo.base_branch or current != branch:
-            # Move committed feature work to a feature branch, never reset the base.
-            if git(repo, "status", "--porcelain", "--untracked-files=no"):
-                raise workspace.WorkspaceError(f"{name}: commit feature changes on its feature branch before publication")
-            if current == repo.base_branch and not record.get("pr_url"):
-                branch = state["branch"]
-                git(repo, "checkout", "-b", branch)
-            else:
-                raise workspace.WorkspaceError(f"{name}: expected feature branch {branch}, found {current}")
-        record["branch"] = branch
-        if git(repo, "status", "--porcelain", "--untracked-files=no"):
-            result = turn(state, f"Commit completed feature changes in {name} on {branch}, excluding evidence/secrets. "
-                          "Do not push; leave unrelated changes alone.")
-            if main.handle_result(state, result, "OPEN_PR"):
-                return
-            state["state"] = "VERIFYING"
-            return
-        if not git(repo, "diff", "--name-only", record["base_sha"], "HEAD"):
-            record["state"] = "NO_CHANGES"
-            continue
-        git(repo, "push", "-u", "origin", "HEAD:refs/heads/" + branch)
-        fields = "url,state,headRefName,baseRefName,headRefOid,isCrossRepository"
-        if record.get("pr_url"):
-            value = json.loads(gh(repo, "pr", "view", record["pr_url"], "--json", fields))
-        else:
-            listed = json.loads(gh(repo, "pr", "list", "--state", "all", "--head", branch,
-                                   "--base", repo.base_branch, "--json", fields, "--limit", "2"))
-            if not isinstance(listed, list) or len(listed) > 1:
-                raise workspace.WorkspaceError(f"Ambiguous PR publication for {name}")
-            if listed:
-                value = listed[0]
-            else:
-                body = (f"Feature: {state['item']}\nSource: {state.get('item_url') or 'backlog'}\n"
-                        f"Repository: {name}\nShared local plan: {state.get('archive_path', state['slug'])}\n\n"
-                        + state.get("implementation_summary", "") + "\n\n" + status_body(state))
-                url = gh(repo, "pr", "create", "--base", repo.base_branch, "--head", branch,
-                         "--title", main._pr_title(state), "--body", body)
-                # Persist accepted publication before any further call or notification.
-                record["pr_url"] = url
-                main.save_state(state)
-                value = json.loads(gh(repo, "pr", "view", url, "--json", fields))
-        _validate_pr(repo, record, value)
-        if value["state"] == "CLOSED":
-            raise workspace.WorkspaceError(f"{name}: feature PR was closed without merging")
-        if value["state"] == "OPEN" and value["headRefOid"] != git(repo, "rev-parse", "HEAD"):
-            raise workspace.WorkspaceError(f"{name}: published PR head does not match tested content")
-        record.update(pr_url=value["url"], delivered_sha=value["headRefOid"], state="WAIT_MERGE")
-        record["merge"] = {"status": value["state"]}
-        main.save_state(state)
-        if not record.get("announced"):
-            reports = [entry["report"] for entry in state.get("final_check_report", {}).get("checks", [])
-                       if entry.get("report") and Path(entry["report"]).is_file()]
-            attachments = [Path(path) for path in dict.fromkeys([
-                *reports, *state["workspace"].get("attachments", [])]) if Path(path).is_file()]
-            main.email(state, "PR opened: " + name, status_body(state), attachments)
-            if state.get("last_delivery", {}).get("complete") is not False:
-                record["announced"] = True
-                main.save_state(state)
-            try:
-                main.task_source.note_pr(state["item"], state.get("item_id"), record["pr_url"])
-            except Exception:
-                main.log.exception("Could not link workspace PR on backlog")
-    review = state.get("workspace_review", {})
-    output = state["workspace"].pop("review_output", None)
-    if output and review.get("pr_url"):
-        reviewed = {"pr_url": review["pr_url"], "pr_threads": review.get("threads", [])}
-        main._resolve_review_threads(reviewed, output, key="pr_threads")
-        name = review["repository"]
-        records[name].setdefault("review", {})["seen"] = reviewed.get("pr_threads_seen", {})
-        state.pop("workspace_review", None)
-    state["state"] = "WAIT_MERGE"
-    if not any(record.get("pr_url") for record in records.values()):
-        main.email(state, "local workspace changes verified", status_body(state))
-        if state.get("last_delivery", {}).get("complete") is not False:
-            main._finish_task(state, "Verified local-only workspace changes.\n" + status_body(state), reset_repo=False)
-
-
-def poll_prs(state):
-    import main
-    context = target()
-    records = state["workspace"]["repositories"]
-    pending = False
-    for name, record in records.items():
-        if not record.get("pr_url"):
-            continue
-        repo = context.repository(name)
-        value = json.loads(gh(repo, "pr", "view", record["pr_url"], "--json",
-                            "url,state,mergeable,headRefName,baseRefName,isCrossRepository,headRefOid"))
-        _validate_pr(repo, record, value)
-        if value.get("headRefOid") != record.get("delivered_sha"):
-            raise workspace.WorkspaceError(f"{name}: PR changed after verified publication; reconcile and reverify before completing")
-        record["merge"] = {"status": value["state"], "mergeable": value.get("mergeable")}
-        if value["state"] == "CLOSED":
-            raise workspace.WorkspaceError(f"{name}: PR closed without merging; feature remains incomplete")
-        if value["state"] == "MERGED":
-            continue
-        pending = True
-        if value.get("mergeable") == "CONFLICTING":
-            state["workspace_review"] = {"repository": name, "pr_url": record["pr_url"],
-                                         "conflict": repo.base_branch}
-            state["state"] = "RESOLVE_CONFLICTS"
-            return
-        threads = main.unresolved_review_threads(record["pr_url"])
-        if threads is None:
-            continue
-        seen = record.setdefault("review", {}).get("seen", {})
-        fresh = [thread for thread in threads if main.thread_has_new_comments(thread, seen)]
-        if fresh and record["review"].get("rounds", 0) < config.PR_THREAD_MAX_ROUNDS:
-            state["workspace_review"] = {"repository": name, "pr_url": record["pr_url"], "threads": fresh}
-            record["review"]["rounds"] = record["review"].get("rounds", 0) + 1
-            state["state"] = "ADDRESS_PR_THREADS"
-            return
-    if pending:
-        main.handle_wait(state)
-        return
-    if records and any(record.get("pr_url") for record in records.values()):
-        if state["workspace"].get("verified_snapshot") != snapshot(context.root):
-            state["state"] = "VERIFYING"
-            return
-        main._finish_task(state, "All feature PRs merged.\n" + status_body(state), reset_repo=False, merged=True)
-
-
 def reply(state, reply):
     import main
     phase = state["state"]
@@ -860,7 +676,7 @@ def reply(state, reply):
         if action == "complete":
             return main._finish_task(state, "Marked complete at your request; local changes preserved.", reset_repo=False)
         if action in ("retry", "instructions"):
-            origin = state.get("stuck_return", "VERIFYING")
+            origin = LEGACY.get(state.get("stuck_return", "VERIFYING"), state.get("stuck_return", "VERIFYING"))
             if action == "instructions":
                 state["pending_feedback"] = reply
             main._clear_stuck(state, origin)
@@ -874,7 +690,7 @@ def reply(state, reply):
             return main._abort_and_reset(state, "Task stopped; workspace changes preserved.")
         if verdict.get("action") == "complete":
             return main._finish_task(state, "Marked complete at your request.", reset_repo=False)
-        origin = state.get("return_state", "VERIFYING")
+        origin = LEGACY.get(state.get("return_state", "VERIFYING"), state.get("return_state", "VERIFYING"))
         result = turn(state, main.prompts.render(main.prompts.ANSWER_REPLY, reply=reply,
                                                rules=main.prompts.PHASE_RULES.get(origin, "")))
         if main.handle_result(state, result, origin):
@@ -901,21 +717,7 @@ def reply(state, reply):
         if action == "merge":
             if main._scope_drift(state) or main._conversation_delivery_blocked(state):
                 return
-            context = target()
-            if state["workspace"].get("verified_snapshot") != snapshot(context.root):
-                state["state"] = "VERIFYING"
-                return
-            for name, record in state["workspace"]["repositories"].items():
-                if record.get("pr_url") and record.get("merge", {}).get("status") != "MERGED":
-                    threads = main.unresolved_review_threads(record["pr_url"])
-                    if threads is None or threads and verdict.get("force") is not True:
-                        main.email(state, "merge blocked", "Review threads remain or could not be checked.\n" + status_body(state))
-                        return
-                    gh(context.repository(name), "pr", "merge", record["pr_url"], "--squash",
-                       "--match-head-commit", record["delivered_sha"])
-                    record["merge"] = {"status": "MERGED"}
-                    main.save_state(state)
-            return poll_prs(state)
+            return lifecycle.merge_all(_self, state, force=verdict.get("force") is True)
         if action == "wait":
             main.email(state, "merge deferred", "Work and PRs are preserved; I will keep waiting.")
             return
@@ -923,3 +725,21 @@ def reply(state, reply):
         state["state"] = "APPLY_FEEDBACK"
         return
     state["pending_feedback"] = reply
+
+
+def wait_clean(state):
+    try:
+        preflight(target())
+    except workspace.WorkspaceError:
+        return  # still dirty: keep waiting without failing the tick
+    state["state"] = "IDLE"
+
+
+_self = sys.modules[__name__]
+PHASES = {"IDLE": pick, "EXPLORING": explore, "PROPOSING": propose, "REPLANNING": replan,
+          "IMPLEMENTING": implement, "VERIFYING": verify, "REPAIR_CHECKS": repair_checks,
+          "INTERNAL_REVIEW": review, "ARCHIVING": archive, "OPEN_PR": lambda s: lifecycle.publish(_self, s),
+          "PUSHING": lambda s: lifecycle.publish(_self, s),
+          "WAIT_REVIEW": lambda s: lifecycle.poll_prs(_self, s),
+          "WAIT_MERGE": lambda s: lifecycle.poll_prs(_self, s), "APPLY_FEEDBACK": address,
+          "ADDRESS_PR_THREADS": address, "RESOLVE_CONFLICTS": address, "WAIT_CLEAN": wait_clean}

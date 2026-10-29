@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Fake `gh` for the workspace walk: PRs per `--repo acme/<name>` in $WALK_DIR/gh.json;
+a merge moves that repository's bare origin ($WALK_DIR/origins/<name>.git). Every call
+is logged; an unsupported invocation exits 1 and is recorded. WALK_CLOSE=<name> closes
+that repository's first PR when coderbot marks it ready (a reviewer closing it)."""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+walk = Path(os.environ["WALK_DIR"])
+db_path = walk / "gh.json"
+db = json.loads(db_path.read_text()) if db_path.exists() else {"prs": []}
+args = sys.argv[1:]
+with (walk / "gh.log").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+
+
+def opt(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+repo = (opt("--repo") or "").split("/")[-1]
+origin = walk / "origins" / f"{repo}.git"
+
+
+def save():
+    db_path.write_text(json.dumps(db, indent=1))
+
+
+def ref(name):
+    out = subprocess.run(["git", "--git-dir", str(origin), "rev-parse", "refs/heads/" + name],
+                         capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def find(number):
+    return next(pr for pr in db["prs"] if pr["repo"] == repo and pr["number"] == int(number))
+
+
+def view(pr, fields):
+    value = {"number": pr["number"], "state": pr["state"], "headRefName": pr["head"],
+             "headRefOid": ref(pr["head"]) or "", "baseRefName": pr["base"], "isCrossRepository": False,
+             "body": pr["body"], "mergeable": "MERGEABLE", "url": pr["url"], "title": pr["title"],
+             "isDraft": pr["draft"], "statusCheckRollup": []}
+    return {key: value[key] for key in fields.split(",")}
+
+
+def done(value=""):
+    print(value if isinstance(value, str) else json.dumps(value))
+    sys.exit(0)
+
+
+if args[:2] == ["auth", "status"]:
+    done("logged in")
+if args[:2] == ["pr", "list"] and repo:
+    done([view(pr, opt("--json", "number")) for pr in db["prs"]
+          if pr["repo"] == repo and pr["head"] == opt("--head") and pr["state"] == "OPEN"])
+if args[:2] == ["pr", "create"] and repo:
+    number = 1 + sum(1 for pr in db["prs"] if pr["repo"] == repo)
+    url = f"https://github.com/acme/{repo}/pull/{number}"
+    db["prs"].append({"repo": repo, "number": number, "url": url, "head": opt("--head"), "base": opt("--base"),
+                      "title": opt("--title", ""), "body": opt("--body", ""), "state": "OPEN",
+                      "draft": "--draft" in args})
+    save()
+    done(url)
+if args[:2] == ["pr", "view"] and repo:
+    done(view(find(args[2]), opt("--json")))
+if args[:2] == ["pr", "edit"] and repo:
+    find(args[2])["body"] = opt("--body")
+    save()
+    done()
+if args[:2] == ["pr", "ready"] and repo:
+    pr = find(args[2])
+    pr["draft"] = False
+    if os.environ.get("WALK_CLOSE") == repo and not any(p.get("closed") for p in db["prs"]):
+        pr.update(state="CLOSED", closed=True)
+    save()
+    done()
+if args[:2] == ["pr", "merge"] and repo:
+    pr = find(args[2])
+    head = ref(pr["head"])
+    if opt("--match-head-commit") not in (None, head) or pr["state"] != "OPEN":
+        print("head moved or PR not open", file=sys.stderr)
+        sys.exit(1)
+    subprocess.run(["git", "--git-dir", str(origin), "update-ref", "refs/heads/" + pr["base"], head], check=True)
+    pr["state"] = "MERGED"
+    db.setdefault("merges", []).append(repo)
+    save()
+    done()
+if args[:2] == ["api", "graphql"] and any("reviewThreads" in a for a in args):
+    done({"data": {"repository": {"pullRequest": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}})
+if args[:1] == ["api"]:
+    done([])
+(walk / "gh-unsupported.log").open("a").write(json.dumps(args) + "\n")
+print("fake gh: unsupported " + " ".join(args), file=sys.stderr)
+sys.exit(1)

@@ -76,19 +76,20 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
         repo = repository(self.root / "api")
         git(repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
         git(repo, "checkout", "-b", "feature")
-        with self.assertRaisesRegex(WorkspaceError, "Cannot determine base"):
-            discover(self.root)
+        self.assertIn("Cannot determine base", dict(discover(self.root).skipped)["api"])
         context = discover(self.root, manifest_path=self.manifest({"base_branches": {"api": "main"}}))
         self.assertEqual(context.repository("api").base_branch, "main")
         self.assertEqual(git(repo, "branch", "--show-current"), "feature")
 
     def test_missing_remote_and_missing_base_actionable(self):
         repo = repository(self.root / "api")
-        with self.assertRaisesRegex(WorkspaceError, "not available"):
-            discover(self.root, manifest_path=self.manifest({"base_branches": {"api": "missing"}}))
+        repository(self.root / "ui")
+        context = discover(self.root, manifest_path=self.manifest({"base_branches": {"api": "missing"}}))
+        self.assertIn("not available", dict(context.skipped)["api"])
         git(repo, "remote", "remove", "origin")
-        with self.assertRaisesRegex(WorkspaceError, "no origin"):
-            discover(self.root)
+        context = discover(self.root)
+        self.assertIn("no origin", dict(context.skipped)["api"])
+        self.assertEqual([r.relative_path for r in context.repositories], ["ui"])  # the others still work
 
     def test_exclusions_and_legacy_depth_never_enable_recursion(self):
         repository(self.root / "group" / "deep")
@@ -147,13 +148,45 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
                    {"unknown": 1}, {"base_branches": {"api": "bad..branch"}},
                    {"checks": [{"id": "test", "argv": "sh run.sh"}]},
                    {"checks": [{"id": "test", "argv": ["true"], "cwd": "../"}]},
-                   {"docker": {"host_root": "relative"}}, {"docker": {"compose_files": ["/outside"]}}]
+                   {"docker": {"host_root": "relative"}}, {"docker": {"compose_files": ["/outside"]}},
+                   {"merge_order": "api"}, {"merge_order": ["../api"]}]
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(WorkspaceError):
                 load_manifest(self.root, self.manifest(value))
         config = load_manifest(self.root, self.manifest({"checks": [{"id": "unit", "argv": ["true"]}],
                                                        "docker": {"context": "desktop-linux", "host_root": "/host"}}))
         self.assertEqual(json.loads(config.checks_json)[0]["id"], "unit")
+
+    def test_path_checks_and_root_walks_never_raise(self):
+        from workspace import children, inside
+        self.assertIsNone(inside(self.root, "../outside"))
+        inside(self.root, "x" * 5000)  # over-long: no exception
+        self.assertIsNone(inside(self.root, "bad\0name"))
+        self.assertEqual(inside(self.root, "a/b"), self.root / "a/b")
+        self.assertEqual(children(self.root / "missing"), [])
+        locked = self.root / "locked"
+        (locked / "inner").mkdir(parents=True)
+        repository(self.root / "api")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        from execution_identity import snapshot
+        self.assertTrue(snapshot(self.root))
+        self.assertEqual([r.relative_path for r in discover(self.root).repositories], ["api"])
+
+    def test_root_ignores_harness_outputs_and_manifest_excludes(self):
+        from unittest.mock import patch
+        import config
+        from execution_identity import snapshot
+        repository(self.root / "api")
+        name = self.manifest({"exclude": ["scratch"]})
+        with patch.object(config, "WORKSPACE_MANIFEST", name):
+            before = snapshot(self.root)
+            for path in ("test-results/run.json", "coverage/index.html", "e2e/output.log", "scratch/x.txt"):
+                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / path).write_text("output")
+            self.assertEqual(snapshot(self.root), before)
+            (self.root / "e2e/run.sh").write_text("echo test")
+            self.assertNotEqual(snapshot(self.root), before)
 
     def test_remote_identity_redacts_credentials_and_normalizes_transport(self):
         self.assertEqual(remote_identity("https://user:SECRET@github.com/example/test.git"),

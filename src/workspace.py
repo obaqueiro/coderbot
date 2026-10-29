@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import fnmatch
 import json
+import logging
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -11,21 +12,55 @@ from urllib.parse import urlsplit
 EXCLUDED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__",
                            ".pytest_cache", ".next", "dist", "build", "test-results",
                            "playwright-report"})
+# Harness and tool outputs at the workspace root: they never change the feature's identity.
+ROOT_IGNORE = ("output", "data", ".DS_Store", "test-results", "playwright-report", "blob-report",
+               "coverage", ".coverage", "htmlcov", "allure-results", "allure-report", "logs", "*.log",
+               ".cache", ".turbo", "*.pyc", "*.tsbuildinfo")
 
 
 class WorkspaceError(ValueError):
     """An unsafe or incomplete target configuration; callers must not guess."""
 
 
+def inside(root, path):
+    """The resolved path when it stays beneath root, else None; never raises."""
+    try:
+        root = Path(root).resolve()
+        candidate = Path(path)
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        return resolved if resolved.is_relative_to(root) else None
+    except (OSError, ValueError, RuntimeError, TypeError):
+        return None
+
+
 def contained(root, path):
-    root = Path(root).resolve()
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(root):
+    resolved = inside(root, path)
+    if resolved is None:
         raise WorkspaceError(f"Path resolves outside workspace: {path}")
     return resolved
+
+
+def children(directory):
+    """Sorted entries of a directory; an unreadable directory has none."""
+    try:
+        return sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+
+
+def ignore_patterns(root):
+    """Manifest `exclude` plus the default harness outputs; never raises."""
+    try:
+        import config
+        return ROOT_IGNORE + load_manifest(root, config.WORKSPACE_MANIFEST).exclude
+    except Exception:  # noqa: BLE001 - a broken manifest is reported by discovery
+        return ROOT_IGNORE
+
+
+def ignored(relative, patterns):
+    name = PurePosixPath(relative).name
+    return any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(relative, p)
+               or relative == p.rstrip("/") or relative.startswith(p.rstrip("/") + "/") for p in patterns)
 
 
 def _relative(value, label):
@@ -48,6 +83,7 @@ class Manifest:
     # Keep optional execution settings immutable until their adapters validate them.
     checks_json: str = "[]"
     docker_json: str = "{}"
+    merge_order: tuple[str, ...] = ()
 
     def base_for(self, relative_path):
         return dict(self.base_branches).get(relative_path)
@@ -61,7 +97,7 @@ def load_manifest(root, path=None):
         value = json.loads(source.read_text())
     except (OSError, ValueError) as error:
         raise WorkspaceError(f"Cannot read workspace manifest {source}: {error}") from error
-    allowed = {"max_depth", "exclude", "base_branches", "shared_inputs", "checks", "docker"}
+    allowed = {"max_depth", "exclude", "base_branches", "shared_inputs", "checks", "docker", "merge_order"}
     if not isinstance(value, dict) or set(value) - allowed:
         raise WorkspaceError("Workspace manifest must be an object with supported keys")
     # Accept old manifests without allowing them to re-enable recursion.
@@ -69,7 +105,7 @@ def load_manifest(root, path=None):
     if type(depth) is not int or not 1 <= depth <= 16:
         raise WorkspaceError("Workspace max_depth must be an integer between 1 and 16")
     patterns = {}
-    for key in ("exclude", "shared_inputs"):
+    for key in ("exclude", "shared_inputs", "merge_order"):
         entries = value.get(key, getattr(Manifest(), key))
         if not isinstance(entries, (list, tuple)):
             raise WorkspaceError(f"Workspace {key} must be a list")
@@ -124,7 +160,7 @@ def load_manifest(root, path=None):
         contained(root, _relative(file, "compose file"))
     return Manifest(1, patterns["exclude"], tuple(sorted(bases.items())),
                     patterns["shared_inputs"], json.dumps(checks, sort_keys=True),
-                    json.dumps(docker, sort_keys=True))
+                    json.dumps(docker, sort_keys=True), patterns["merge_order"])
 
 
 def git(repo, *args, required=True):
@@ -181,6 +217,7 @@ class Workspace:
     mode: str
     repositories: tuple[Repository, ...]
     manifest: Manifest
+    skipped: tuple[tuple[str, str], ...] = ()  # (child, reason): unusable, left out
 
     @property
     def identity(self):
@@ -202,7 +239,8 @@ def _repository(root, path, manifest, base_override=None):
     if Path(git(path, "rev-parse", "--show-toplevel")).resolve() != path:
         raise WorkspaceError(f"Not an independent Git root: {path}")
     relative = path.relative_to(root).as_posix()
-    url = git(path, "remote", "get-url", "origin", required=False)
+    # The configured URL, before insteadOf rewriting, is the repository's identity.
+    url = git(path, "config", "--get", "remote.origin.url", required=False)
     if not url:
         raise WorkspaceError(f"Repository {relative} has no origin remote")
     base = base_override or manifest.base_for(relative)
@@ -224,11 +262,14 @@ def _repository(root, path, manifest, base_override=None):
 
 def repository_paths(root, exclude=()):
     """Only immediate children are candidates; never inspect their descendants."""
-    root = Path(root)
-    return tuple(child for child in sorted(root.iterdir())
-                 if not child.is_symlink() and child.is_dir() and child.name not in EXCLUDED_DIRS
-                 and not any(fnmatch.fnmatch(child.name, pattern) for pattern in exclude)
-                 and (child / ".git").exists())
+    def candidate(child):
+        try:
+            return (not child.is_symlink() and child.is_dir() and child.name not in EXCLUDED_DIRS
+                    and not any(fnmatch.fnmatch(child.name, pattern) for pattern in exclude)
+                    and (child / ".git").exists())
+        except OSError:
+            return False
+    return tuple(child for child in children(root) if candidate(child))
 
 
 def discover(root, *, mode=None, manifest_path=None, base_branch=None):
@@ -244,5 +285,12 @@ def discover(root, *, mode=None, manifest_path=None, base_branch=None):
         return Workspace(root, mode, (_repository(root, root, manifest, base_branch or "main"),), manifest)
     if (root / ".git").exists():
         raise WorkspaceError("Workspace mode requires a non-Git root; use repo mode for a repository")
-    repos = [_repository(root, path, manifest) for path in repository_paths(root, manifest.exclude)]
-    return Workspace(root, mode, tuple(repos), manifest)
+    repos, skipped = [], []
+    for path in repository_paths(root, manifest.exclude):
+        try:
+            repos.append(_repository(root, path, manifest))
+        except WorkspaceError as error:
+            # One broken child (lost origin/HEAD, no origin) must not stop the others.
+            logging.getLogger("coderbot").warning("workspace: leaving out %s: %s", path.name, error)
+            skipped.append((path.name, str(error)))
+    return Workspace(root, mode, tuple(repos), manifest, tuple(skipped))
