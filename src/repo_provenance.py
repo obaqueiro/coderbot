@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 import subprocess
 
+import operations
+
 
 def _git(repo, *args):
-    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, timeout=60)
+    result = operations.tool(["git", *args], cwd=repo, timeout=60, text=False)
     if result.returncode:
         raise subprocess.CalledProcessError(result.returncode, result.args,
                                             output=result.stdout, stderr=result.stderr)

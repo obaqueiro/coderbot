@@ -222,7 +222,7 @@ class EvidenceTests(unittest.TestCase):
     def test_teardown_is_noop_without_compose_file(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(evidence, "E2E_DIR", Path(tmp)), \
-             patch("evidence.subprocess.run") as run:
+             patch("evidence.operations.tool") as run:
             evidence._teardown_stack()
         run.assert_not_called()
 

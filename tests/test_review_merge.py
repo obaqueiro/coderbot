@@ -78,7 +78,7 @@ class ThreadHelpers(unittest.TestCase):
     def test_reply_ids_are_remembered(self):
         state = {"pr_url": PR, "pr_threads": [human_thread()]}
         ok = subprocess.CompletedProcess([], 0, '{"id": 77}', "")
-        with patch.object(main.subprocess, "run", return_value=ok):
+        with patch.object(main.operations, "tool", return_value=ok):
             main._resolve_review_threads(state, "RESOLVE: H1 answered: because X", key="pr_threads")
         self.assertEqual(state["bot_comment_ids"], [77])
         # Email view stays opener-only.
@@ -94,7 +94,7 @@ class ThreadHelpers(unittest.TestCase):
 
     def test_query_failure_returns_none(self):
         proc = subprocess.CompletedProcess([], 1, "", "boom")
-        with patch.object(main.subprocess, "run", return_value=proc):
+        with patch.object(main.operations, "tool", return_value=proc):
             self.assertIsNone(main.unresolved_review_threads(PR))
 
     def test_query_parses_and_paginates(self):
@@ -115,7 +115,7 @@ class ThreadHelpers(unittest.TestCase):
                                                              "body": "x", "databaseId": 8}]}}]}}}}}
         procs = [subprocess.CompletedProcess([], 0, json.dumps(page1), ""),
                  subprocess.CompletedProcess([], 0, json.dumps(page2), "")]
-        with patch.object(main.subprocess, "run", side_effect=procs) as run:
+        with patch.object(main.operations, "tool", side_effect=procs) as run:
             threads = main.unresolved_review_threads(PR)
         self.assertEqual([t["id"] for t in threads], ["T1", "H1"])
         self.assertTrue(threads[1]["outdated"])
@@ -130,7 +130,7 @@ class ThreadHelpers(unittest.TestCase):
         state = {"pr_url": PR, "review_threads": [ocr("T1")]}
         output = "done\nRESOLVE: T1 fixed: renamed\nRESOLVE: EVIL not yours\n"
         ok = subprocess.CompletedProcess([], 0, "{}", "")
-        with patch.object(main.subprocess, "run", return_value=ok) as run:
+        with patch.object(main.operations, "tool", return_value=ok) as run:
             resolved = main._resolve_review_threads(state, output)
         self.assertEqual(resolved, 1)
         commands = [c.args[0] for c in run.call_args_list]
@@ -142,7 +142,7 @@ class ThreadHelpers(unittest.TestCase):
     def test_resolve_closes_human_thread_when_fixed(self):
         state = {"pr_url": PR, "pr_threads": [human_thread()]}
         ok = subprocess.CompletedProcess([], 0, "{}", "")
-        with patch.object(main.subprocess, "run", return_value=ok) as run:
+        with patch.object(main.operations, "tool", return_value=ok) as run:
             resolved = main._resolve_review_threads(state, "RESOLVE: H1 fixed: lock removed",
                                                     key="pr_threads")
         self.assertEqual(resolved, 1)
@@ -152,7 +152,7 @@ class ThreadHelpers(unittest.TestCase):
     def test_resolve_leaves_human_thread_open_when_only_answered(self):
         state = {"pr_url": PR, "pr_threads": [human_thread()]}
         ok = subprocess.CompletedProcess([], 0, "{}", "")
-        with patch.object(main.subprocess, "run", return_value=ok) as run:
+        with patch.object(main.operations, "tool", return_value=ok) as run:
             resolved = main._resolve_review_threads(state, "RESOLVE: H1 answered: because X",
                                                     key="pr_threads")
         self.assertEqual(resolved, 0)
@@ -164,13 +164,13 @@ class ThreadHelpers(unittest.TestCase):
     def test_ocr_thread_is_resolved_even_when_declined(self):
         state = {"pr_url": PR, "review_threads": [ocr("T1")]}
         ok = subprocess.CompletedProcess([], 0, "{}", "")
-        with patch.object(main.subprocess, "run", return_value=ok) as run:
+        with patch.object(main.operations, "tool", return_value=ok) as run:
             resolved = main._resolve_review_threads(state, "RESOLVE: T1 false positive")
         self.assertEqual(resolved, 1)
         self.assertEqual(len(run.call_args_list), 2)
 
     def test_resolve_without_known_threads_is_noop(self):
-        with patch.object(main.subprocess, "run") as run:
+        with patch.object(main.operations, "tool") as run:
             self.assertEqual(main._resolve_review_threads({"pr_url": PR}, "RESOLVE: T1 x"), 0)
         run.assert_not_called()
 
@@ -221,7 +221,7 @@ class MergeGate(unittest.TestCase):
              patch.object(main, "unresolved_review_threads", return_value=threads), \
              patch.object(main, "email") as email, \
              patch.object(main, "_finish_task") as finish, \
-             patch.object(main.subprocess, "run",
+             patch.object(main.operations, "tool",
                           return_value=subprocess.CompletedProcess([], 0, "", "")) as merge:
             main.do_merge_reply(state, reply)
         return email, finish, merge
@@ -284,7 +284,7 @@ class MergeGate(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=verdict(action="merge")), \
              patch.object(main, "_pr_merge_state", return_value=(None, None)), \
              patch.object(main, "email") as email, \
-             patch.object(main.subprocess, "run") as merge:
+             patch.object(main.operations, "tool") as merge:
             main.do_merge_reply(state, "merge")
         merge.assert_not_called()
         self.assertEqual(state["state"], "WAIT_MERGE")
@@ -473,7 +473,7 @@ class RepeatedFindings(unittest.TestCase):
         other = dict(bot, id="T3", body="Rename this variable")
         state = {"pr_url": PR, "review_threads": [bot]}
         with patch.object(main, "_is_ocr_thread", return_value=True), \
-             patch.object(main.subprocess, "run", return_value=Mock(returncode=0, stdout="{}")), \
+             patch.object(main.operations, "tool", return_value=Mock(returncode=0, stdout="{}")), \
              patch.object(main, "resolve_review_thread", return_value=True) as resolve:
             main._resolve_review_threads(state, "RESOLVE: T1 declined: None is impossible here")
             left = main._resolve_repeated_findings(state, [again, other])

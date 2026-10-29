@@ -128,7 +128,7 @@ class Base(unittest.TestCase):
 
     def gh(self, items, rival=None):
         fake = FakeGh(items, rival)
-        p = patch.object(ghp.subprocess, "run", side_effect=fake)
+        p = patch.object(ghp.operations, "tool", side_effect=fake)
         p.start()
         self.addCleanup(p.stop)
         return fake
@@ -329,7 +329,7 @@ class Validation(Base):
 
     def test_scope_errors_carry_the_project_scope_hint(self):
         failing = subprocess.CompletedProcess([], 1, "", "GraphQL: INSUFFICIENT_SCOPES ...")
-        with patch.object(ghp.subprocess, "run", return_value=failing):
+        with patch.object(ghp.operations, "tool", return_value=failing):
             with self.assertRaisesRegex(RuntimeError, "'project' scope"):
                 ghp._project()
 
@@ -339,7 +339,7 @@ class Validation(Base):
                     "https://github.com/acme/project.git", "git@github-work:acme/project.git",
                     "ssh://git@github.com/acme/project.git"):
             ghp._cache.pop("repo", None)
-            with patch.object(ghp.subprocess, "run",
+            with patch.object(ghp.operations, "tool",
                               return_value=subprocess.CompletedProcess([], 0, url + "\n", "")):
                 self.assertEqual(ghp._target_repo(), "acme/project", url)
 

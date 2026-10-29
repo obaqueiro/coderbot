@@ -623,9 +623,15 @@ def converse(prompt: str, session_id: str | None = None, *, on_session=None):
             if config.AGENT == "claude":
                 args = ["--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                         "--setting-sources", "", "--disable-slash-commands"]
-                if session_id:
-                    args.extend(["--resume", session_id])
-                result = claude_runner._invoke(args, prompt, **({"effort": "low"} if _routing.get() else {}))
+                options = {"effort": "low"} if _routing.get() else {}
+                try:
+                    result = claude_runner._invoke(args + (["--resume", session_id] if session_id else []),
+                                                   prompt, **options)
+                except RuntimeError as error:
+                    # A session from before the lateral process had its own config dir.
+                    if not session_id or "No conversation found" not in str(error):
+                        raise
+                    result = claude_runner._invoke(args, prompt, **options)
                 if on_session:
                     on_session(result.session_id)
                 return result

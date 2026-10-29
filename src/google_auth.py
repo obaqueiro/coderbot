@@ -1,11 +1,9 @@
 """Shared credential loading for Gmail/Docs clients."""
-import os
-import tempfile
-
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
 import config
+import persistence
 
 
 class MissingCredentials(RuntimeError):
@@ -19,22 +17,6 @@ def load_credentials() -> Credentials:
     creds = Credentials.from_authorized_user_file(str(config.TOKEN_PATH), config.SCOPES)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        _write_atomically(config.TOKEN_PATH, creds.to_json())
+        # Several threads refresh the token; a torn token.json breaks every Google call.
+        persistence.atomic_write(config.TOKEN_PATH, creds.to_json(), mode=0o600)
     return creds
-
-
-def _write_atomically(path, text: str) -> None:
-    """Several threads refresh the token; a torn token.json breaks every Google call."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise

@@ -31,6 +31,7 @@ import urllib.request
 import zlib
 
 import config
+import operations
 import turn_control
 
 MAX_CIPHERTEXT = 100_000      # bytes of paste JSON fetched
@@ -225,7 +226,7 @@ def _in_container() -> bool:
 
 
 def _run(args, timeout, check=True):
-    return subprocess.run(args, capture_output=True, text=True, errors="replace", timeout=timeout, check=check)
+    return operations.tool(args, timeout=timeout, check=check)
 
 
 def _port_busy(port: int) -> bool:

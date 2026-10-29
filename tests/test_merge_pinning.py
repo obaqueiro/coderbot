@@ -34,7 +34,7 @@ class Pinning(unittest.TestCase):
              publication, \
              patch.object(main, "email") as email, \
              patch.object(main, "_finish_task") as finish, \
-             patch.object(main.subprocess, "run", side_effect=list(runs)) as run:
+             patch.object(main.operations, "tool", side_effect=list(runs)) as run:
             main.do_merge_reply(state, "merge")
         return email, finish, run
 

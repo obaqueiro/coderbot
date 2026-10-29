@@ -115,7 +115,7 @@ class GracefulShutdown(unittest.TestCase):
                 patch.object(main, "load_state", return_value={"state": "IDLE"}), \
                 patch.object(main, "save_state") as save, \
                 patch.object(main, "_heartbeat_loop"), \
-                patch.object(main, "_status_supervisor_loop"), \
+                patch.object(main, "_status_supervisor_loop"), patch.object(main, "_probe_runtime"), \
                 patch.object(main, "check_commands", return_value=False), \
                 patch.object(main, "_maybe_ping"), \
                 patch.object(main.time, "sleep", side_effect=AssertionError("the tick failed and the loop backed off")), \

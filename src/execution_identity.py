@@ -4,8 +4,10 @@ import hashlib
 import json
 import hmac
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
+
+import operations
 
 
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
@@ -56,8 +58,8 @@ def verification_snapshot(repo, inputs=None):
 
 def _repository_entries(repo, inputs, prefix=""):
     """Tracked and untracked source, respecting each repository's ignore rules."""
-    files = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=repo, capture_output=True, timeout=30, check=True).stdout.decode().split("\0")
+    files = operations.tool(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=repo, timeout=30, check=True).stdout.split("\0")
     selected = []
     patterns = ["*" if p in (".", "./") else p.removeprefix("./") for p in inputs]
     for name in sorted(set(files) - {""}):

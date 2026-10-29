@@ -43,6 +43,8 @@ import delivery_checkpoint
 import evidence_delivery
 import message_templates
 import performance
+import persistence
+import retention
 import config
 import evidence
 import handoffs
@@ -81,8 +83,8 @@ redaction.install()  # after every root handler exists (never raises)
 # ---------------------------------------------------------------- state
 
 def load_state() -> dict:
-    if config.STATE_PATH.exists():
-        state = json.loads(config.STATE_PATH.read_text())
+    state = persistence.read_state(config.STATE_PATH)
+    if state is not None:
         state = _validate_target_state(state)
         recovered = selfheal_events.recover(state)
         if recovered != state:
@@ -91,6 +93,59 @@ def load_state() -> dict:
         state = recovered
         return task_records.migrate(state, phase_checkpoint.store(), config.REPO_PATH)
     return _validate_target_state({"state": "IDLE"})
+
+
+def _notify_operator(topic: str, body: str) -> bool:
+    """A one-way operational notice outside any task thread. Never raises."""
+    try:
+        if config.COMM_CHANNEL == "slack":
+            gmail_client.announce(f"{config.INSTANCE_ID}: {body}")
+        else:
+            gmail_client.send(f"{config.SUBJECT_PREFIX} {topic}", body)
+        return True
+    except Exception:  # noqa: BLE001 — a notice must never stall the loop
+        log.warning("could not send the %s notice", topic, exc_info=True)
+        return False
+
+
+def _report_quarantined() -> None:
+    """Tell the operator once about every unparseable file set aside."""
+    while persistence.quarantined:
+        path, moved = persistence.quarantined[0]
+        log.error("%s did not parse; moved it to %s and continued without it", path, moved)
+        if not _notify_operator("unreadable state file", f"{path} was unreadable (not valid JSON). "
+                                f"It was moved to {moved} and I continued without it; check that "
+                                "copy for anything to restore."):
+            return
+        persistence.quarantined.pop(0)
+
+
+def _probe_runtime() -> None:
+    """Startup check of the pinned CLIs: log and notify once per distinct mismatch."""
+    try:
+        problems = retention.probe(config.AGENT)
+        if not problems:
+            return
+        log.error("runtime probe: %s", "; ".join(problems))
+        stamp = config.DATA_DIR / ".runtime-probe"
+        digest_text = hashlib.sha256("\n".join(problems).encode()).hexdigest()
+        if stamp.exists() and stamp.read_text() == digest_text:
+            return
+        if _notify_operator("runtime mismatch", "the installed CLIs differ from the pinned "
+                            "runtime; I keep running, but expect failures:\n- " + "\n- ".join(problems)):
+            stamp.write_text(digest_text)
+    except Exception:  # noqa: BLE001 — the probe only informs
+        log.warning("runtime probe failed", exc_info=True)
+
+
+def _retention_keep(state: dict) -> tuple[list, list]:
+    """What the current and held tasks still use: recovery worktrees and checkpoints."""
+    saved = [s for s in [state] + [h.get("saved") or {} for h in _load_holds()] if s.get("item")]
+    store = phase_checkpoint.store()
+    paths = [s.get("workspace_path") for s in saved] + \
+        [config.DATA_DIR / "workspaces" / str(s.get("execution_task_id", ""))[:16]
+         for s in saved if s.get("execution_task_id")]
+    return paths, [store.task_identity(s, config.REPO_PATH) for s in saved]
 
 
 def _validate_target_state(state: dict) -> dict:
@@ -106,12 +161,10 @@ def _validate_target_state(state: dict) -> dict:
 
 
 def save_state(state: dict) -> None:
-    tmp = config.STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.replace(config.STATE_PATH)
+    persistence.write_json(config.STATE_PATH, state, indent=2)
     global _conversation_state
-    with _status_command_lock:
-        _conversation_state = copy.deepcopy(state)
+    # Rebinding is atomic: no lock, so a save never waits behind the status thread's I/O.
+    _conversation_state = copy.deepcopy(state)
     if state.get("conversation_flow_id"):
         store = phase_checkpoint.store()
         row = store.get("conversation", state["conversation_flow_id"])
@@ -159,10 +212,9 @@ def _ensure_task_language(state: dict) -> None:
 
 def git(*args: str) -> str:
     log.debug("git %s", " ".join(args))
-    proc = subprocess.run(["git", *args], cwd=config.REPO_PATH,
-                          capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    proc = operations.tool(["git", *args], cwd=config.REPO_PATH)
     if proc.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}")
+        raise errors.from_tool(f"git {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}", code="git_failed")
     if proc.stdout.strip():
         log.debug("git %s -> %s", args[0], proc.stdout.strip()[:300])
     return proc.stdout.strip()
@@ -1972,10 +2024,10 @@ def _commit_final_check_tasks(state: dict) -> None:
 
 
 def _run_checked(command: list[str]) -> str:
-    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    proc = operations.tool(command, cwd=config.REPO_PATH)
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip()
-        raise RuntimeError(f"{' '.join(command)} exited {proc.returncode}: {detail}")
+        raise errors.from_tool(f"{' '.join(command)} exited {proc.returncode}: {detail}", code=f"{command[0]}_failed")
     return proc.stdout.strip()
 
 
@@ -2117,8 +2169,7 @@ def _validate_archived_change(target: Path) -> None:
         destination = root / "openspec/changes/archive" / target.name
         destination.parent.mkdir(parents=True)
         shutil.copytree(target, destination)
-        proc = subprocess.run(command, cwd=root, capture_output=True, text=True, errors="replace",
-                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+        proc = operations.tool(command, cwd=root)
     try:
         items = json.loads(proc.stdout)["items"]
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
@@ -2404,13 +2455,8 @@ def code_review_check(pr_url: str) -> dict | None:
     surfaces promptly instead of masquerading as "not started" and stalling the poll loop
     until the review timeout.
     """
-    try:
-        proc = subprocess.run(
-            ["gh", "pr", "checks", pr_url, "--json", "name,bucket,workflow,link"],
-            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-            timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        log.warning("gh pr checks timed out after %ss", config.SUBPROCESS_TIMEOUT_SECONDS)
+    proc = _gh_quiet("pr", "checks", pr_url, "--json", "name,bucket,workflow,link")
+    if proc is None:
         return None
     try:
         checks = json.loads(proc.stdout) if proc.stdout.strip() else []
@@ -2435,24 +2481,32 @@ def code_review_check(pr_url: str) -> dict | None:
     return None
 
 
+def _gh_quiet(*args: str) -> subprocess.CompletedProcess | None:
+    """A gh call that never raises: None when it timed out or could not start."""
+    try:
+        return operations.tool(["gh", *args], cwd=config.REPO_PATH)
+    except (subprocess.TimeoutExpired, TimeoutError, OSError) as error:
+        log.warning("gh %s could not complete: %s", " ".join(args[:2]), error)
+        return None
+
+
 def _bot_comments(endpoint: str) -> list[dict]:
     """github-actions[bot] comments from a PR comments endpoint ([] on any failure)."""
-    try:
-        proc = subprocess.run(
-            ["gh", "api", f"{endpoint}?per_page=100"],
-            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-            timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        log.warning("gh api %s timed out after %ss", endpoint, config.SUBPROCESS_TIMEOUT_SECONDS)
+    proc = _gh_quiet("api", "--paginate", f"{endpoint}?per_page=100")
+    if proc is None or proc.returncode != 0:
+        log.warning("gh api %s failed: %s", endpoint, proc.stderr[-300:] if proc else "")
         return []
-    if proc.returncode != 0:
-        log.warning("gh api %s failed: %s", endpoint, proc.stderr[-300:])
-        return []
+    # --paginate prints one JSON array per page, back to back.
+    items, decoder, text, at = [], json.JSONDecoder(), proc.stdout.strip(), 0
     try:
-        items = json.loads(proc.stdout)
+        while at < len(text):
+            page, at = decoder.raw_decode(text, at)
+            items += page if isinstance(page, list) else []
+            while at < len(text) and text[at].isspace():
+                at += 1
     except json.JSONDecodeError:
         return []
-    return [c for c in items if c.get("user", {}).get("login") == "github-actions[bot]"]
+    return [c for c in items if isinstance(c, dict) and c.get("user", {}).get("login") == "github-actions[bot]"]
 
 
 def review_summary(state: dict) -> str:
@@ -2790,15 +2844,9 @@ def _finish_address_review(state: dict, result, head_before: str | None) -> None
 def _pr_merge_state(pr_url: str) -> tuple[str | None, str | None]:
     """(state, mergeable) of the PR — e.g. ("OPEN", "CONFLICTING") — or (None, None)
     when the query fails. Callers treat that as "unknown", never as "clean"."""
-    try:
-        proc = subprocess.run(["gh", "pr", "view", pr_url, "--json", "state,mergeable"],
-                              cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        log.warning("gh pr view timed out checking mergeability")
-        return None, None
-    if proc.returncode != 0:
-        log.warning("gh pr view failed checking mergeability: %s", proc.stderr[-300:])
+    proc = _gh_quiet("pr", "view", pr_url, "--json", "state,mergeable")
+    if proc is None or proc.returncode != 0:
+        log.warning("gh pr view failed checking mergeability: %s", proc.stderr[-300:] if proc else "")
         return None, None
     try:
         info = json.loads(proc.stdout)
@@ -2937,25 +2985,22 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
             pageInfo { hasNextPage endCursor }
             nodes {
               id isResolved isOutdated path line
-              comments(first: 100) { nodes { author { login __typename } body databaseId createdAt } } } } } } }"""
+              opener: comments(first: 1) { nodes { ...c } }
+              comments(last: 100) { totalCount nodes { ...c } } } } } } }
+    fragment c on PullRequestReviewComment { author { login __typename } body databaseId createdAt }"""
     threads: list[dict] = []
     cursor = None
     while True:
         # -f passes raw strings; only $number (an Int in the query) uses -F's type
         # coercion. An all-digit cursor or owner under -F would coerce to Int and make
         # the GraphQL call fail its String! variable types.
-        cmd = ["gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
+        cmd = ["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
                "-f", f"repo={repo}", "-F", f"number={number}"]
         if cursor:
             cmd += ["-f", f"cursor={cursor}"]
-        try:
-            proc = subprocess.run(cmd, cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-                                  timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            log.warning("gh api graphql (review threads) timed out")
-            return None
-        if proc.returncode != 0:
-            log.warning("gh api graphql (review threads) failed: %s", proc.stderr[-300:])
+        proc = _gh_quiet(*cmd)
+        if proc is None or proc.returncode != 0:
+            log.warning("gh api graphql (review threads) failed: %s", proc.stderr[-300:] if proc else "")
             return None
         try:
             data = json.loads(proc.stdout)["data"]
@@ -2967,13 +3012,18 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
         for node in conn.get("nodes") or []:
             if node.get("isResolved"):
                 continue
+            # A long thread keeps its opener (the reply target) and its latest 100
+            # comments, where the follow-ups that need an answer are.
+            recent = (node.get("comments") or {}).get("nodes") or []
+            opener = [c for c in ((node.get("opener") or {}).get("nodes") or [])
+                      if c and c.get("databaseId") not in {r.get("databaseId") for r in recent if r}]
             comments = [{
                 "author": (c.get("author") or {}).get("login", "?"),
                 "author_type": (c.get("author") or {}).get("__typename", ""),
                 "body": c.get("body", ""),
                 "comment_id": c.get("databaseId"),
                 "created_at": c.get("createdAt"),
-            } for c in ((node.get("comments") or {}).get("nodes") or []) if c]
+            } for c in opener + recent if c]
             first = comments[0] if comments else {}
             threads.append({
                 "id": node.get("id"),
@@ -2987,6 +3037,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
                 "author_type": first.get("author_type", ""),
                 "body": first.get("body", ""),
                 "comments": comments,
+                "comment_count": (node.get("comments") or {}).get("totalCount") or len(comments),
                 "bot_login": bot_login,
             })
         page = conn.get("pageInfo") or {}
@@ -3057,7 +3108,11 @@ def thread_has_new_comments(thread: dict, seen: dict) -> bool:
     n_seen = seen.get(thread.get("id"))
     if n_seen is None:
         return True
-    return len(thread.get("comments") or []) > n_seen
+    return _comment_count(thread) > n_seen
+
+
+def _comment_count(thread: dict) -> int:
+    return thread.get("comment_count") or len(thread.get("comments") or [])
 
 
 def _is_ocr_thread(thread: dict) -> bool:
@@ -3094,11 +3149,9 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
             state.setdefault("declined_findings", {})[_finding_key(thread)] = reason
         try:
             if thread.get("comment_id"):
-                reply = subprocess.run(
+                reply = operations.tool(
                     ["gh", "api", f"repos/{owner_repo}/pulls/{number}/comments/"
-                     f"{thread['comment_id']}/replies", "-f", f"body={reason}"],
-                    cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-                    timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+                     f"{thread['comment_id']}/replies", "-f", f"body={reason}"], cwd=config.REPO_PATH)
                 if reply.returncode != 0:
                     log.warning("could not reply on thread %s: %s",
                                 thread_id, reply.stderr[-300:])
@@ -3108,7 +3161,7 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
                 # A human's thread that got an answer but no code change stays open:
                 # closing it over the reviewer's head is their call, not the bot's. It is
                 # not picked up again until the reviewer posts something new.
-                seen[thread_id] = len(thread.get("comments") or []) + 1
+                seen[thread_id] = _comment_count(thread) + 1
                 log.info("answered human thread %s without resolving it (%s)",
                          thread_id, reason[:100])
                 continue
@@ -3116,7 +3169,7 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
                 resolved += 1
                 seen.pop(thread_id, None)
                 log.info("resolved review thread %s (%s)", thread_id, reason[:100])
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, TimeoutError, OSError):
             log.warning("resolving thread %s timed out", thread_id)
     log.info("resolved %d/%d review thread(s) from RESOLVE lines", resolved, len(known))
     return resolved
@@ -3171,18 +3224,12 @@ def _answered_only(thread: dict, reason: str) -> bool:
 
 
 def resolve_review_thread(thread_id: str) -> bool:
-    try:
-        proc = subprocess.run(
-            ["gh", "api", "graphql",
-             "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
-             "-f", f"id={thread_id}"],
-            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-            timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        log.warning("gh api graphql (resolveReviewThread %s) timed out", thread_id)
-        return False
-    if proc.returncode != 0:
-        log.warning("gh api graphql (resolveReviewThread %s) failed: %s", thread_id, proc.stderr[-300:])
+    proc = _gh_quiet("api", "graphql",
+                     "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
+                     "-f", f"id={thread_id}")
+    if proc is None or proc.returncode != 0:
+        log.warning("gh api graphql (resolveReviewThread %s) failed: %s", thread_id,
+                    proc.stderr[-300:] if proc else "")
         return False
     return True
 
@@ -3349,8 +3396,7 @@ def _pr_head_moved(state: dict, expected: str, head: str | None) -> bool:
 def _gh_squash_merge(pr_url: str, expected: str | None) -> subprocess.CompletedProcess:
     """A client incapable of pinning the reviewed head must fail closed."""
     command = ["gh", "pr", "merge", pr_url, "--squash"]
-    run = lambda args: subprocess.run(args, cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-                                      timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    run = lambda args: operations.tool(args, cwd=config.REPO_PATH)
     if not expected:
         return run(command)
     return run(command + ["--match-head-commit", expected])
@@ -4509,9 +4555,8 @@ def _abort_in_progress_ops() -> None:
 def _git_quiet(*args: str) -> bool:
     """Run a git command, returning success. Never raises — for the best-effort reset."""
     try:
-        proc = subprocess.run(["git", *args], cwd=config.REPO_PATH, capture_output=True,
-                              text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
+        proc = operations.tool(["git", *args], cwd=config.REPO_PATH)
+    except (subprocess.TimeoutExpired, TimeoutError):
         log.debug("git %s timed out after %ss", " ".join(args), config.SUBPROCESS_TIMEOUT_SECONDS)
         return False
     except OSError as error:  # e.g. argument list too long; the docstring promises no raise
@@ -4525,9 +4570,8 @@ def _git_quiet(*args: str) -> bool:
 def _uncommitted_paths() -> list[str]:
     """Modified, staged, unmerged and untracked (non-ignored) paths, parsed from -z output
     so renames and odd file names are handled."""
-    status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-                            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace",
-                            timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout
+    status = operations.tool(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                             cwd=config.REPO_PATH).stdout
     paths, entries = [], [e for e in status.split("\0") if e]
     index = 0
     while index < len(entries):
@@ -4573,8 +4617,7 @@ def _preserve_uncommitted(label: str) -> str | None:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target, follow_symlinks=False)
             copied += 1
-        patch = subprocess.run(["git", "diff", "HEAD", "--binary"], cwd=config.REPO_PATH,
-                               capture_output=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+        patch = operations.tool(["git", "diff", "HEAD", "--binary"], cwd=config.REPO_PATH, text=False)
         if patch.returncode == 0 and patch.stdout:
             (dest / "changes.patch").write_bytes(patch.stdout)
         return (f"git could not stash the uncommitted changes; {copied} of {len(keep)} file(s) "
@@ -4601,55 +4644,19 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
     # the remote. Best-effort — a network failure here doesn't block the reset (do_pick pulls too).
     if _git_quiet("fetch", "origin", config.BASE_BRANCH):
         _git_quiet("reset", "--hard", f"origin/{config.BASE_BRANCH}")
-    branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                            cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
+    branch = operations.tool(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=config.REPO_PATH).stdout.strip()
     if branch != config.BASE_BRANCH:
         problems.append(f"could not switch to {config.BASE_BRANCH} (still on {branch or 'unknown'})")
-    dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
-                           cwd=config.REPO_PATH, capture_output=True, text=True, errors="replace", timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
+    dirty = operations.tool(["git", "status", "--porcelain", "--untracked-files=no"],
+                            cwd=config.REPO_PATH).stdout.strip()
     if dirty:
         problems.append("tracked changes remain after reset")
     return problems
 
 
-# Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
-# next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("sent_messages", "declined_findings", "review_head", "draft_pr_url", "draft_pr_attempts", "draft_pr_ready", "loop_seen", "classification", "review_session_id", "credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "task_language_failures", "thread_intro", "base_sha", "slug", "thread_nonce",
-              "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
-              "recovery_id", "replan", "approved_proposal",
-              "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
-              "check_waivers", "technical_retry", "stuck_diagnostic", "feedback_origin",
-              "last_delivery", "verification_diagnostic", "proposal_delivery_pending",
-              "feedback_question_origin", "remote_branch", "feedback_delivery_pending", "recovery_resume",
-              "pending_decision_id", "reminded_decision", "last_effective_progress",
-              "feedback_question_id",
-              "isolated_merge_heads",
-              "branch", "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
-        "return_state", "review_since", "review_round", "review_run_link",
-              "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
-              "pr_title_guidance",
-              "pr_threads", "pr_thread_round", "pr_thread_notified", "pr_threads_seen",
-              "bot_comment_ids", "verify_round",
-              "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
-              "e2e_repair_status", "push_context", "archive_error", "e2e_round",
-              "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
-              "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
-              "evidence_url", "milestones_announced", "banner_state", "banner_stage", "proposal_snapshot", "proposal_sent_key",
-              "quality_report", "internal_review_report", "e2e_passed",
-              "implementation_summary", "pending_feedback", "architecture_report",
-              "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",
-              "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
-               "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
-               "reported_check_plan_error", "check_plan_repair_round", "check_plan_repair_revision",
-               "rejected_check_plan", "failure_context", "provider_block",
-              "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
-              "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
-              "implementation_return_round", "implementation_turn", "implementation_progress",
-              "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
-              "implementation_attachments", "implementation_ready", "pending_decision", "check_repair", "pending_reply_delivery",
-              "verification_guidance", "verification_requested_from", "verification_blocker",
-              "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
-              "approved_task_inventory", "verified_task_inventory", "evidence_recovery_round", "focused_scope_reconciled")
+# Every task-scoped state key (persistence.TASK_KEYS): cleared when a task ends, kept
+# with a held task.
+RESET_KEYS = persistence.TASK_KEYS
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -4936,21 +4943,20 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
 # ---------------------------------------------------------------- on-hold tasks
 
 def _load_holds() -> list[dict]:
-    try:
-        holds = json.loads(config.HOLDS_PATH.read_text())
-        for hold in holds:
-            if hold.get("saved"):
-                hold["saved"] = _validate_target_state(hold["saved"])
-                task_records.migrate(hold["saved"], phase_checkpoint.store(), config.REPO_PATH)
-        return holds
-    except (OSError, json.JSONDecodeError):
-        return []
+    """Unparseable holds.json is quarantined (and reported), never read as empty and
+    then overwritten; an unreadable one raises rather than losing the holds."""
+    holds = persistence.read_json(config.HOLDS_PATH, [])
+    if not isinstance(holds, list):
+        return persistence.quarantine(config.HOLDS_PATH, [])
+    for hold in holds:
+        if hold.get("saved"):
+            hold["saved"] = persistence.forward(_validate_target_state(hold["saved"]))
+            task_records.migrate(hold["saved"], phase_checkpoint.store(), config.REPO_PATH)
+    return holds
 
 
 def _save_holds(holds: list[dict]) -> None:
-    tmp = config.HOLDS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(holds, indent=2))
-    tmp.replace(config.HOLDS_PATH)
+    persistence.write_json(config.HOLDS_PATH, holds, indent=2)
 
 
 def _commit_pending_work(state: dict) -> list[str]:
@@ -5026,8 +5032,8 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
         log.warning("reset after hold left notes: %s", problems)
         body += "\n\nRepo reset:\n- " + "\n- ".join(problems)
     email(state, "on hold", body)
+    _publish_progress(state, "paused")
     with _status_command_lock:
-        _publish_progress(state, "paused")
         for key in RESET_KEYS:
             state.pop(key, None)
         if config.TARGET_MODE == "workspace":
@@ -5736,6 +5742,7 @@ def _handle_reply(state: dict, reply: str) -> None:
 _liveness = {"tick_started": time.time()}
 _work_active = threading.Event()
 _status_command_lock = threading.RLock()
+_progress_lock = threading.RLock()
 _current_state: dict | None = None  # main-thread owner; status worker reads a snapshot only
 _lock_handle = None  # kept alive for the process lifetime so the flock is held
 _conversation_worker = None
@@ -5935,7 +5942,7 @@ def _status_supervisor_loop() -> None:
 
 def _refresh_progress() -> None:
     """Publish independently of STATUS requests, including user-side waits."""
-    with _status_command_lock:
+    with _progress_lock:
         state = dict(_current_state) if _current_state is not None else load_state()
         if state.get("item") and state.get("thread_id"):
             _publish_progress(state)
@@ -5943,7 +5950,8 @@ def _refresh_progress() -> None:
 
 
 def _publish_progress(state: dict, situation: str | None = None) -> None:
-    with _status_command_lock:
+    # Its own lock: a slow progress update must not hold up commands or state saves.
+    with _progress_lock:
         try:
             # Reply handlers retain wait states for safe retries while running an
             # agent. Polling a wait alone is not work; a live turn is.
@@ -5975,11 +5983,15 @@ class ShutdownRequested(BaseException):
     way out instead of waiting for it."""
 
 
+_shutdown = threading.Event()
+
+
 def _request_shutdown(signum, _frame) -> None:
-    if _conversation_worker:
-        _conversation_worker.close()
-    turn_control.request_kick(None)
-    raise ShutdownRequested(signal.Signals(signum).name)
+    """Only a flag and the interrupting raise: taking a lock here could deadlock against
+    the main thread that holds it. main()'s finally stops the other children."""
+    if not _shutdown.is_set():
+        _shutdown.set()
+        raise ShutdownRequested(signal.Signals(signum).name)
 
 
 def _install_shutdown_handlers() -> None:
@@ -5987,6 +5999,7 @@ def _install_shutdown_handlers() -> None:
     plain `docker stop` (Spot interruption, host shutdown, redeploy) would be ignored
     until Docker SIGKILLs us. With the handler we drop everything at once and exit;
     the last completed tick is already on disk, so the next start resumes from it."""
+    _shutdown.clear()
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
 
@@ -6129,6 +6142,7 @@ def main() -> None:
     except Exception:  # noqa: BLE001 — an unreachable backlog must not block startup
         log.exception("could not re-assert the in-flight task's claim at startup")
     _install_shutdown_handlers()
+    threading.Thread(target=_probe_runtime, name="runtime-probe", daemon=True).start()
     try:
         selfheal_events.emit("ready", load_state())
         _run_loop()
@@ -6142,6 +6156,8 @@ def main() -> None:
     finally:
         if _conversation_worker:
             _conversation_worker.close()
+        if _shutdown.is_set():
+            turn_control.request_kick(None)
         _release_single_instance_lock()
 
 
@@ -6152,6 +6168,10 @@ def _run_loop() -> None:
         _liveness["tick_started"] = time.time()
         try:
             state = load_state()
+            _report_quarantined()
+            if retention.due(config.DATA_DIR / ".retention-stamp"):
+                retention.maybe_sweep(config.DATA_DIR, config.REPO_PATH, lambda: _retention_keep(state),
+                                      phase_checkpoint.store())
             if state.get("workspace_path"):
                 config.REPO_PATH = Path(state["workspace_path"])
         except (ValueError, OSError):
@@ -6171,8 +6191,7 @@ def _run_loop() -> None:
         attempt_task_id = state.get("execution_task_id")
         selfheal_events.emit("heartbeat", state)
         _current_state = state
-        with _status_command_lock:
-            _conversation_state = copy.deepcopy(state)
+        _conversation_state = copy.deepcopy(state)
         try:
             if state.get("item") and state["state"] != "IDLE":
                 agent_runner.set_task_context(state)
@@ -6304,7 +6323,7 @@ def _run_loop() -> None:
                     state["technical_retry"] = {"attempts": 0, "phase": prev}
                 retry = state["technical_retry"]
                 retry["attempts"] += 1
-                backoff = min(2 ** min(retry["attempts"] - 1, 12), 3600)
+                backoff = min(max(2 ** min(retry["attempts"] - 1, 12), getattr(error, "retry_after", None) or 0), 3600)
                 retry["next_at"] = time.time() + backoff
                 if retry["attempts"] >= config.MAX_STATE_FAILURES and not retry.get("notified"):
                     path = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,

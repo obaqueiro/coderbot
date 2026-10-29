@@ -12,6 +12,7 @@ import operations
 import check_plan
 import prompts
 import tool_policy
+import turn_control
 import turns
 
 log = logging.getLogger(__name__)
@@ -148,8 +149,28 @@ def _run(cmd: list[str], prompt: str = "") -> subprocess.CompletedProcess:
         "caveman" if config.USE_CAVEMAN and "--tools" not in cmd else "off")
     if "--tools" not in cmd:
         env.update(tool_policy.environment(tool_policy.current_phase()))
+    lateral = _lateral_config_dir(env) if turn_control.role.get() == "conversation" else None
+    if lateral:
+        env["CLAUDE_CONFIG_DIR"] = lateral
     return operations.run(cmd, cwd=config.REPO_PATH, timeout=config.AGENT_TIMEOUT_SECONDS,
                           kind="agent", env=env, input=prompt or None)
+
+
+def _lateral_config_dir(env) -> str | None:
+    """The lateral conversation's own CLAUDE_CONFIG_DIR, so two concurrent claude
+    processes never rewrite one ~/.claude.json. Only when auth comes from the
+    environment: a copied OAuth credentials file would race the main one's refresh."""
+    if not any(env.get(name) for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")):
+        return None
+    directory = config.DATA_DIR / "claude-lateral"
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not (directory / ".claude.json").exists():
+            (directory / ".claude.json").write_text("{}")
+    except OSError as error:
+        log.warning("lateral claude config dir unavailable (%s); sharing the main one", error)
+        return None
+    return str(directory)
 
 
 # Monotonic deadline until which _active_model() keeps returning the fallback model.

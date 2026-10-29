@@ -7,14 +7,14 @@ import drive_client
 import evidence
 import config
 import json
-import subprocess
+import operations
 from execution_identity import digest, snapshot
 
 
 def implementation_snapshot(repo):
     """Archiving planning documents must not invalidate unchanged demo code/tests."""
-    names = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=repo, capture_output=True, check=True, timeout=30).stdout.decode().split("\0")
+    names = operations.tool(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=repo, check=True, timeout=30).stdout.split("\0")
     return snapshot(repo, inputs=[name for name in names if name and not name.startswith("openspec/")] or ["__no_implementation__"])
 
 

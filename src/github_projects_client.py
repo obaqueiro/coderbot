@@ -21,11 +21,12 @@ import json
 import logging
 import os
 import re
-import subprocess
 import urllib.parse
 import urllib.request
 
 import config
+import errors
+import operations
 import ownership
 import safe_download
 import task_source
@@ -55,15 +56,18 @@ _cache: dict = {}
 def _gh(*args: str) -> str:
     """Run a gh command and return stdout; RuntimeError (with a token-scope hint when
     the error looks like one) on failure."""
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True, errors="replace",
-                          timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    proc = operations.tool(["gh", *args])
     if proc.returncode != 0:
         detail = (proc.stderr.strip() or proc.stdout.strip())[-2000:]
-        message = f"gh {' '.join(args[:2])} failed (exit {proc.returncode}): {detail}"
-        if any(marker in detail for marker in _SCOPE_MARKERS):
-            message += _SCOPE_HINT
-        raise RuntimeError(message)
+        raise _failure(f"gh {' '.join(args[:2])} failed (exit {proc.returncode}): {detail}", detail)
     return proc.stdout
+
+
+def _failure(message: str, detail: str) -> errors.CoderbotError:
+    """Fatal (with the token-scope hint) for a scope/permission error, else by the text."""
+    if any(marker in detail for marker in _SCOPE_MARKERS):
+        return errors.Fatal(message + _SCOPE_HINT, code="gh_project_scope", resource="github")
+    return errors.from_tool(message, code="gh_failed", resource="github")
 
 
 def _graphql(query: str, **variables) -> dict:
@@ -82,10 +86,7 @@ def _graphql(query: str, **variables) -> dict:
         raise RuntimeError(f"gh api graphql returned non-JSON output: {out[:500]!r}") from err
     if payload.get("errors"):
         detail = json.dumps(payload["errors"])[:2000]
-        message = f"GraphQL errors: {detail}"
-        if any(marker in detail for marker in _SCOPE_MARKERS):
-            message += _SCOPE_HINT
-        raise RuntimeError(message)
+        raise _failure(f"GraphQL errors: {detail}", detail)
     return payload.get("data") or {}
 
 
@@ -96,9 +97,7 @@ def _target_repo() -> str:
         return _cache["repo"]
     repo = config.GH_ISSUE_REPO
     if not repo:
-        proc = subprocess.run(["git", "-C", str(config.REPO_PATH), "remote", "get-url", "origin"],
-                              capture_output=True, text=True, errors="replace",
-                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+        proc = operations.tool(["git", "-C", str(config.REPO_PATH), "remote", "get-url", "origin"])
         if proc.returncode != 0:
             raise RuntimeError("cannot determine the issue repository: no origin remote in "
                                f"{config.REPO_PATH} (set CODEBOT_GH_ISSUE_REPO=owner/repo)")
