@@ -10,7 +10,7 @@ import evidence
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
-        p = patch("evidence.snapshot", return_value="fixture")
+        p = patch("evidence.content_identity", return_value="fixture")
         p.start()
         self.addCleanup(p.stop)
         self.scratch = tempfile.TemporaryDirectory()
@@ -83,7 +83,7 @@ class EvidenceTests(unittest.TestCase):
     def test_recorder_normalizes_persisted_markdown_spec_name(self):
         with patch("evidence._record_playwright_video", return_value=[]) as record, \
              patch("evidence.detect_branch_specs", return_value=[]), \
-             patch("evidence.snapshot", return_value="fixture"), \
+             patch("evidence.content_identity", return_value="fixture"), \
              tempfile.TemporaryDirectory() as root, patch.object(evidence.config, "DATA_DIR", Path(root)):
             evidence.record_evidence(["dynamic-page-title.spec.ts`"], "playwright")
 
@@ -148,6 +148,27 @@ class EvidenceTests(unittest.TestCase):
 
         self.assertEqual(run.call_count, 1)
         self.assertEqual([c.name for c in clips], ["demo.webm"])
+
+    def test_final_check_run_video_is_reused_without_running_the_suite_again(self):
+        import json
+        e2e_dir = Path(self.scratch.name) / "e2e"
+        results = e2e_dir / "test-results"
+        results.mkdir(parents=True)
+        before = {}
+        clip, mp4 = results / "demo.webm", Path(self.scratch.name) / "demo.mp4"
+        clip.write_bytes(b"video")
+        mp4.write_bytes(b"mp4")
+        (e2e_dir / "results.json").write_text(json.dumps({"stats": {"expected": 1}, "errors": [],
+            "suites": [{"specs": [{"file": "a.spec.ts", "title": "@evidence demo", "tests": [{"status": "expected", "expectedStatus": "passed",
+                "results": [{"status": "passed", "retry": 0, "errors": [], "attachments": [
+                    {"contentType": "video/webm", "path": str(clip)}]}]}]}]}]}))
+        with patch.object(evidence, "E2E_DIR", e2e_dir), \
+             patch("evidence.valid_media", return_value=True), \
+             patch("evidence.detect_branch_specs", return_value=[]), \
+             patch("evidence._stitch_to_mp4", return_value=mp4), \
+             patch("evidence.operations.run", side_effect=AssertionError("suite re-run")):
+            self.assertEqual([p.resolve() for p in evidence.harvest_check_run(before, "1 passed", True)], [mp4.resolve()])
+            self.assertEqual([p.resolve() for p in evidence.record_evidence(["e2e/tests/a.spec.ts"], None)], [mp4.resolve()])
 
     def test_rejected_demo_generates_and_validates_complete_spec_before_conversion(self):
         import json

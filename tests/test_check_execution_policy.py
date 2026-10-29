@@ -35,6 +35,26 @@ class CheckExecutionPolicyTests(unittest.TestCase):
             b = check_plan.Check("b", a.argv, **changes)
             self.assertEqual(len(check_plan.normalize([a, b], "/workspace")), 2)
 
+    def test_target_repo_e2e_runs_record_video_once_for_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "e2e").mkdir()
+            seen = []
+            def run(argv, **kwargs):
+                if "env" in kwargs:  # the check itself, not a tool-version probe
+                    seen.append((argv, kwargs["env"].get("PW_VIDEO")))
+                return subprocess.CompletedProcess(argv, 0, "1 passed", "")
+            store = ExecutionStore(root / "data/execution.sqlite")
+            with patch.object(checks.evidence, "E2E_DIR", root / "e2e"), \
+                 patch.object(checks.operations, "run", side_effect=run), \
+                 patch.object(checks.evidence, "harvest_check_run") as harvest:
+                checks.execute(check_plan.Check("e2e", ["bash", "e2e/run.sh"], kind="e2e"), root, store, "t")
+                checks.execute(check_plan.Check("unit", ["python3", "-m", "unittest"]), root, store, "t")
+            self.assertEqual([env for argv, env in seen if argv[0] == "bash"], ["on"])
+            self.assertEqual([env for argv, env in seen if argv[0] == "python3"], [None])
+            harvest.assert_called_once()
+
     def test_timeout_growth_preserves_output_and_does_not_hide_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

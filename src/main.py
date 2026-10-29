@@ -690,7 +690,7 @@ def _collect_attachments(result, e2e_specs: list[str],
     sources happen to reference the same file."""
     agent_files = [Path(p) for p in result.attachments]
     videos = [p for p in agent_files if p.suffix.lower() in (".webm", ".mp4")]
-    approved = evidence.supplied_artifacts(videos, content_snapshot(config.REPO_PATH)) if videos else []
+    approved = evidence.supplied_artifacts(videos, evidence.content_identity()) if videos else []
     agent_files = [p for p in agent_files if p not in videos or p in approved]
     evidence_files = evidence.record_evidence(e2e_specs, e2e_kind)
     agent_videos = [file for file in agent_files if file.suffix.lower() == ".webm"]

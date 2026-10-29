@@ -10,7 +10,7 @@ from pathlib import Path
 import config
 import operations
 import artifact_manifest
-from execution_identity import digest, snapshot
+from execution_identity import digest, verification_snapshot
 from execution_store import ExecutionStore
 import delivery_checkpoint
 
@@ -37,6 +37,11 @@ def valid_media(path: Path) -> bool:
 def valid_paths(paths) -> bool:
     return bool(paths) and all(Path(p).is_file() and Path(p).stat().st_size and (
         Path(p).suffix.lower() not in (".mp4", ".webm") or valid_media(Path(p))) for p in paths)
+
+
+def content_identity() -> str:
+    """What a recording proves: the code, not the planning files (archiving moves them)."""
+    return verification_snapshot(config.REPO_PATH)
 
 
 def supplied_artifacts(files: list[Path], content: str) -> list[Path]:
@@ -194,7 +199,7 @@ def record_evidence(spec_files: list[str], kind: str | None) -> list[Path]:
         log.warning("record_evidence: no spec/collection files found — no evidence will be produced")
         return []
     manifest = os.environ.get("CODEBOT_ARTIFACT_MANIFEST")
-    content = snapshot(config.REPO_PATH)
+    content = content_identity()
     if manifest and Path(manifest).is_file():
         try:
             entries = artifact_manifest.load(manifest, snapshot=content)
@@ -217,7 +222,7 @@ def record_evidence(spec_files: list[str], kind: str | None) -> list[Path]:
     for manifest in root.rglob("evidence-manifest.json") if root.exists() else []:
         try:
             metadata = json.loads(manifest.read_text())
-            if [Path(p).name for p in metadata.get("specs", [])] != [Path(p).name for p in spec_files]:
+            if not {Path(p).name for p in spec_files} <= {Path(p).name for p in metadata.get("specs", [])}:
                 continue
             entries = artifact_manifest.load(manifest, snapshot=content)
             paths = [Path(entry["path"]) for entry in entries]
@@ -284,21 +289,42 @@ def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False)
     tests out of the delivered video. If the filtered run is incomplete or rejected,
     generate the complete selected specs and validate that fresh run before delivery.
     """
-    def clips() -> dict[Path, tuple]:
-        files = set()
-        root = E2E_DIR / "test-results"
-        if root.exists():
-            files.update(p for p in root.rglob("*.webm") if "html" not in p.relative_to(root).parts)
-        return {p: (p.stat().st_mtime_ns, p.stat().st_size, artifact_manifest.file_hash(p)) for p in files}
-
     before = clips()
-    content = snapshot(config.REPO_PATH)
+    content = content_identity()
     specs = [Path(s).name for s in spec_files]
     log.info("recording evidence: re-running %s of %s with video on",
              "complete specs" if full_suite else "@evidence tests", specs)
     tail = _run_recording(specs, [] if full_suite else ["--grep", "@evidence"])
-    after = clips()
-    new = sorted(p for p, identity in after.items() if before.get(p) != identity)
+    retry = None if full_suite else (lambda: _record_playwright_video(spec_files, full_suite=True))
+    return _harvest(spec_files, before, content, tail, retry)
+
+
+def clips() -> dict[Path, tuple]:
+    """Playwright clips currently in the harness results, with their identity."""
+    files = set()
+    root = E2E_DIR / "test-results"
+    if root.exists():
+        files.update(p for p in root.rglob("*.webm") if "html" not in p.relative_to(root).parts)
+    return {p: (p.stat().st_mtime_ns, p.stat().st_size, artifact_manifest.file_hash(p)) for p in files}
+
+
+def harvest_check_run(before: dict, output: str, passed: bool) -> list[Path]:
+    """Keep the @evidence demo videos the final-check E2E run just recorded, so the
+    PR's evidence does not re-run the suite. Best-effort: any gap falls back to the
+    dedicated recording later."""
+    global _recording_passed, _recording_output
+    _recording_passed, _recording_output = passed, output
+    try:
+        content = content_identity()
+        specs = sorted({spec for report in _reports(sorted(p for p, i in clips().items() if before.get(p) != i))
+                        for spec in _demo_specs(report)})
+        return _harvest(specs, before, content, output[-1500:], None) if specs else []
+    except Exception:  # noqa: BLE001
+        log.exception("could not keep evidence from the final-check run; it will be recorded separately")
+        return []
+
+
+def _reports(new):
     reports = set()
     for p in new:
         for parent in p.parents:
@@ -306,6 +332,27 @@ def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False)
             if candidate.is_file():
                 reports.add(candidate)
                 break
+    return reports
+
+
+def _demo_specs(report_path):
+    found = set()
+    def walk(suite):
+        for spec in suite.get("specs", []):
+            if "@evidence" in spec.get("title", ""):
+                found.add(Path(spec.get("file", suite.get("file", ""))).name)
+        for nested in suite.get("suites", []):
+            walk(nested)
+    for suite in json.loads(report_path.read_text()).get("suites", []):
+        walk(suite)
+    return found
+
+
+def _harvest(spec_files, before, content, tail, retry):
+    specs = [Path(s).name for s in spec_files]
+    after = clips()
+    new = sorted(p for p, identity in after.items() if before.get(p) != identity)
+    reports = _reports(new)
     if not reports or not all(validate_playwright_report(p) for p in reports):
         _passed = False
     else:
@@ -325,9 +372,9 @@ def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False)
     if not _passed:
         log.warning("evidence %s failed; %d captured clip(s) preserved. Report: %s",
                     diagnostic["stage"], len(new), report)
-        if not full_suite and snapshot(config.REPO_PATH) == content:
+        if retry and content_identity() == content:
             log.info("evidence incomplete/rejected; generating complete selected specs before delivery")
-            return _record_playwright_video(spec_files, full_suite=True)
+            return retry()
         return []
     if not new:
         log.warning("no NEW .webm files after evidence run (before=%d, after=%d); "
@@ -370,8 +417,8 @@ def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False)
                           detail="Not all selected demo videos are fresh, unique and playable")
         (run_dir / "diagnostic.json").write_text(json.dumps(diagnostic))
         log.warning(diagnostic["detail"])
-        if not full_suite and snapshot(config.REPO_PATH) == content:
-            return _record_playwright_video(spec_files, full_suite=True)
+        if retry and content_identity() == content:
+            return retry()
         return []
     dropped = [v for v in videos if v.stat().st_size == 0]
     if dropped:
@@ -379,7 +426,7 @@ def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False)
     if not kept:
         log.info("_record_playwright_video: no clips to stitch")
         return []
-    if snapshot(config.REPO_PATH) != content:
+    if content_identity() != content:
         log.warning("implementation changed during evidence capture; recording cannot be published")
         return []
     artifact_manifest.write(run_dir / "evidence-manifest.json", run_id=run_id,

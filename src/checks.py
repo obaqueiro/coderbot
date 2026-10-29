@@ -12,6 +12,7 @@ from contextvars import copy_context
 import operations
 import preparation
 import check_plan
+import evidence
 from dataclasses import replace
 from selfheal_events import runtime_epoch
 from check_results import parse_output
@@ -57,6 +58,11 @@ def execute_plan(plan, repo, store, task_id, *, workers=3, audit_task=None):
             by_check[member.id] = result if member.id == merged.id else {
                 **result, "check": member.id, "same_run_as": merged.id}
     return [by_check[check.id] for check in plan]
+
+
+def _records_evidence(check, repo):
+    """The target repo's browser E2E runs record video, so evidence never re-runs them."""
+    return Path(repo) == evidence.E2E_DIR.parent.resolve() and check_plan.is_e2e(check, repo)
 
 
 def check_environment():
@@ -155,10 +161,14 @@ def execute(check, repo, store, task_id, *, reuse=True, audit_task=None):
     try:
         if preparation_error:
             raise OSError("Check preparation failed: " + str(preparation_error))
-        process = operations.run(check.argv, cwd=cwd, timeout=check.timeout,
-                                 exclusive=check.resources, env=env)
+        record = _records_evidence(check, repo)
+        clips = evidence.clips() if record else {}
+        process = operations.run(check.argv, cwd=cwd, timeout=check.timeout, exclusive=check.resources,
+                                 env={**env, "PW_VIDEO": "on"} if record else env)
         output = process.stdout + "\n" + process.stderr
         result = parse_output(output, process.returncode, check.reporter)
+        if record:  # the PR's demo video comes from this run instead of a second one
+            evidence.harvest_check_run(clips, output, result["status"] == "pass")
     except (subprocess.TimeoutExpired, TimeoutError, OSError) as error:
         output = f"{type(error).__name__}: {error}"
         for field in ("stdout", "stderr"):
