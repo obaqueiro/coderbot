@@ -106,7 +106,6 @@ SETTINGS = (
     field("CODEBOT_DATA_DIR", "Operations", "Persistent data directory; mount it in the container.", advanced=True),
     field("CODEBOT_POLL_INTERVAL", "Limits", "Seconds between idle backlog polls.", "120", "positive", advanced=True),
     field("CODEBOT_AGENT_TIMEOUT", "Limits", "Aggregate agent attempt timeout in seconds.", "1800", "positive", advanced=True),
-    field("CODEBOT_CLAUDE_TIMEOUT", "Limits", "Legacy alias for agent timeout; retained on upgrades.", advanced=True),
     field("CODEBOT_E2E_TIMEOUT", "Limits", "E2E timeout in seconds.", "900", "positive", advanced=True),
     field("CODEBOT_UTILITY_TIMEOUT", "Limits", "Utility LLM timeout.", "30", "positive", advanced=True),
     field("CODEBOT_LOCAL_TOOL_TIMEOUT", "Limits", "Local tool operation and subagent queue timeout in seconds.", "200", "positive", advanced=True),
