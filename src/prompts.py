@@ -316,9 +316,10 @@ Done when: the changes are committed. Return status done with a summary.
 """
 
 
-RESOLVE_CONFLICTS = """The base branch `$base_branch` moved and your pull request now conflicts with it.
+RESOLVE_CONFLICTS = """The base branch `$base_branch` moved and conflicts with this pull request. coderbot fetched it and started `git merge origin/$base_branch` on branch $branch; the merge is in progress with conflicts in:
+$paths
 
-Task: on branch $branch run `git fetch origin $base_branch` and `git merge origin/$base_branch` (merge, never rebase: the branch is already pushed), then resolve every conflict preserving the intent of both sides.
+Task: resolve every conflict preserving the intent of both sides. Do not abort, restart or rebase the merge.
 Steps:
 1. If a conflict has two reasonable resolutions with different behaviour, return needs_input describing each.
 2. Run the unit/functional tests and selected E2E cases for the feature and the conflicting code, never an unfiltered full suite.

@@ -2930,14 +2930,32 @@ def do_resolve_conflicts(state: dict) -> None:
     through the automated review again before it can merge."""
     # Persisted (not a local) so the WAIT_REPLY question detour can also tell whether
     # the answer-informed session ended up committing.
-    state["conflict_head"] = git("rev-parse", state["branch"])
+    state.setdefault("conflict_head", git("rev-parse", state["branch"]))
+    conflicts = _start_base_merge()
+    if not conflicts:
+        _leave_conflict_resolution(state)  # merged cleanly: no agent turn needed
+        return
     result = agent_runner.resume(
         state["session_id"],
         prompts.render(prompts.RESOLVE_CONFLICTS, branch=state["branch"],
-                       base_branch=config.BASE_BRANCH))
+                       base_branch=config.BASE_BRANCH, paths="\n".join(conflicts)))
     if handle_result(state, result, "RESOLVE_CONFLICTS"):
         return
     _leave_conflict_resolution(state)
+
+
+def _start_base_merge() -> list[str]:
+    """coderbot fetches and merges the base itself (the agent has no remote credentials);
+    returns the conflicted paths left for the agent. A merge already in progress (a
+    retried turn) is kept as it is."""
+    if not (config.REPO_PATH / ".git/MERGE_HEAD").exists():
+        git("fetch", "origin", config.BASE_BRANCH)
+        if _git_quiet("merge", "--no-edit", "origin/" + config.BASE_BRANCH):
+            return []
+        if not (config.REPO_PATH / ".git/MERGE_HEAD").exists():
+            raise RuntimeError(f"git could not start merging origin/{config.BASE_BRANCH}; see `git status`")
+    return [path for path in git("diff", "--name-only", "--diff-filter=U").splitlines() if path] or \
+        ["(merge in progress; see `git status`)"]
 
 
 def _leave_conflict_resolution(state: dict) -> None:

@@ -448,7 +448,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
         env = tool_policy.environment("IMPLEMENTING")
         self.assertEqual(env["GH_TOKEN"], "")
         self.assertEqual((env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]), ("credential.helper", ""))
-        with patch.object(main.config, "TARGET_MODE", "repo"):
+        with patch.object(main.config, "TOOL_POLICY", False):
             self.assertNotIn("GH_TOKEN", tool_policy.environment("IMPLEMENTING"))
 
     def publish(self):

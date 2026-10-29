@@ -347,10 +347,13 @@ class Conflicts(unittest.TestCase):
         state = {"state": "RESOLVE_CONFLICTS", "branch": "b", "session_id": "sid", "pr_url": PR,
                  "conflict_return": "WAIT_MERGE", "stale_replies": True, "has_code_review": True}
         with patch.object(main, "git", side_effect=["head-1", "head-2"]), \
+             patch.object(main, "_start_base_merge", return_value=["app.py"]), \
              patch.object(main.agent_runner, "resume", return_value=Mock(
-                 session_id="sid", output="merged", question=None, attachments=[])), \
+                 session_id="sid", output="merged", question=None, attachments=[])) as resume, \
              patch.object(main, "save_state"):
             main.do_resolve_conflicts(state)
+        self.assertIn("app.py", resume.call_args.args[1])
+        self.assertNotIn("git fetch", resume.call_args.args[1])
         self.assertEqual(state["state"], "PUSHING")
         self.assertEqual(state["push_context"]["continuation"], "conflicts")
         with patch.object(main, "git"), patch.object(main.final_checks, "run", return_value={"status": "pass"}):
@@ -363,12 +366,42 @@ class Conflicts(unittest.TestCase):
         state = {"state": "RESOLVE_CONFLICTS", "branch": "b", "session_id": "sid", "pr_url": PR,
                  "conflict_return": "WAIT_MERGE", "stale_replies": True}
         with patch.object(main, "git", return_value="head-1"), \
+             patch.object(main, "_start_base_merge", return_value=["app.py"]), \
              patch.object(main.agent_runner, "resume", return_value=Mock(
                  session_id="sid", output="nothing to do", question=None, attachments=[])):
             main.do_resolve_conflicts(state)
         self.assertEqual(state["state"], "WAIT_MERGE")
         self.assertNotIn("stale_replies", state)
         self.assertNotIn("conflict_head", state)
+
+    def test_controller_merges_the_base_and_hands_only_conflicts_to_the_agent(self):
+        import subprocess, tempfile
+        from pathlib import Path
+        def run(cwd, *args):
+            subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            origin, repo = Path(tmp) / "origin.git", Path(tmp) / "repo"
+            run(tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+            run(tmp, "clone", "-q", str(origin), str(repo))
+            for args in (("config", "user.email", "t@t"), ("config", "user.name", "t")):
+                run(repo, *args)
+            (repo / "a.txt").write_text("base\n")
+            (repo / "b.txt").write_text("base\n")
+            run(repo, "add", "."); run(repo, "commit", "-qm", "base"); run(repo, "push", "-q", "origin", "HEAD:main")
+            run(repo, "checkout", "-qb", "feature")
+            (repo / "a.txt").write_text("feature\n")
+            run(repo, "commit", "-qam", "feature")
+            run(repo, "checkout", "-q", "main")
+            (repo / "a.txt").write_text("main\n")
+            run(repo, "commit", "-qam", "main moved"); run(repo, "push", "-q", "origin", "main")
+            run(repo, "checkout", "-q", "feature")
+            with patch.object(main.config, "REPO_PATH", repo), patch.object(main.config, "BASE_BRANCH", "main"):
+                self.assertEqual(main._start_base_merge(), ["a.txt"])
+                self.assertEqual(main._start_base_merge(), ["a.txt"])  # a retried turn keeps the merge
+                run(repo, "merge", "--abort")
+                (repo / "a.txt").write_text("main\n")
+                run(repo, "commit", "-qam", "align")
+                self.assertEqual(main._start_base_merge(), [])  # clean merge: no agent turn
 
 
 class ReviewWait(unittest.TestCase):

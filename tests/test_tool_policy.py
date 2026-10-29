@@ -120,6 +120,12 @@ class Runtime(unittest.TestCase):
         self.assertIn("git commit", policy["denied"])
         self.assertEqual(env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"], "1")
 
+    def test_single_repo_agents_get_no_push_credentials(self):
+        with patch.object(config, "TARGET_MODE", "repo"):
+            env = tool_policy.environment("IMPLEMENTING")
+        self.assertEqual((env["GH_TOKEN"], env["GITHUB_TOKEN"], env["GIT_CONFIG_VALUE_0"]), ("", "", ""))
+        self.assertEqual(env["GIT_CONFIG_KEY_0"], "credential.helper")
+
     def test_workspace_policy_names_protected_controller_files(self):
         with patch.object(config, "TARGET_MODE", "workspace"), patch.object(config, "REPO_PATH", Path("/ws")), \
              patch.object(config, "WORKSPACE_MANIFEST", "workspace.json"):

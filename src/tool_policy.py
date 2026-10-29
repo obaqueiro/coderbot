@@ -71,12 +71,12 @@ def environment(phase: str | None) -> dict:
             # Subagents never spawn subagents; background jobs die with the turn anyway.
             "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
             "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
-            **(no_push_credentials() if config.TARGET_MODE == "workspace" else {})}
+            **no_push_credentials()}
 
 
 def no_push_credentials() -> dict:
-    """The controller fetches and pushes; the agent's git and gh carry no credentials.
-    (Single-repo agents still fetch for conflict resolution, so they keep theirs.)"""
+    """The controller fetches and pushes (also the base merge for conflict resolution),
+    so the agent's git and gh carry no credentials: a push the guard misses still fails."""
     return {"GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_ENTERPRISE_TOKEN": "",
             "GH_CONFIG_DIR": str(config.DATA_DIR / "agent-gh"),
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
