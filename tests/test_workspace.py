@@ -155,6 +155,37 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
                                                        "docker": {"context": "desktop-linux", "host_root": "/host"}}))
         self.assertEqual(json.loads(config.checks_json)[0]["id"], "unit")
 
+    def test_path_checks_and_root_walks_never_raise(self):
+        from workspace import children, inside
+        self.assertIsNone(inside(self.root, "../outside"))
+        inside(self.root, "x" * 5000)  # over-long: no exception
+        self.assertIsNone(inside(self.root, "bad\0name"))
+        self.assertEqual(inside(self.root, "a/b"), self.root / "a/b")
+        self.assertEqual(children(self.root / "missing"), [])
+        locked = self.root / "locked"
+        (locked / "inner").mkdir(parents=True)
+        repository(self.root / "api")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        from execution_identity import snapshot
+        self.assertTrue(snapshot(self.root))
+        self.assertEqual([r.relative_path for r in discover(self.root).repositories], ["api"])
+
+    def test_root_ignores_harness_outputs_and_manifest_excludes(self):
+        from unittest.mock import patch
+        import config
+        from execution_identity import snapshot
+        repository(self.root / "api")
+        name = self.manifest({"exclude": ["scratch"]})
+        with patch.object(config, "WORKSPACE_MANIFEST", name):
+            before = snapshot(self.root)
+            for path in ("test-results/run.json", "coverage/index.html", "e2e/output.log", "scratch/x.txt"):
+                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / path).write_text("output")
+            self.assertEqual(snapshot(self.root), before)
+            (self.root / "e2e/run.sh").write_text("echo test")
+            self.assertNotEqual(snapshot(self.root), before)
+
     def test_remote_identity_redacts_credentials_and_normalizes_transport(self):
         self.assertEqual(remote_identity("https://user:SECRET@github.com/example/test.git"),
                          remote_identity("git@github.com:example/test.git"))

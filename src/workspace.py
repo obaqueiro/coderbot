@@ -11,21 +11,55 @@ from urllib.parse import urlsplit
 EXCLUDED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__",
                            ".pytest_cache", ".next", "dist", "build", "test-results",
                            "playwright-report"})
+# Harness and tool outputs at the workspace root: they never change the feature's identity.
+ROOT_IGNORE = ("output", "data", ".DS_Store", "test-results", "playwright-report", "blob-report",
+               "coverage", ".coverage", "htmlcov", "allure-results", "allure-report", "logs", "*.log",
+               ".cache", ".turbo", "*.pyc", "*.tsbuildinfo")
 
 
 class WorkspaceError(ValueError):
     """An unsafe or incomplete target configuration; callers must not guess."""
 
 
+def inside(root, path):
+    """The resolved path when it stays beneath root, else None; never raises."""
+    try:
+        root = Path(root).resolve()
+        candidate = Path(path)
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        return resolved if resolved.is_relative_to(root) else None
+    except (OSError, ValueError, RuntimeError, TypeError):
+        return None
+
+
 def contained(root, path):
-    root = Path(root).resolve()
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(root):
+    resolved = inside(root, path)
+    if resolved is None:
         raise WorkspaceError(f"Path resolves outside workspace: {path}")
     return resolved
+
+
+def children(directory):
+    """Sorted entries of a directory; an unreadable directory has none."""
+    try:
+        return sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+
+
+def ignore_patterns(root):
+    """Manifest `exclude` plus the default harness outputs; never raises."""
+    try:
+        import config
+        return ROOT_IGNORE + load_manifest(root, config.WORKSPACE_MANIFEST).exclude
+    except Exception:  # noqa: BLE001 - a broken manifest is reported by discovery
+        return ROOT_IGNORE
+
+
+def ignored(relative, patterns):
+    name = PurePosixPath(relative).name
+    return any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(relative, p)
+               or relative == p.rstrip("/") or relative.startswith(p.rstrip("/") + "/") for p in patterns)
 
 
 def _relative(value, label):
@@ -224,11 +258,14 @@ def _repository(root, path, manifest, base_override=None):
 
 def repository_paths(root, exclude=()):
     """Only immediate children are candidates; never inspect their descendants."""
-    root = Path(root)
-    return tuple(child for child in sorted(root.iterdir())
-                 if not child.is_symlink() and child.is_dir() and child.name not in EXCLUDED_DIRS
-                 and not any(fnmatch.fnmatch(child.name, pattern) for pattern in exclude)
-                 and (child / ".git").exists())
+    def candidate(child):
+        try:
+            return (not child.is_symlink() and child.is_dir() and child.name not in EXCLUDED_DIRS
+                    and not any(fnmatch.fnmatch(child.name, pattern) for pattern in exclude)
+                    and (child / ".git").exists())
+        except OSError:
+            return False
+    return tuple(child for child in children(root) if candidate(child))
 
 
 def discover(root, *, mode=None, manifest_path=None, base_branch=None):
