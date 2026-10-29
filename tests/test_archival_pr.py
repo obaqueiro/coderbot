@@ -960,9 +960,8 @@ class PushPhaseTests(unittest.TestCase):
             "slug": "api-version", "session_id": "session-1",
         }
         verdict = Mock(output='{"action":"merge","feedback":""}')
-        merged = subprocess.CompletedProcess([], 0, '{"state":"MERGED","mergeable":"MERGEABLE"}', "")
+        self.github.prs[42]["state"] = "MERGED"
         with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main.operations, "tool", return_value=merged), \
              patch.object(main.task_source, "mark_done", return_value=True), \
              patch.object(main, "email"):
             main.do_merge_reply(state, "merge")

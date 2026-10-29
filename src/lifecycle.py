@@ -349,8 +349,9 @@ def merge(target, records, order, save):
             report["merged"].append(name)
             continue
         try:
-            target.repo(name).gh("pr", "merge", str(pr_number(record)), "--squash",
-                                 "--match-head-commit", record["delivered_sha"])
+            # Pinned to the verified head; a legacy repo-mode record without one merges as it always did.
+            pin = ["--match-head-commit", record["delivered_sha"]] if record.get("delivered_sha") else []
+            target.repo(name).gh("pr", "merge", str(pr_number(record)), "--squash", *pin)
         except errors.CoderbotError as error:
             report.update(failed=name, error=str(error)[:500])
             break

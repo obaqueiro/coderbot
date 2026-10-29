@@ -2923,14 +2923,10 @@ def _finish_address_review(state: dict, result, head_before: str | None) -> None
 def _pr_merge_state(pr_url: str) -> tuple[str | None, str | None]:
     """(state, mergeable) of the PR — e.g. ("OPEN", "CONFLICTING") — or (None, None)
     when the query fails. Callers treat that as "unknown", never as "clean"."""
-    proc = _pr_ops(pr_url).gh_quiet("pr", "view", _pr_owner_number(pr_url)[1], "--json", "state,mergeable")
-    if proc is None or proc.returncode != 0:
-        log.warning("gh pr view failed checking mergeability: %s", proc.stderr[-300:] if proc else "")
-        return None, None
     try:
-        info = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        log.warning("gh pr view returned non-JSON checking mergeability: %s", proc.stdout[:200])
+        info = _pr_ops(pr_url).pr(_pr_owner_number(pr_url)[1], "state,mergeable")
+    except (errors.CoderbotError, ValueError) as error:
+        log.warning("gh pr view failed checking mergeability: %s", str(error)[-300:])
         return None, None
     return info.get("state"), info.get("mergeable")
 
@@ -3438,17 +3434,17 @@ def do_merge_reply(state: dict, reply: str) -> None:
             return  # stay in WAIT_MERGE
         log.info("merging PR %s (squash%s)", state["pr_url"],
                  f", head {expected[:12]}" if expected else "")
-        merge = _gh_squash_merge(state["pr_url"], expected)
-        if merge.returncode != 0 and expected and \
-                _pr_head_moved(state, expected, _remote_pr_head(state)):
+        target, records = _repo_target(state)
+        report = lifecycle.merge(target, records, ["."], lambda: _save_record(state))
+        if report["failed"] and expected and _pr_head_moved(state, expected, _remote_pr_head(state)):
             return  # GitHub refused because the head moved; stay in WAIT_MERGE
-        if merge.returncode != 0:
+        if report["failed"]:
             # A late-breaking conflict or other GitHub rejection (e.g. branch behind the
             # base branch). Don't crash into the retry loop — surface it and wait for the
             # user to fix it.
-            log.warning("gh pr merge failed (%d): %s", merge.returncode, merge.stderr.strip())
+            log.warning("gh pr merge failed: %s", report["error"])
             email(state, "merge failed — needs your help",
-                  f"I couldn't merge the PR; GitHub reported:\n\n{merge.stderr.strip()}\n\n"
+                  f"I couldn't merge the PR; GitHub reported:\n\n{report['error']}\n\n"
                   f"PR: {state['pr_url']}\n\nThis usually means {config.BASE_BRANCH} moved ahead "
                   "or there are conflicts. If it's a merge conflict I'll detect it and start "
                   "resolving automatically on my next check; otherwise please resolve it on "
@@ -3481,13 +3477,6 @@ def _pr_head_moved(state: dict, expected: str, head: str | None) -> bool:
     state["delivered_sha"] = head
     state.pop("reviewed_pr_snapshot", None)
     return True
-
-
-def _gh_squash_merge(pr_url: str, expected: str | None) -> subprocess.CompletedProcess:
-    """A client incapable of pinning the reviewed head must fail closed."""
-    pin = ["--match-head-commit", expected] if expected else []
-    return (_pr_ops(pr_url).gh_quiet("pr", "merge", _pr_owner_number(pr_url)[1], "--squash", *pin)
-            or subprocess.CompletedProcess([], 1, "", "gh pr merge could not complete"))
 
 
 def _finish_address_pr_threads(state: dict) -> None:
