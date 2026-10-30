@@ -424,8 +424,8 @@ def review_threads(ops, number):
     irreversible merge, so it fails closed. The WHOLE thread is fetched, not just the
     opener: a reviewer's follow-up lives in later comments, and the agent must see both it
     and its own earlier reply. `viewer` is the bot's own login, used to label those replies."""
-    if "/" not in ops.slug:
-        log.warning("review threads: no repository is known for PR #%s", number)
+    if not number or "/" not in ops.slug:
+        log.warning("review threads: no pull request or repository is known (%s #%s)", ops.remote, number)
         return None
     owner, repo = ops.slug.split("/", 1)
     threads, cursor = [], None

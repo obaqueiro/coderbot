@@ -34,7 +34,7 @@ class Pinning(unittest.TestCase):
             return original(ops, *args)
         github.gh = gh
         with github, patch.object(main, "trail"), \
-             patch.object(main, "unresolved_review_threads", return_value=[]), \
+             patch.object(main.lifecycle, "review_threads", return_value=[]), \
              patch.object(main, "_conversation_delivery_blocked", return_value=False), \
              patch.object(main, "content_snapshot", return_value="x"), \
              patch.object(main, "email") as email, \

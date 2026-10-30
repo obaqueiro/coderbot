@@ -34,7 +34,7 @@ class ReviewThreads(unittest.TestCase):
                              "nodes": [self.comment(n) for n in range(51, 151)]}}]}}}}}
         with patch.object(main.operations, "tool",
                           return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), "")) as tool:
-            [thread] = main.unresolved_review_threads(PR)
+            [thread] = main.lifecycle.review_threads(main._pr_ops(PR), 42)
         query = next(a for a in tool.call_args.args[0] if a.startswith("query="))
         self.assertIn("comments(last: 100)", query)
         self.assertEqual(thread["comment_id"], 1)  # replies still target the opener

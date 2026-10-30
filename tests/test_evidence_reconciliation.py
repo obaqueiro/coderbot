@@ -54,7 +54,7 @@ class ReconciliationTests(unittest.TestCase):
                  patch.object(main.lifecycle.RepoOps, "gh", return_value=json.dumps({"body": f"Demo: {url}"})), \
                  patch.object(main.evidence, "record_evidence") as record, \
                  patch.object(main, "email", return_value=None) as notify, patch.object(main, "save_state"), \
-                 patch.object(main, "_publish_progress"), patch.object(main, "unresolved_review_threads", return_value=[]):
+                 patch.object(main, "_publish_progress"), patch.object(main.lifecycle, "review_threads", return_value=[]):
                 main.finalize_pr(state)
                 record.assert_not_called()
                 verify.assert_called_once()

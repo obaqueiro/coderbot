@@ -2766,7 +2766,7 @@ def finalize_pr(state: dict, note: str = "") -> None:
                  "or conversion may be pending; see evidence diagnostics and codebot logs.\n")
     # Surface unresolved threads early — inline comments can land after the review run
     # finishes, and the merge gate re-checks before merging.
-    threads = unresolved_review_threads(state["pr_url"])
+    threads = lifecycle.review_threads(_pr_ops(state["pr_url"]), lifecycle.pr_number(state))
     if threads is None:
         body += ("Note: I could not check the PR's review threads just now; "
                  "I will re-check before any merge.\n\n")
@@ -2846,7 +2846,7 @@ def handle_review_wait(state: dict) -> None:
             # clean — finalize now instead of waiting out the review timeout. When a
             # push IS expected (await_new_run), never conclude from the old run: the
             # fixes still need their re-review.
-            threads = unresolved_review_threads(state["pr_url"])
+            threads = lifecycle.review_threads(_pr_ops(state["pr_url"]), lifecycle.pr_number(state))
             if threads is not None and not [t for t in threads if lifecycle.is_bot_thread(t)]:
                 log.info("no unresolved OCR threads on the processed run; PR is clean")
                 finalize_pr(state)
@@ -2862,7 +2862,7 @@ def handle_review_wait(state: dict) -> None:
             log.debug("waiting for Code Review (bucket=%s, same_run=%s)", bucket, same_run)
         return
     # A new Code Review run finished (pass/fail/skip/cancel). Read what is unresolved.
-    threads = unresolved_review_threads(state["pr_url"])
+    threads = lifecycle.review_threads(_pr_ops(state["pr_url"]), lifecycle.pr_number(state))
     if threads is None:
         # Transient query failure: don't record the run as processed, so the next tick
         # re-reads it (the review timeout still bounds the wait).
@@ -2921,7 +2921,7 @@ def _finish_address_review(state: dict, result, head_before: str | None) -> None
     # or hand the leftovers straight back (the round cap bounds this loop).
     _resolve_review_threads(state, result.output)
     state.pop("review_threads", None)
-    remaining = unresolved_review_threads(state["pr_url"])
+    remaining = lifecycle.review_threads(_pr_ops(state["pr_url"]), lifecycle.pr_number(state))
     if remaining is None:
         # Could not verify — never conclude "clean" from a failed query. The review
         # wait's clean-check retries the query each tick (bounded by its timeout).
@@ -3073,15 +3073,6 @@ def _leave_conflict_resolution(state: dict) -> None:
 
 
 # ---------------------------------------------------------------- pre-merge thread resolution
-
-def unresolved_review_threads(pr_url: str) -> list[dict] | None:
-    """The PR's unresolved review threads (lifecycle.review_threads); None when unknown."""
-    try:
-        return lifecycle.review_threads(*_pr_ref(pr_url))
-    except errors.CoderbotError as error:  # could not verify: callers fail closed
-        log.warning("review threads: %s", error)
-        return None
-
 
 def _comment_label(comment: dict, thread: dict, bot_ids: set) -> tuple[str, bool]:
     """(label, is_bot). The bot's GitHub login is often the operator's own account, so
@@ -3254,7 +3245,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
         # merge, never waves it through. The strict `is True` matters — classifier JSON
         # isn't schema-validated, and a string like "false" is truthy.
         if verdict.get("force") is not True:
-            threads = unresolved_review_threads(state["pr_url"])
+            threads = lifecycle.review_threads(_pr_ops(state["pr_url"]), lifecycle.pr_number(state))
             if threads is None:
                 email(state, "merge blocked — could not verify review comments",
                       f"I did not merge: I couldn't query the PR's review threads to check "
@@ -3920,7 +3911,7 @@ def handle_merge_wait(state: dict) -> None:
     """A WAIT_MERGE poll: check the open PR for unresolved review threads (e.g. a human
     reviewer's) and address them, so live feedback gets fixed before the user even says
     'merge'."""
-    threads = unresolved_review_threads(state["pr_url"])
+    threads = lifecycle.review_threads(_pr_ops(state["pr_url"]), lifecycle.pr_number(state))
     if threads is not None:
         # A human thread the bot already answered (without a code change) is left open
         # for the reviewer to close; it re-enters the queue only once they post again.

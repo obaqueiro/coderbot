@@ -97,7 +97,7 @@ class ThreadHelpers(unittest.TestCase):
     def test_query_failure_returns_none(self):
         proc = subprocess.CompletedProcess([], 1, "", "boom")
         with patch.object(main.operations, "tool", return_value=proc):
-            self.assertIsNone(main.unresolved_review_threads(PR))
+            self.assertIsNone(main.lifecycle.review_threads(main._pr_ops(PR), 42))
 
     def test_query_parses_and_paginates(self):
         page1 = {"data": {"viewer": {"login": "codebot"}, "repository": {"pullRequest": {"reviewThreads": {
@@ -118,7 +118,7 @@ class ThreadHelpers(unittest.TestCase):
         procs = [subprocess.CompletedProcess([], 0, json.dumps(page1), ""),
                  subprocess.CompletedProcess([], 0, json.dumps(page2), "")]
         with patch.object(main.operations, "tool", side_effect=procs) as run:
-            threads = main.unresolved_review_threads(PR)
+            threads = main.lifecycle.review_threads(main._pr_ops(PR), 42)
         self.assertEqual([t["id"] for t in threads], ["T1", "H1"])
         self.assertTrue(threads[1]["outdated"])
         self.assertEqual(threads[0]["comment_id"], 7)  # replies go on the opener
@@ -230,7 +230,7 @@ class MergeGate(unittest.TestCase):
         with FakeGitHub(base=main.config.BASE_BRANCH) as github, \
              patch.object(main.agent_runner, "run", return_value=verdict(**v)), \
              patch.object(main, "trail"), \
-             patch.object(main, "unresolved_review_threads", return_value=threads), \
+             patch.object(main.lifecycle, "review_threads", return_value=threads), \
              patch.object(main, "email") as email, \
              patch.object(main, "_finish_task") as finish:
             github.add(42, state["branch"], mergeable=mergeable)
@@ -429,7 +429,7 @@ class ReviewWait(unittest.TestCase):
     def test_new_run_with_ocr_threads_enters_address_review(self):
         state = self.state()
         with patch.object(main, "code_review_check", return_value={"bucket": "fail", "link": "L1"}), \
-             patch.object(main, "unresolved_review_threads", return_value=[ocr(), human()]):
+             patch.object(main.lifecycle, "review_threads", return_value=[ocr(), human()]):
             main.handle_review_wait(state)
         self.assertEqual(state["state"], "ADDRESS_REVIEW")
         self.assertEqual([t["id"] for t in state["review_threads"]], ["T1"])
@@ -438,7 +438,7 @@ class ReviewWait(unittest.TestCase):
     def test_query_failure_does_not_consume_the_run(self):
         state = self.state()
         with patch.object(main, "code_review_check", return_value={"bucket": "pass", "link": "L1"}), \
-             patch.object(main, "unresolved_review_threads", return_value=None), \
+             patch.object(main.lifecycle, "review_threads", return_value=None), \
              patch.object(main, "finalize_pr") as finalize:
             main.handle_review_wait(state)
         finalize.assert_not_called()
@@ -447,7 +447,7 @@ class ReviewWait(unittest.TestCase):
     def test_resolution_only_round_finalizes_from_processed_run(self):
         state = self.state() | {"review_run_link": "L1", "await_new_run": False}
         with patch.object(main, "code_review_check", return_value={"bucket": "pass", "link": "L1"}), \
-             patch.object(main, "unresolved_review_threads", return_value=[human()]), \
+             patch.object(main.lifecycle, "review_threads", return_value=[human()]), \
              patch.object(main, "finalize_pr") as finalize:
             main.handle_review_wait(state)
         finalize.assert_called_once()
@@ -455,7 +455,7 @@ class ReviewWait(unittest.TestCase):
     def test_awaiting_new_run_never_concludes_from_old_run(self):
         state = self.state() | {"review_run_link": "L1", "review_since": main.time.time()}
         with patch.object(main, "code_review_check", return_value={"bucket": "pass", "link": "L1"}), \
-             patch.object(main, "unresolved_review_threads", return_value=[]), \
+             patch.object(main.lifecycle, "review_threads", return_value=[]), \
              patch.object(main, "finalize_pr") as finalize:
             main.handle_review_wait(state)
         finalize.assert_not_called()
@@ -464,7 +464,7 @@ class ReviewWait(unittest.TestCase):
 class MergeWait(unittest.TestCase):
     def test_failed_query_only_checks_inbox(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_thread_round": 1}
-        with patch.object(main, "unresolved_review_threads", return_value=None), \
+        with patch.object(main.lifecycle, "review_threads", return_value=None), \
              patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
             main.poll_pr(state)
@@ -474,7 +474,7 @@ class MergeWait(unittest.TestCase):
 
     def test_threads_are_addressed_proactively(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR}
-        with patch.object(main, "unresolved_review_threads", return_value=[human()]), \
+        with patch.object(main.lifecycle, "review_threads", return_value=[human()]), \
              patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
             main.poll_pr(state)
@@ -484,7 +484,7 @@ class MergeWait(unittest.TestCase):
 
     def test_answered_thread_waits_for_the_reviewer(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_threads_seen": {"H1": 3}}
-        with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
+        with patch.object(main.lifecycle, "review_threads", return_value=[human_thread()]), \
              patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
             main.poll_pr(state)
@@ -494,7 +494,7 @@ class MergeWait(unittest.TestCase):
     def test_the_pr_is_polled_once_per_interval_the_inbox_every_tick(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR}
         with patch.object(main, "check_pr_status", return_value=False) as status, \
-             patch.object(main, "unresolved_review_threads", return_value=[]), \
+             patch.object(main.lifecycle, "review_threads", return_value=[]), \
              patch.object(main, "handle_wait") as wait:
             main.poll_pr(state)
             main.poll_pr(state)
@@ -502,7 +502,7 @@ class MergeWait(unittest.TestCase):
 
     def test_answered_thread_reenters_on_new_reviewer_comment(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_threads_seen": {"H1": 2}}
-        with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
+        with patch.object(main.lifecycle, "review_threads", return_value=[human_thread()]), \
              patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
             main.poll_pr(state)

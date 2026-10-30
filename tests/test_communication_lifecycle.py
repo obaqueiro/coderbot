@@ -58,7 +58,7 @@ class CommunicationLifecycle(unittest.TestCase):
                      patch.object(main.gmail_client, "send", return_value=state["thread_id"] or "gmail-1") as send, \
                      patch.object(main.gmail_client, "deliver", side_effect=lambda s, subj, body, thread, files: (send(subj, body, thread, files), {"thread_id": thread or "gmail-1", "complete": True})[1]), \
                      patch.object(main.evidence, "record_evidence", return_value=[]), \
-                     patch.object(main, "unresolved_review_threads", return_value=[]), \
+                     patch.object(main.lifecycle, "review_threads", return_value=[]), \
                      patch.object(main.agent_runner, "run",
                                   return_value=SimpleNamespace(output=json.dumps(decision))):
                     main.announce_milestone(state, "exploring", "Exploring")

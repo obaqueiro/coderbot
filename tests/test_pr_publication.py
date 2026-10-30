@@ -129,7 +129,7 @@ class PullRequestURLs(unittest.TestCase):
     def test_an_unparseable_pr_url_never_raises_out_of_a_wait(self):
         with patch.object(main.operations, "tool") as tool:
             self.assertIsNone(main.code_review_check("https://example.com/nope"))
-            self.assertIsNone(main.unresolved_review_threads("https://example.com/nope"))
+            self.assertIsNone(main.lifecycle.review_threads(main._pr_ops("https://example.com/nope"), None))
             self.assertFalse(main.check_pr_status({"state": "WAIT_MERGE", "pr_url": "garbage", "branch": "b"}))
             self.assertEqual(main.review_summary({"pr_url": "garbage"}), "")
             self.assertEqual(main._resolve_review_threads({"pr_url": "garbage", "review_threads": [{"id": "T"}]},

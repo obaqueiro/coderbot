@@ -79,7 +79,7 @@ class FinalizePrTests(unittest.TestCase):
                   patch.object(main, "_publish_progress"),
                   patch.object(main, "_sync_pr_video"),
                   patch.object(main.evidence, "valid_media", return_value=True),
-                  patch.object(main, "unresolved_review_threads", return_value=[])):
+                  patch.object(main.lifecycle, "review_threads", return_value=[])):
             p.start()
             self.addCleanup(p.stop)
 
