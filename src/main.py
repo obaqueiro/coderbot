@@ -155,8 +155,7 @@ def _validate_target_state(state: dict) -> dict:
         import workspace
         import workspace_state
         target = workspace.discover(config.REPO_PATH, mode=config.TARGET_MODE,
-                                    manifest_path=config.WORKSPACE_MANIFEST,
-                                    base_branch=config.BASE_BRANCH if config.TARGET_MODE == "repo" else None)
+                                    manifest_path=config.WORKSPACE_MANIFEST, base_branch=config.BASE_BRANCH)
         return workspace_state.bind_and_validate(state, target)
     return state
 
@@ -531,6 +530,23 @@ def _archive_transcript(state: dict, target: Path) -> None:
 RESUMABLE_STATE = {"APPLY_PR_FEEDBACK": "WAIT_MERGE", "ADDRESS_PR_THREADS": "WAIT_MERGE"}
 
 
+def _remember_checks(state: dict, output: str) -> None:
+    """Repo mode: run the cheap checks a turn declared now (focused evidence); browser
+    checks belong to the staged final gate, never an implementation, question or review
+    response, so they are registered without launching them."""
+    requested = check_plan.reported(output)
+    if not requested:
+        return
+    requested = check_plan.relax(requested, _skipped_credentials(state))
+    database = phase_checkpoint.store()
+    task_id = database.task_identity(state, config.REPO_PATH)
+    cheap = [c for c in requested if not check_plan.is_e2e(c, config.REPO_PATH)]
+    outcomes = checks.execute_plan(cheap, config.REPO_PATH, database, task_id) if cheap else []
+    state["focused_check_results"] = [{**r, "gate": final_checks.gate(c, r, state, config.REPO_PATH, database)}
+                                      for c, r in zip(cheap, outcomes)]
+    check_plan.remember(state, "CHECK_PLAN: " + json.dumps({"version": 1, "checks": [check.to_dict() for check in requested]}))
+
+
 def handle_result(state: dict, result, phase: str) -> bool:
     """If the coding agent asked a question, email it and enter WAIT_REPLY. True if waiting.
 
@@ -544,22 +560,8 @@ def handle_result(state: dict, result, phase: str) -> bool:
         state["review_session_id"] = result.session_id
     else:
         state["session_id"] = result.session_id
-    requested = check_plan.reported(result.output)
     check_plan.remember(state, result.output)
-    if config.TARGET_MODE == "workspace":
-        import workspace_runner
-        workspace_runner.remember_checks(state, result.output)
-    elif requested:
-        requested = check_plan.relax(requested, _skipped_credentials(state))
-        database = phase_checkpoint.store()
-        task_id = database.task_identity(state, config.REPO_PATH)
-        # Browser checks belong to the staged final gate, never an implementation,
-        # question or review response. Register them without launching them here.
-        cheap = [c for c in requested if not check_plan.is_e2e(c, config.REPO_PATH)]
-        outcomes = checks.execute_plan(cheap, config.REPO_PATH, database, task_id) if cheap else []
-        state["focused_check_results"] = [{**r, "gate": final_checks.gate(c, r, state, config.REPO_PATH, database)}
-                                          for c, r in zip(cheap, outcomes)]
-        check_plan.remember(state, "CHECK_PLAN: " + json.dumps({"version": 1, "checks": [check.to_dict() for check in requested]}))
+    _mode().remember_checks(state, result.output)
     state.pop("kick_pending", None)
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     _transcript_append(state, f"\n## {phase} — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
@@ -978,9 +980,6 @@ def _e2e_report_note(state: dict) -> str:
 # ---------------------------------------------------------------- phases
 
 def do_pick(state: dict) -> None:
-    if config.TARGET_MODE == "workspace":
-        import workspace_runner
-        return workspace_runner.pick(state)
     # Only tracked, uncommitted changes matter — untracked files (e.g. host-side
     # git-ignored config not excluded inside the container) don't block a checkout.
     if git("status", "--porcelain", "--untracked-files=no"):
@@ -1161,7 +1160,7 @@ def _undo_premature_work(state: dict, phase: str) -> str:
 
     Best-effort by design: a cleanup error must never fail the phase, so problems are
     reported in the note instead of raised."""
-    if config.TARGET_MODE == "workspace":
+    if _mode().preserves_work:
         return ""  # Shared planning is local; never reset child repos as hygiene.
     notes = []
     base_branch = config.BASE_BRANCH
@@ -1339,11 +1338,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
         return
     # changes: revise the proposal in the working session and go back to waiting.
     revision_prompt = prompts.render(prompts.REVISE_PROPOSAL, feedback=verdict.get("feedback", ""), slug=state["slug"])
-    if config.TARGET_MODE == "workspace":
-        import workspace_runner
-        result = workspace_runner.turn(state, revision_prompt)
-    else:
-        result = agent_runner.resume(state["session_id"], revision_prompt)
+    result = _mode().turn(state, revision_prompt)
     if handle_result(state, result, "PROPOSING"):
         return
     note = "" if state.get("replan") else _undo_premature_work(state, "PROPOSING")
@@ -3909,9 +3904,7 @@ def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
                 or state.get("return_state") in ("EXPLORING", "PROPOSING")):
             _handle_reply(state, selection["reply"])
             return
-    if config.TARGET_MODE == "workspace":
-        return _handle_reply(state, reply)
-    if (state["state"] == "WAIT_MERGE" or state.get("return_state") == "FEEDBACK_QUESTION" or
+    if _mode().routes_feedback and (state["state"] == "WAIT_MERGE" or state.get("return_state") == "FEEDBACK_QUESTION" or
             state.get("execution_task_id") and state["state"] in ("WAIT_REPLY", "WAIT_STUCK")) and not re.fullmatch(
             r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?|abort|complete|retry)[.! ]*", reply):
         database = phase_checkpoint.store()
@@ -3997,16 +3990,10 @@ def _dispatch_feedback(state: dict) -> bool:
     rows = feedback.pending(database, state, config.REPO_PATH)
     if not rows:
         return False
-    row = rows[0]
-    if config.TARGET_MODE == "workspace":
-        state["pending_feedback"] = row["data"]["text"]
-        if state["state"] not in ("EXPLORING", "PROPOSING", "WAIT_APPROVAL"):
-            state["state"] = "APPLY_FEEDBACK"
-        else:
-            state["implementation_feedback"] = row["data"]["text"]
-        database.update("feedback", row, status="complete")
-        save_state(state)
-        return True
+    return _mode().apply_feedback(state, database, rows[0])
+
+
+def _apply_feedback(state: dict, database, row: dict) -> bool:
     original_phase = state["state"]
     try:
         return _apply_received_feedback(state, database, row)
@@ -4424,6 +4411,46 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 RESET_KEYS = persistence.TASK_KEYS
 
 
+def _clear_task(state: dict, extra=None) -> None:
+    for key in (*RESET_KEYS, *(_mode().task_keys if extra is None else extra)):
+        state.pop(key, None)
+
+
+def _repo_phase(state: dict) -> None:
+    if state["state"] in ("WAIT_REVIEW", "WAIT_MERGE"):
+        poll_pr(state)
+    elif state["state"] == "WAIT_CLEAN" and config.COMM_CHANNEL == "slack":
+        check_clean_checkout(state)
+    elif state["state"] in WAITS:
+        handle_wait(state)
+    else:
+        with performance.span(str(state.get("branch", "idle")), "phase", state["state"]):
+            PHASES[state["state"]](state)
+
+
+class _Repo:
+    """Repo mode's policy; workspace_runner is the workspace's. main asks the mode
+    (`_mode()`) wherever the two differ instead of testing TARGET_MODE."""
+    preserves_work = False  # abort, hold and a finish before merge reset the checkout to base
+    requires_git = True
+    routes_feedback = True  # change requests in a wait go through the durable feedback flow
+    answers_in_flow = False  # lateral messages in WAIT_REPLY go to the conversation worker
+    held_keys = task_keys = ()  # beyond persistence.TASK_KEYS
+    knows = staticmethod(lambda name: name in PHASES or name in WAITS)
+    run_phase = staticmethod(lambda state: _repo_phase(state))
+    reply = staticmethod(lambda state, reply: _repo_reply(state, reply))
+    turn = staticmethod(lambda state, prompt: agent_runner.resume(state["session_id"], prompt))
+    remember_checks = staticmethod(lambda state, output: _remember_checks(state, output))
+    apply_feedback = staticmethod(lambda state, database, row: _apply_feedback(state, database, row))
+
+
+def _mode():
+    if config.TARGET_MODE == "workspace":
+        import workspace_runner
+        return workspace_runner
+    return _Repo
+
+
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
     """End the task successfully: mark the item done in the backlog, optionally reset the
     checkout to a clean base branch (needed when finishing before a merge — the tree may
@@ -4448,7 +4475,7 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
         body = (f"{note}\n\nBut I could not find this item in the backlog to mark it "
                 f"done:\n\n{item}\n\nPlease mark it done (or delete it) promptly "
                 "— until then it may be picked again.")
-    if reset_repo and config.TARGET_MODE != "workspace":
+    if reset_repo and not _mode().preserves_work:
         problems = _reset_to_base_branch(f"finished {state.get('slug') or state.get('branch') or 'task'}")
         if problems:
             body += ("\n\nNotes from the repo reset (I'll re-check before the "
@@ -4461,11 +4488,7 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
     _publish_progress(state, "completed")
     if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
         state["retire_thread_id"] = state["thread_id"]
-    for key in RESET_KEYS:
-        state.pop(key, None)
-    if config.TARGET_MODE == "workspace":
-        state.pop("workspace", None)
-        state.pop("workspace_review", None)
+    _clear_task(state)
     if state.get("original_workspace"):
         config.REPO_PATH = Path(state.pop("original_workspace"))
         state.pop("workspace_path", None)
@@ -4658,7 +4681,7 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     prev_state = state["state"]
     log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
     problems = (["Workspace files and child repository branches were preserved; no reset was performed"]
-                if config.TARGET_MODE == "workspace" else
+                if _mode().preserves_work else
                 _reset_to_base_branch(f"aborted {state.get('slug') or state.get('branch') or 'task'}"))
     # The task goes back to the pool, so its claim marker must go too — otherwise no
     # instance (including this one, if its state was wiped) would ever pick it again.
@@ -4681,11 +4704,7 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     _publish_progress(state, "aborted")
     if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
         state["retire_thread_id"] = state["thread_id"]
-    for key in RESET_KEYS:
-        state.pop(key, None)
-    if config.TARGET_MODE == "workspace":
-        state.pop("workspace", None)
-        state.pop("workspace_review", None)
+    _clear_task(state)
     state["state"] = "IDLE"
 
 
@@ -4746,7 +4765,7 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
     _release_credentials(state, drop=False)
     item = state.get("item", "")
     notes = (["Workspace changes remain saved locally; no blanket commit or reset was performed"]
-             if config.TARGET_MODE == "workspace" else _commit_pending_work(state))
+             if _mode().preserves_work else _commit_pending_work(state))
     try:
         if not task_source.hold_task(item, state.get("item_id")):
             notes.append("could not mark the item on hold in the backlog — another "
@@ -4755,9 +4774,7 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
         log.exception("hold marker failed")
         notes.append("could not update the backlog (see logs)")
     resume_state = state["state"]
-    saved = {k: state[k] for k in RESET_KEYS if k in state}
-    if config.TARGET_MODE == "workspace":
-        saved["workspace"] = copy.deepcopy(state["workspace"])
+    saved = {k: copy.deepcopy(state[k]) for k in (*RESET_KEYS, *_mode().held_keys) if k in state}
     saved["state"] = resume_state
     holds = [h for h in _load_holds() if h.get("thread_id") != state.get("thread_id")]
     holds.append({"thread_id": state.get("thread_id") or thread_id, "item": item,
@@ -4770,23 +4787,20 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
             "I'm moving on to the next backlog item. Reply 'continue' on THIS thread "
             "(optionally followed by instructions) and I'll pick this task back up "
              "first thing after my current work.")
-    if config.TARGET_MODE == "workspace":
+    if _mode().preserves_work:
         body = (f"Task on hold: {item}\nWorkspace files and child branches remain local; "
                 "no blanket commit or reset was performed.\n"
                 f"It was in state {resume_state}. Reply 'continue' on this thread to resume.")
     if notes:
         body += "\n\nNotes:\n- " + "\n- ".join(notes)
-    problems = [] if config.TARGET_MODE == "workspace" else _reset_to_base_branch(f"hold {state.get('slug') or state.get('branch') or 'task'}")
+    problems = [] if _mode().preserves_work else _reset_to_base_branch(f"hold {state.get('slug') or state.get('branch') or 'task'}")
     if problems:
         log.warning("reset after hold left notes: %s", problems)
         body += "\n\nRepo reset:\n- " + "\n- ".join(problems)
     email(state, "on hold", body)
     _publish_progress(state, "paused")
     with _status_command_lock:
-        for key in RESET_KEYS:
-            state.pop(key, None)
-        if config.TARGET_MODE == "workspace":
-            state.pop("workspace", None)
+        _clear_task(state, _mode().held_keys)
         state["state"] = "IDLE"
     log.info("task on hold: %r (resume at %s)", item[:80], resume_state)
 
@@ -4826,7 +4840,7 @@ def _resume_held_task(state: dict, hold: dict) -> None:
         _save_holds([h for h in _load_holds() if h is not hold and h.get("thread_id") != hold.get("thread_id")])
         return
     branch = hold.get("branch") or saved.get("branch")
-    if branch and config.TARGET_MODE != "workspace":
+    if branch and not _mode().preserves_work:
         git("checkout", branch)
     state.update(saved)
     state["state"] = resume_state
@@ -5458,9 +5472,10 @@ def _continue_reply_delivery(state: dict) -> None:
 
 
 def _handle_reply(state: dict, reply: str) -> None:
-    if config.TARGET_MODE == "workspace":
-        import workspace_runner
-        return workspace_runner.reply(state, reply)
+    _mode().reply(state, reply)
+
+
+def _repo_reply(state: dict, reply: str) -> None:
     if state["state"] == "WAIT_APPROVAL":
         do_approval_reply(state, reply)
     elif state["state"] == "WAIT_STUCK":
@@ -5494,7 +5509,7 @@ def _queue_conversation(state, message_id, text):
     store = phase_checkpoint.store()
     row = parallel_conversation.receive(store, state, config.REPO_PATH, message_id, text)
     fixed = parallel_conversation.deterministic(state, text)
-    if config.TARGET_MODE == "workspace" and state.get("state") == "WAIT_REPLY" and parse_btw(text) is None:
+    if _mode().answers_in_flow and state.get("state") == "WAIT_REPLY" and parse_btw(text) is None:
         # Route to the question handler, which classifies the actual reply before
         # acting. Do not make an unrelated lateral-delivery worker a dependency.
         fixed = {"intent": "answer", "resolves_pending_question": True, "inputs": []}
@@ -5511,7 +5526,7 @@ def _queue_conversation(state, message_id, text):
 
 def _dispatch_conversation(state):
     store = phase_checkpoint.store()
-    if config.TARGET_MODE == "workspace" and state.get("state") == "WAIT_REPLY":
+    if _mode().answers_in_flow and state.get("state") == "WAIT_REPLY":
         # Recover receipts already taken out of Slack's inbox by an older build.
         # Only unchanged active question/thread receipts qualify; /btw remains lateral.
         for pending in store.list("conversation", store.task_identity(state, config.REPO_PATH)):
@@ -5849,7 +5864,7 @@ def main() -> None:
             if not value:
                 raise SystemExit(f"{setting} must name a Jira workflow status")
     # .exists() not .is_dir(): in a git worktree .git is a file.
-    if config.TARGET_MODE != "workspace" and not (config.REPO_PATH / ".git").exists():
+    if _mode().requires_git and not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
             f"CODEBOT_REPO_PATH ({config.REPO_PATH}) is not a git checkout; set it in .env")
     try:
@@ -5920,8 +5935,7 @@ def _run_loop() -> None:
                           config.POLL_INTERVAL_SECONDS)
             time.sleep(config.POLL_INTERVAL_SECONDS)
             continue
-        if state.get("state") not in PHASES and state.get("state") not in WAITS \
-                and config.TARGET_MODE != "workspace":
+        if not _mode().knows(state.get("state")):
             unknown, state["state"] = state.get("state"), _work_preserving_phase(state)
             log.error("unknown state %r in %s; resuming at %s", unknown, config.STATE_PATH,
                       state["state"])
@@ -5991,18 +6005,7 @@ def _run_loop() -> None:
                 _announce_state(state)
                 _work_active.set()
                 try:
-                    if config.TARGET_MODE == "workspace":
-                        import workspace_runner
-                        workspace_runner.run_phase(state)
-                    elif state["state"] in ("WAIT_REVIEW", "WAIT_MERGE"):
-                        poll_pr(state)
-                    elif state["state"] == "WAIT_CLEAN" and config.COMM_CHANNEL == "slack":
-                        check_clean_checkout(state)
-                    elif state["state"] in WAITS:
-                        handle_wait(state)
-                    else:
-                        with performance.span(str(state.get("branch", "idle")), "phase", state["state"]):
-                            PHASES[state["state"]](state)
+                    _mode().run_phase(state)
                 finally:
                     _work_active.clear()
             # Success: clear this state's consecutive-failure counter.

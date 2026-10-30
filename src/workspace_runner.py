@@ -360,9 +360,35 @@ def implement(state):
         complete_implementation(state, result)
 
 
+# The workspace's mode policy (main._mode(), see main._Repo): what differs from repo mode.
+preserves_work = True  # abort, hold and finish never reset or blanket-commit child repositories
+requires_git = False
+routes_feedback = False  # replies go straight to the phase handler (reply below)
+answers_in_flow = True  # a WAIT_REPLY message answers the pending question
+held_keys = ("workspace",)
+task_keys = ("workspace", "workspace_review")
+
+
+def knows(name):
+    return True  # run_phase maps legacy and unknown states itself
+
+
 def remember_checks(state, output):
     import check_plan
     check_plan.remember(state, output)
+
+
+def apply_feedback(state, database, row):
+    """Pending feedback becomes the next fix wave (before approval: implementation input)."""
+    import main
+    state["pending_feedback"] = row["data"]["text"]
+    if state["state"] not in ("EXPLORING", "PROPOSING", "WAIT_APPROVAL"):
+        state["state"] = "APPLY_FEEDBACK"
+    else:
+        state["implementation_feedback"] = row["data"]["text"]
+    database.update("feedback", row, status="complete")
+    main.save_state(state)
+    return True
 
 
 def complete_implementation(state, result):
