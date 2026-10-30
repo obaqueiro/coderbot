@@ -197,7 +197,7 @@ class MergeGate(unittest.TestCase):
             self.assertEqual(state["reviewed_pr_snapshot"], "repaired")
             self.assertEqual(state["state"], "WAIT_MERGE")
             email, finish, merge = self.run_merge(state, threads=[], reply="merge")
-        merge.assert_called_once()
+        self.assertEqual(len(merge), 1)
         finish.assert_called_once()
 
     def test_changes_after_repair_handoff_still_block_merge(self):
@@ -205,7 +205,7 @@ class MergeGate(unittest.TestCase):
         state["reviewed_pr_snapshot"] = "repaired"
         with patch.object(main, "content_snapshot", return_value="changed-again"):
             email, finish, merge = self.run_merge(state, threads=[], reply="merge")
-        merge.assert_not_called()
+        self.assertEqual(merge, [])
         finish.assert_not_called()
         self.assertIn("content changed", email.call_args.args[2])
 
@@ -223,47 +223,47 @@ class MergeGate(unittest.TestCase):
                 "session_id": "sid", "pr_url": PR}
 
     def run_merge(self, state, threads, force=None, mergeable="MERGEABLE", reply="merge if review is clear"):
+        """(email, finish, merges): the `gh pr merge` calls the fake GitHub received."""
         v = {"action": "merge"}
         if force is not None:
             v["force"] = force
-        with patch.object(main.agent_runner, "run", return_value=verdict(**v)), \
+        with FakeGitHub(base=main.config.BASE_BRANCH) as github, \
+             patch.object(main.agent_runner, "run", return_value=verdict(**v)), \
              patch.object(main, "trail"), \
-             patch.object(main, "_pr_merge_state", return_value=("OPEN", mergeable)), \
              patch.object(main, "unresolved_review_threads", return_value=threads), \
              patch.object(main, "email") as email, \
-             patch.object(main, "_finish_task") as finish, \
-             patch.object(main.operations, "tool",
-                          return_value=subprocess.CompletedProcess([], 0, "", "")) as merge:
+             patch.object(main, "_finish_task") as finish:
+            github.add(42, state["branch"], mergeable=mergeable)
             main.do_merge_reply(state, reply)
-        return email, finish, merge
+        return email, finish, [c for c in github.calls if c[:2] == ("pr", "merge")]
 
     def test_failed_thread_query_blocks(self):
         email, finish, merge = self.run_merge(self.state(), threads=None)
-        merge.assert_not_called()
+        self.assertEqual(merge, [])
         finish.assert_not_called()
         self.assertIn("could not verify", email.call_args.args[1])
 
     def test_unresolved_threads_block(self):
         state = self.state()
         email, finish, merge = self.run_merge(state, threads=[human()])
-        merge.assert_not_called()
+        self.assertEqual(merge, [])
         self.assertIn("unresolved review comments", email.call_args.args[1])
         self.assertTrue(state["pr_thread_notified"])
 
     def test_non_boolean_force_does_not_bypass(self):
         email, finish, merge = self.run_merge(self.state(), threads=[human()], force="false")
-        merge.assert_not_called()
+        self.assertEqual(merge, [])
 
     def test_force_true_merges_despite_threads(self):
         email, finish, merge = self.run_merge(self.state(), threads=[human()], force=True)
-        merge.assert_called_once()
+        self.assertEqual(len(merge), 1)
         finish.assert_called_once()
 
     def test_plain_merge_preserves_review_gate_without_classifier(self):
         for reply in ("merge", "MERGE!", "fusiona"):
             with self.subTest(reply=reply):
                 email, finish, merge = self.run_merge(self.state(), threads=[human()], reply=reply)
-                merge.assert_not_called()
+                self.assertEqual(merge, [])
                 finish.assert_not_called()
                 email.assert_called_once()
 
@@ -271,20 +271,20 @@ class MergeGate(unittest.TestCase):
         for reply in ("merge anyway", "fusiona de todos modos"):
             with self.subTest(reply=reply):
                 email, finish, merge = self.run_merge(self.state(), threads=[human()], reply=reply)
-                merge.assert_called_once()
+                self.assertEqual(len(merge), 1)
                 finish.assert_called_once()
                 email.assert_not_called()
 
     def test_clean_pr_merges(self):
         email, finish, merge = self.run_merge(self.state(), threads=[])
-        merge.assert_called_once()
-        self.assertIn("--squash", merge.call_args.args[0])
+        self.assertEqual(len(merge), 1)
+        self.assertIn("--squash", merge[0])
         finish.assert_called_once()
 
     def test_conflicting_pr_enters_resolution(self):
         state = self.state()
         email, finish, merge = self.run_merge(state, threads=[], mergeable="CONFLICTING")
-        merge.assert_not_called()
+        self.assertEqual(merge, [])
         self.assertEqual(state["state"], "RESOLVE_CONFLICTS")
         self.assertTrue(state["stale_replies"])
         self.assertEqual(state["conflict_return"], "WAIT_MERGE")
@@ -292,58 +292,61 @@ class MergeGate(unittest.TestCase):
 
     def test_unknown_pr_state_blocks(self):
         state = self.state()
-        with patch.object(main.agent_runner, "run", return_value=verdict(action="merge")), \
-             patch.object(main, "_pr_merge_state", return_value=(None, None)), \
-             patch.object(main, "email") as email, \
-             patch.object(main.operations, "tool") as merge:
+        with FakeGitHub(base=main.config.BASE_BRANCH) as github, \
+             patch.object(main.agent_runner, "run", return_value=verdict(action="merge")), \
+             patch.object(main, "email") as email:  # no PR #42 on GitHub: the read fails
             main.do_merge_reply(state, "merge")
-        merge.assert_not_called()
+        self.assertEqual(github.calls[-1][:3], ("pr", "view", "42"))
+        self.assertIn("could not check", email.call_args.args[1])
         self.assertEqual(state["state"], "WAIT_MERGE")
 
 
 class Conflicts(unittest.TestCase):
+    def status(self, task, **pr):
+        """check_pr_status against a fake GitHub holding PR #42 (no PR when pr is None)."""
+        with FakeGitHub(base=main.config.BASE_BRANCH) as github, patch.object(main, "trail"), \
+             patch.object(main, "_finish_task") as finish, patch.object(main, "email") as email:
+            if pr.pop("exists", True):
+                github.add(42, "b", **pr)
+            changed = main.check_pr_status(task)
+        return changed, finish, email
+
     def test_check_routes_conflicting_pr(self):
-        state = {"state": "WAIT_REVIEW", "pr_url": PR}
-        self.assertTrue(main._check_pr_conflicts(state, "OPEN", "CONFLICTING"))
+        state = {"state": "WAIT_REVIEW", "pr_url": PR, "branch": "b"}
+        self.assertTrue(self.status(state, mergeable="CONFLICTING")[0])
         self.assertEqual(state["state"], "RESOLVE_CONFLICTS")
         self.assertEqual(state["conflict_return"], "WAIT_REVIEW")
         self.assertNotIn("stale_replies", state)
 
     def test_check_ignores_unknown_and_keeps_the_per_task_budget_when_mergeable(self):
         # A per-burst reset let conflict resolution run forever across bursts.
-        state = {"state": "WAIT_MERGE", "pr_url": PR, "conflict_rounds": 2}
-        self.assertFalse(main._check_pr_conflicts(state, None, None))
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "branch": "b", "conflict_rounds": 2}
+        self.assertFalse(self.status(state, exists=False)[0])  # the read failed
         self.assertEqual(state["conflict_rounds"], 2)
-        self.assertFalse(main._check_pr_conflicts(state, "OPEN", "MERGEABLE"))
-        self.assertEqual(state["conflict_rounds"], 2)
+        self.assertFalse(self.status(state, mergeable="MERGEABLE")[0])
+        self.assertFalse(self.status(state, mergeable="UNKNOWN")[0])
+        self.assertEqual((state["conflict_rounds"], state["state"]), (2, "WAIT_MERGE"))
 
     def test_status_finishes_task_when_merged_externally(self):
-        state = {"state": "WAIT_MERGE", "pr_url": PR, "item": "task"}
-        with patch.object(main, "_pr_merge_state", return_value=("MERGED", "UNKNOWN")), \
-             patch.object(main, "_finish_task") as finish, \
-             patch.object(main, "trail"):
-            self.assertTrue(main.check_pr_status(state))
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "branch": "b", "item": "task"}
+        changed, finish, _ = self.status(state, state="MERGED")
+        self.assertTrue(changed)
         finish.assert_called_once()
         self.assertFalse(finish.call_args.kwargs["reset_repo"])
         self.assertIn("merged on GitHub", finish.call_args.args[1])
 
-    def test_status_escalates_when_closed_without_merge(self):
-        state = {"state": "WAIT_REVIEW", "pr_url": PR, "item": "task"}
-        with patch.object(main, "_pr_merge_state", return_value=("CLOSED", "UNKNOWN")), \
-             patch.object(main, "email") as email:
-            self.assertTrue(main.check_pr_status(state))
+    def test_status_drops_a_pr_closed_without_merge_and_asks(self):
+        state = {"state": "WAIT_REVIEW", "pr_url": PR, "branch": "b", "item": "task"}
+        changed, _, email = self.status(state, state="CLOSED")
+        self.assertTrue(changed)
         self.assertEqual(state["state"], "WAIT_STUCK")
-        self.assertEqual(state["stuck_return"], "WAIT_REVIEW")
-        self.assertIn("closed", email.call_args.args[2])
+        self.assertEqual(state["stuck_return"], "OPEN_PR")  # 'retry' publishes a fresh PR
+        self.assertNotIn("pr_url", state)
+        self.assertIn("closed without merging", email.call_args.args[2])
 
-    def test_status_falls_through_to_conflicts(self):
-        state = {"state": "WAIT_MERGE", "pr_url": PR}
-        with patch.object(main, "_pr_merge_state", return_value=("OPEN", "CONFLICTING")):
-            self.assertTrue(main.check_pr_status(state))
-        self.assertEqual(state["state"], "RESOLVE_CONFLICTS")
-        state = {"state": "WAIT_MERGE", "pr_url": PR}
-        with patch.object(main, "_pr_merge_state", return_value=(None, None)):
-            self.assertFalse(main.check_pr_status(state))
+    def test_a_head_moved_by_someone_else_is_left_to_the_merge_gate(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "branch": "b", "delivered_sha": "c" * 40}
+        self.assertFalse(self.status(state)[0])  # the fake's head is "a" * 40
         self.assertEqual(state["state"], "WAIT_MERGE")
 
     def test_cap_escalates_to_stuck(self):
@@ -462,8 +465,9 @@ class MergeWait(unittest.TestCase):
     def test_failed_query_only_checks_inbox(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_thread_round": 1}
         with patch.object(main, "unresolved_review_threads", return_value=None), \
+             patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
-            main.handle_merge_wait(state)
+            main.poll_pr(state)
         wait.assert_called_once()
         self.assertEqual(state["state"], "WAIT_MERGE")
         self.assertEqual(state["pr_thread_round"], 1)
@@ -471,8 +475,9 @@ class MergeWait(unittest.TestCase):
     def test_threads_are_addressed_proactively(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR}
         with patch.object(main, "unresolved_review_threads", return_value=[human()]), \
+             patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
-            main.handle_merge_wait(state)
+            main.poll_pr(state)
             wait.assert_called_once()
         self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
         self.assertEqual(state["pr_threads"][0]["id"], "H1")
@@ -480,16 +485,27 @@ class MergeWait(unittest.TestCase):
     def test_answered_thread_waits_for_the_reviewer(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_threads_seen": {"H1": 3}}
         with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
+             patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
-            main.handle_merge_wait(state)
+            main.poll_pr(state)
         wait.assert_called_once()
         self.assertEqual(state["state"], "WAIT_MERGE")
+
+    def test_the_pr_is_polled_once_per_interval_the_inbox_every_tick(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR}
+        with patch.object(main, "check_pr_status", return_value=False) as status, \
+             patch.object(main, "unresolved_review_threads", return_value=[]), \
+             patch.object(main, "handle_wait") as wait:
+            main.poll_pr(state)
+            main.poll_pr(state)
+        self.assertEqual((wait.call_count, status.call_count), (2, 1))
 
     def test_answered_thread_reenters_on_new_reviewer_comment(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_threads_seen": {"H1": 2}}
         with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
+             patch.object(main, "check_pr_status", return_value=False), \
              patch.object(main, "handle_wait") as wait:
-            main.handle_merge_wait(state)
+            main.poll_pr(state)
             wait.assert_called_once()
         self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
 

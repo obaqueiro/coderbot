@@ -338,27 +338,46 @@ def green(value):
     return all((c.get("conclusion") or c.get("state") or "").upper() in GREEN for c in rollup)
 
 
-def precheck(target, records, order):
-    """Every PR still to merge is open, mergeable, green and at its verified head."""
+def due(clock):
+    """True at most once per poll interval; `clock` (the workspace data or a repo-mode
+    record) keeps the time, so a restart does not poll GitHub again at once."""
+    if time.time() < clock.get("pr_polled_at", 0) + config.POLL_INTERVAL_SECONDS:
+        return False
+    clock["pr_polled_at"] = time.time()
+    return True
+
+
+def standing(ops, record, fields=PR_FIELDS):
+    """The pinned PR read once: (verdict, value). MERGED or CLOSED; MOVED when its head is
+    not the delivered one; CONFLICTING; else OPEN. The record keeps what was seen."""
+    value = pinned(ops, record, fields)
+    record.update(pr_number=value["number"], merge={"status": value["state"], "mergeable": value.get("mergeable")})
+    if value["state"] in ("MERGED", "CLOSED"):
+        return value["state"], value
+    if record.get("delivered_sha") and value.get("headRefOid") != record["delivered_sha"]:
+        return "MOVED", value
+    return ("CONFLICTING" if value.get("mergeable") == "CONFLICTING" else "OPEN"), value
+
+
+def precheck(target, records, order, *, gates=True):
+    """What stops each PR still to merge: [(name, verdict, problem, PR)]. Every one must be
+    open and at its verified head; `gates` (workspace mode) also requires it mergeable,
+    green and ready. Repo mode passes gates=False: an explicit user merge has never been
+    held back by CI or draft status, only by conflicts, review threads and a moved head."""
     problems = []
     for name in order:
         record = records[name]
         if record.get("merge", {}).get("status") == "MERGED":
             continue
-        value = target.repo(name).pr(pr_number(record), PR_FIELDS + ",statusCheckRollup")
-        if value.get("state") == "MERGED":  # merged before a crash could record it
-            record["merge"] = {"status": "MERGED"}
-            continue
-        if value.get("state") != "OPEN":
-            problems.append(f"{name}: PR is {value.get('state')}")
-        elif value.get("headRefOid") != record.get("delivered_sha"):
-            problems.append(f"{name}: PR head moved since verification")
-        elif value.get("mergeable") != "MERGEABLE":
-            problems.append(f"{name}: not mergeable ({value.get('mergeable')})")
-        elif not green(value):
-            problems.append(f"{name}: checks are not green")
-        elif value.get("isDraft"):
-            problems.append(f"{name}: PR is still a draft")
+        verdict, value = standing(target.repo(name), record, PR_FIELDS + ",statusCheckRollup")
+        problem = {"CLOSED": f"PR is {value['state']}", "MOVED": "PR head moved since verification",
+                   "CONFLICTING": "not mergeable (CONFLICTING)"}.get(verdict)
+        if not problem and gates and verdict == "OPEN":
+            problem = (f"not mergeable ({value.get('mergeable')})" if value.get("mergeable") != "MERGEABLE"
+                       else "checks are not green" if not green(value)
+                       else "PR is still a draft" if value.get("isDraft") else None)
+        if problem:
+            problems.append((name, verdict, problem, value))
     return problems
 
 
@@ -648,9 +667,11 @@ def moved(state, name, ops, record, value):
                           f"({local}). Reconcile the branch by hand, then reply 'retry'.")
 
 
-def pinned(ops, record):
+def pinned(ops, record, fields=PR_FIELDS):
     """The record's PR, refused unless it is still this repository's branch PR."""
-    value = ops.pr(pr_number(record))
+    if not pr_number(record):
+        raise errors.AgentFault(f"{ops.name}: no pull request is pinned ({record.get('pr_url')!r})", code="pr_url")
+    value = ops.pr(pr_number(record), fields)
     if not ops.matches(record, value):
         raise errors.Fatal(f"{ops.name}: {record.get('pr_url')} no longer matches its repository and branch",
                            code="pr_mismatch")
@@ -764,9 +785,8 @@ def poll_prs(ws, state):
     """One throttled poll per interval covering every repository's PR."""
     import main
     data = state["workspace"]
-    if time.time() < data.get("pr_polled_at", 0) + config.POLL_INTERVAL_SECONDS:
+    if not due(data):
         return main.handle_wait(state)
-    data["pr_polled_at"] = time.time()
     context = ws.target()
     ops = Target.of(context)
     records = data["repositories"]
@@ -776,18 +796,15 @@ def poll_prs(ws, state):
         if not number:
             continue
         repo = ops.repo(name)
-        value = repo.pr(number)
-        if not repo.matches(record, value):
-            raise errors.Fatal(f"{name}: {record.get('pr_url')} no longer matches its repository and branch", code="pr_mismatch")
-        record.update(pr_number=number, merge={"status": value["state"], "mergeable": value.get("mergeable")})
-        if value["state"] == "CLOSED":
+        verdict, value = standing(repo, record)
+        if verdict == "CLOSED":
             return closed(state, name, record)
-        if value["state"] == "MERGED":
+        if verdict == "MERGED":
             continue
         pending = True
-        if value.get("headRefOid") != record.get("delivered_sha"):
+        if verdict == "MOVED":
             return moved(state, name, repo, record, value)
-        if value.get("mergeable") == "CONFLICTING":
+        if verdict == "CONFLICTING":
             conflicts.append(name)
             continue
         seen = record.setdefault("review", {}).get("seen", {})
@@ -841,7 +858,7 @@ def merge_all(ws, state, force=False):
     ops = Target.of(context)
     records = state["workspace"]["repositories"]
     order = merge_order(records, context.manifest.merge_order)
-    problems = precheck(ops, records, order)
+    problems = [f"{name}: {problem}" for name, _, problem, _ in precheck(ops, records, order)]
     for name in order:
         if records[name].get("merge", {}).get("status") != "MERGED":
             threads = review_threads(ops.repo(name), pr_number(records[name]))

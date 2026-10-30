@@ -253,7 +253,7 @@ class FeedbackRecoveryTests(unittest.TestCase):
         state = {"item": "task", "state": "WAIT_MERGE", "replan": {"feedback": "selector"},
                  "pr_url": "https://example/pr/1"}
         with patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output='{"action":"merge","force":true}')), \
-             patch.object(main, "email") as notify, patch.object(main, "_pr_merge_state") as merge:
+             patch.object(main, "email") as notify, patch.object(main.lifecycle, "precheck") as merge:
             main.do_merge_reply(state, "merge anyway")
         merge.assert_not_called()
         self.assertIn("requires approval", notify.call_args.args[2])

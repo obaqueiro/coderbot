@@ -273,7 +273,7 @@ class ParallelFlowTests(unittest.TestCase):
         lateral.register_inputs(self.store, row, self.repo)
         with patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output='{"action":"merge"}')), \
              patch.object(main, "_receive_feedback", return_value=False), patch.object(main, "email"), \
-             patch.object(main, "_pr_merge_state") as github:
+             patch.object(main.lifecycle, "precheck") as github:
             main.do_merge_reply(self.state, "merge")
         github.assert_not_called()
 

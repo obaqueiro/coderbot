@@ -76,48 +76,6 @@
    "number=1"
   ],
   [
-   "api",
-   "graphql",
-   "-f",
-   "query=<reviewThreads>",
-   "-f",
-   "owner=acme",
-   "-f",
-   "repo=walk",
-   "-F",
-   "number=1"
-  ],
-  [
-   "pr",
-   "view",
-   "1",
-   "--json",
-   "state,mergeable",
-   "--repo",
-   "github.com/acme/walk"
-  ],
-  [
-   "pr",
-   "view",
-   "1",
-   "--json",
-   "state,mergeable",
-   "--repo",
-   "github.com/acme/walk"
-  ],
-  [
-   "api",
-   "graphql",
-   "-f",
-   "query=<reviewThreads>",
-   "-f",
-   "owner=acme",
-   "-f",
-   "repo=walk",
-   "-F",
-   "number=1"
-  ],
-  [
    "pr",
    "view",
    "1",
@@ -125,6 +83,39 @@
    "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository",
    "--repo",
    "github.com/acme/walk"
+  ],
+  [
+   "api",
+   "graphql",
+   "-f",
+   "query=<reviewThreads>",
+   "-f",
+   "owner=acme",
+   "-f",
+   "repo=walk",
+   "-F",
+   "number=1"
+  ],
+  [
+   "pr",
+   "view",
+   "1",
+   "--json",
+   "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository,statusCheckRollup",
+   "--repo",
+   "github.com/acme/walk"
+  ],
+  [
+   "api",
+   "graphql",
+   "-f",
+   "query=<reviewThreads>",
+   "-f",
+   "owner=acme",
+   "-f",
+   "repo=walk",
+   "-F",
+   "number=1"
   ],
   [
    "pr",

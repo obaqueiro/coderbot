@@ -2945,18 +2945,6 @@ def _finish_address_review(state: dict, result, head_before: str | None) -> None
 
 # ---------------------------------------------------------------- base-branch conflicts
 
-def _pr_merge_state(pr_url: str) -> tuple[str | None, str | None]:
-    """(state, mergeable) of the PR — e.g. ("OPEN", "CONFLICTING") — or (None, None)
-    when the query fails. Callers treat that as "unknown", never as "clean"."""
-    try:
-        ops, number = _pr_ref(pr_url)
-        info = ops.pr(number, "state,mergeable")
-    except (errors.CoderbotError, ValueError) as error:
-        log.warning("gh pr view failed checking mergeability: %s", str(error)[-300:])
-        return None, None
-    return info.get("state"), info.get("mergeable")
-
-
 def _enter_conflict_resolution(state: dict) -> bool:
     """Route the task into RESOLVE_CONFLICTS, bounded by CONFLICT_MAX_ROUNDS: the base
     branch can keep moving while other PRs merge, so a resolution that never converges
@@ -2985,43 +2973,47 @@ def _enter_conflict_resolution(state: dict) -> bool:
 
 
 def check_pr_status(state: dict) -> bool:
-    """One PR query per reply-less waiting tick (WAIT_REVIEW / WAIT_MERGE). Handles the
+    """The PR's standing, read once on the shared seam (lifecycle.standing). Handles the
     PR having been dealt with outside codebot — MERGED by someone on GitHub finishes the
-    task exactly as codebot's own merge would; CLOSED without merging escalates to the
-    user — and otherwise falls through to the conflict check. Returns True when the
-    state changed. Query failures change nothing — the next tick re-checks."""
-    if not state.get("pr_url"):
+    task exactly as codebot's own merge would; CLOSED without merging is dropped and the
+    user asked ('retry' opens a fresh PR, or adopts the PR if they reopened it) — and a
+    CONFLICTING PR starts a bounded resolution. Repo-mode policy: a head moved by
+    someone else is taken in only at merge time (_pr_head_moved), not followed like a
+    workspace PR. Returns True when the state changed; a failed read changes nothing."""
+    target, records = _repo_target(state)
+    try:
+        verdict, value = lifecycle.standing(target.repos[0], records["."])
+    except (errors.CoderbotError, ValueError) as error:
+        log.warning("could not read the PR: %s", str(error)[-300:])
         return False
-    pr_state, mergeable = _pr_merge_state(state["pr_url"])
-    if pr_state == "MERGED":
-        log.info("PR %s was merged on GitHub outside codebot; finishing the task",
-                 state["pr_url"])
+    persistence.mirror_record(state)
+    if verdict == "MERGED":
+        log.info("PR %s was merged on GitHub outside codebot; finishing the task", state["pr_url"])
         trail(state, f"PR merged on GitHub: {state['pr_url']}")
-        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False,
-                     merged=True)
+        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False, merged=True)
         return True
-    if pr_state == "CLOSED":
+    if verdict == "CLOSED":
         log.warning("PR %s was closed without merging; asking the user", state["pr_url"])
-        _enter_stuck(state, state["state"],
-                     f"The pull request was closed on GitHub without being merged.\nPR: "
-                     f"{state['pr_url']}\n\nIf the work landed some other way, reply "
-                     "'complete'; to drop the task reply 'abort'; to keep working on it, "
-                     "reopen the PR and reply 'retry'.")
+        lifecycle.closed(state, ".", records["."], resume="OPEN_PR", save=lambda: _save_record(state),
+                         ask=_enter_stuck)
         return True
-    return _check_pr_conflicts(state, pr_state, mergeable)
+    if value.get("mergeable") == "CONFLICTING":  # the conflict budget is per task, not per burst
+        _enter_conflict_resolution(state)
+        return True
+    return False
 
 
-def _check_pr_conflicts(state: dict, pr_state, mergeable) -> bool:
-    """While waiting with an open PR, watch for the base branch having moved under it
-    (another PR merged). A CONFLICTING PR is routed to RESOLVE_CONFLICTS; returns True
-    when the state changed. Query failures (and GitHub's transient "UNKNOWN" while it
-    recomputes mergeability) change nothing — the next tick re-checks."""
-    if pr_state != "OPEN":
-        return False  # merged/closed/unknown: nothing to resolve here
-    if mergeable != "CONFLICTING":
-        return False  # the conflict budget is per task, not per burst
-    _enter_conflict_resolution(state)
-    return True
+def poll_pr(state: dict) -> None:
+    """Repo mode's PR waits (WAIT_REVIEW / WAIT_MERGE): the inbox every WAIT_MERGE tick,
+    the PR at most once per poll interval, as in workspace mode — its standing first,
+    then the Code Review wait or the PR's review threads."""
+    if state["state"] == "WAIT_MERGE":
+        handle_wait(state)
+        if state["state"] != "WAIT_MERGE":
+            return
+    if not state.get("pr_url") or not lifecycle.due(persistence.repository_record(state)) or check_pr_status(state):
+        return
+    (handle_review_wait if state["state"] == "WAIT_REVIEW" else handle_merge_wait)(state)
 
 
 def do_resolve_conflicts(state: dict) -> None:
@@ -3227,15 +3219,18 @@ def do_merge_reply(state: dict, reply: str) -> None:
         email(state, "merge blocked", "The PR content changed since your review. Review the updated PR before merging.")
         state.pop("reviewed_pr_snapshot", None)
         return
-    pr_state, mergeable = _pr_merge_state(state["pr_url"])
-    log.info("PR state=%s mergeable=%s before merge", pr_state, mergeable)
-    if pr_state is None:
+    target, records = _repo_target(state)
+    try:  # the shared pre-merge read, without the workspace's CI-green and ready gates
+        blocked = {verdict: pr for _, verdict, _, pr in lifecycle.precheck(target, records, ["."], gates=False)}
+    except (errors.CoderbotError, ValueError) as error:
+        log.warning("could not check the PR before merging: %s", error)
         email(state, "merge blocked — could not check the PR",
               f"I did not merge: I couldn't query the PR's state just now.\nPR: "
               f"{state['pr_url']}\n\nReply 'merge' to retry.")
         return  # stay in WAIT_MERGE
-    if pr_state != "MERGED":
-        if mergeable == "CONFLICTING":
+    persistence.mirror_record(state)
+    if records["."].get("merge", {}).get("status") != "MERGED":
+        if any(pr.get("mergeable") == "CONFLICTING" for pr in blocked.values()):
             # The base branch moved ahead and the branch no longer merges cleanly.
             # Resolve the conflicts in the working session; genuinely ambiguous
             # resolutions come back as an emailed question. The resolution push then
@@ -3252,6 +3247,10 @@ def do_merge_reply(state: dict, reply: str) -> None:
                       "different reasonable resolutions I'll send you the alternatives; "
                       "otherwise the automated review re-runs on the resolved branch and "
                       "I'll message you when it's clean — reply 'merge' then.")
+            return
+        if "CLOSED" in blocked:
+            lifecycle.closed(state, ".", records["."], resume="OPEN_PR", save=lambda: _save_record(state),
+                             ask=_enter_stuck)
             return
         # Review-thread gate: inline review threads may appear at any time, including
         # after the "PR ready" email (handle_merge_wait addresses them proactively, but
@@ -3282,11 +3281,10 @@ def do_merge_reply(state: dict, reply: str) -> None:
         # Merge only the head the user was shown. delivered_sha is recorded on every
         # push; legacy states without it merge exactly as before.
         expected = state.get("delivered_sha")
-        if expected and _pr_head_moved(state, expected, _remote_pr_head(state)):
+        if "MOVED" in blocked and _pr_head_moved(state, expected, blocked["MOVED"]["headRefOid"]):
             return  # stay in WAIT_MERGE
         log.info("merging PR %s (squash%s)", state["pr_url"],
                  f", head {expected[:12]}" if expected else "")
-        target, records = _repo_target(state)
         report = lifecycle.merge(target, records, ["."], lambda: _save_record(state))
         if report["failed"] and expected and _pr_head_moved(state, expected, _remote_pr_head(state)):
             return  # GitHub refused because the head moved; stay in WAIT_MERGE
@@ -3926,12 +3924,9 @@ def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
 
 
 def handle_merge_wait(state: dict) -> None:
-    """Every WAIT_MERGE poll: check the open PR for unresolved review threads (e.g. a
-    human reviewer's) and address them, so live feedback gets fixed before the user
-    even says 'merge'. Falls through to the normal inbox check either way."""
-    handle_wait(state)
-    if state["state"] != "WAIT_MERGE":
-        return
+    """A WAIT_MERGE poll: check the open PR for unresolved review threads (e.g. a human
+    reviewer's) and address them, so live feedback gets fixed before the user even says
+    'merge'."""
     threads = unresolved_review_threads(state["pr_url"])
     if threads is not None:
         # A human thread the bot already answered (without a code change) is left open
@@ -5999,14 +5994,8 @@ def _run_loop() -> None:
                     if config.TARGET_MODE == "workspace":
                         import workspace_runner
                         workspace_runner.run_phase(state)
-                    elif state["state"] == "WAIT_REVIEW" and check_pr_status(state):
-                        pass  # PR merged/closed or conflicts; dispatch next tick
-                    elif state["state"] == "WAIT_REVIEW":
-                        handle_review_wait(state)
-                    elif state["state"] == "WAIT_MERGE":
-                        handle_merge_wait(state)
-                        if state["state"] == "WAIT_MERGE":
-                            check_pr_status(state)
+                    elif state["state"] in ("WAIT_REVIEW", "WAIT_MERGE"):
+                        poll_pr(state)
                     elif state["state"] == "WAIT_CLEAN" and config.COMM_CHANNEL == "slack":
                         check_clean_checkout(state)
                     elif state["state"] in WAITS:

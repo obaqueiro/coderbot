@@ -130,7 +130,7 @@ class PullRequestURLs(unittest.TestCase):
         with patch.object(main.operations, "tool") as tool:
             self.assertIsNone(main.code_review_check("https://example.com/nope"))
             self.assertIsNone(main.unresolved_review_threads("https://example.com/nope"))
-            self.assertEqual(main._pr_merge_state("garbage"), (None, None))
+            self.assertFalse(main.check_pr_status({"state": "WAIT_MERGE", "pr_url": "garbage", "branch": "b"}))
             self.assertEqual(main.review_summary({"pr_url": "garbage"}), "")
             self.assertEqual(main._resolve_review_threads({"pr_url": "garbage", "review_threads": [{"id": "T"}]},
                                                           "RESOLVE: T fixed"), 0)

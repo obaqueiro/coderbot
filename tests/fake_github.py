@@ -43,6 +43,8 @@ class FakeGitHub:
             number = max(self.prs, default=41) + 1
             self.add(number, option("--head"), draft="--draft" in args, body=option("--body"), title=option("--title"))
             return self.url(number)
+        if int(args[2]) not in self.prs:
+            raise errors.AgentFault(f"no pull request found for #{args[2]}")
         pr = self.prs[int(args[2])]
         if args[:2] == ("pr", "view"):
             url = self.canonical.get(int(args[2])) or (ops.url(args[2]) if ops.remote else self.url(args[2]))
