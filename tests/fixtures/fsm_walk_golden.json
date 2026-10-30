@@ -101,7 +101,7 @@
    "view",
    "1",
    "--json",
-   "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository,statusCheckRollup",
+   "number,url,state,isDraft,mergeable,headRefName,baseRefName,headRefOid,isCrossRepository",
    "--repo",
    "github.com/acme/walk"
   ],

@@ -163,7 +163,11 @@ PHRASES = {
     " resolution attempt(s).\nPR: ": " intento(s) de resolución.\nPR: ",
     "\n\nPlease resolve the conflicts on the branch yourself (merge ": "\n\nResuelve tú los conflictos en la rama (haz merge de ",
     " in and push), then reply 'retry'.": " y sube los cambios), y luego responde 'retry'.",
-    "The pull request was closed on GitHub without being merged.\nPR: ": "El pull request se cerró en GitHub sin merge.\nPR: ",
+    "I can no longer follow the PR for this task: ": "Ya no puedo seguir el PR de esta tarea: ",
+    "\n\nIf its base was retargeted, point it back at ": "\n\nSi se cambió su rama base, vuelve a apuntarlo a ",
+    " (or correct CODEBOT_BASE_BRANCH) and reply 'retry'; reply 'complete' if the work landed another way, or 'abort'.":
+        " (o corrige CODEBOT_BASE_BRANCH) y responde 'retry'; responde 'complete' si el trabajo se integró de otra forma, o 'abort'.",
+    "The pull request was closed on GitHub without being merged.\nPR: ":"El pull request se cerró en GitHub sin merge.\nPR: ",
     "\n\nIf the work landed some other way, reply 'complete'; to drop the task reply 'abort'; to keep working on it, reopen the PR and reply 'retry'.":
         "\n\nSi el trabajo se integró de otra forma, responde 'complete'; para descartar la tarea responde 'abort'; para seguir trabajando en ella, reabre el PR y responde 'retry'.",
     "I could not tell whether your reply asks for changes, an abort, a merge, or to mark the task complete:\n\n":

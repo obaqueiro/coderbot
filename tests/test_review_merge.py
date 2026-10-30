@@ -344,6 +344,23 @@ class Conflicts(unittest.TestCase):
         self.assertNotIn("pr_url", state)
         self.assertIn("closed without merging", email.call_args.args[2])
 
+    def test_a_retargeted_pr_is_reported_not_polled_in_silence(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "branch": "b", "item": "task"}
+        changed, _, email = self.status(state, base="release")  # its base no longer matches
+        self.assertTrue(changed)
+        self.assertEqual((state["state"], state["stuck_return"]), ("WAIT_STUCK", "WAIT_MERGE"))
+        self.assertIn("no longer follow the PR", email.call_args.args[2])
+        self.assertIn("no longer matches", email.call_args.args[2])
+
+    def test_a_wait_without_a_pr_goes_back_to_publication(self):
+        for phase in ("WAIT_REVIEW", "WAIT_MERGE"):
+            with self.subTest(phase=phase), patch.object(main, "handle_wait"), \
+                 patch.object(main, "check_pr_status") as status:
+                state = {"state": phase, "item": "task", "branch": "b", "archive_path": "x"}  # legacy: no pr_url
+                main.poll_pr(state)
+            self.assertEqual(state["state"], "OPEN_PR")
+            status.assert_not_called()
+
     def test_a_head_moved_by_someone_else_is_left_to_the_merge_gate(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "branch": "b", "delivered_sha": "c" * 40}
         self.assertFalse(self.status(state)[0])  # the fake's head is "a" * 40

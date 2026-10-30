@@ -369,7 +369,8 @@ def precheck(target, records, order, *, gates=True):
         record = records[name]
         if record.get("merge", {}).get("status") == "MERGED":
             continue
-        verdict, value = standing(target.repo(name), record, PR_FIELDS + ",statusCheckRollup")
+        # The heavy check rollup is read only for the gate that needs it.
+        verdict, value = standing(target.repo(name), record, PR_FIELDS + (",statusCheckRollup" if gates else ""))
         problem = {"CLOSED": f"PR is {value['state']}", "MOVED": "PR head moved since verification",
                    "CONFLICTING": "not mergeable (CONFLICTING)"}.get(verdict)
         if not problem and gates and verdict == "OPEN":

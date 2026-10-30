@@ -93,8 +93,21 @@ class Pinning(unittest.TestCase):
         with github, patch.object(main.lifecycle, "green", return_value=False):
             target, records = main._repo_target(self.state())
             self.assertEqual(main.lifecycle.precheck(target, records, ["."], gates=False), [])
+            self.assertNotIn("statusCheckRollup", github.calls[-1][4])  # the heavy field is not read
             self.assertEqual([p[1:3] for p in main.lifecycle.precheck(target, records, ["."])],
                              [("OPEN", "not mergeable (UNKNOWN)")])  # the workspace gate
+            self.assertIn("statusCheckRollup", github.calls[-1][4])
+
+    def test_a_retargeted_pr_tells_the_user_why_it_cannot_merge(self):
+        github = FakeGitHub(base=main.config.BASE_BRANCH)
+        github.add(42, "b", base="release")
+        state = self.state(delivered_sha=SHA)
+        with github, patch.object(main, "_conversation_delivery_blocked", return_value=False), \
+             patch.object(main, "content_snapshot", return_value="x"), patch.object(main, "email") as email:
+            main.do_merge_reply(state, "merge")
+        self.assertFalse([c for c in github.calls if c[:2] == ("pr", "merge")])
+        self.assertEqual((state["state"], state["stuck_return"]), ("WAIT_STUCK", "WAIT_MERGE"))
+        self.assertIn("no longer follow the PR", email.call_args.args[2])
 
 
 if __name__ == "__main__":

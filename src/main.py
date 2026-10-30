@@ -2978,7 +2978,10 @@ def check_pr_status(state: dict) -> bool:
     target, records = _repo_target(state)
     try:
         verdict, value = lifecycle.standing(target.repos[0], records["."])
-    except (errors.CoderbotError, ValueError) as error:
+    except errors.Fatal as error:
+        _pr_unfollowable(state, error)
+        return True
+    except (errors.CoderbotError, ValueError) as error:  # transient: the next poll re-reads
         log.warning("could not read the PR: %s", str(error)[-300:])
         return False
     persistence.mirror_record(state)
@@ -2998,15 +3001,33 @@ def check_pr_status(state: dict) -> bool:
     return False
 
 
+def _pr_unfollowable(state: dict, error) -> None:
+    """A PR read that retrying cannot fix (it no longer matches this task's branch, base
+    or repository, e.g. its base was retargeted): tell the user and wait for them, instead
+    of polling or refusing every merge in silence."""
+    log.warning("PR %s cannot be followed: %s", state.get("pr_url"), error)
+    _enter_stuck(state, state["state"],
+                 f"I can no longer follow the PR for this task: {str(error)[:500]}\nPR: "
+                 f"{state.get('pr_url', '?')}\n\nIf its base was retargeted, point it back at "
+                 f"{config.BASE_BRANCH} (or correct CODEBOT_BASE_BRANCH) and reply 'retry'; reply "
+                 "'complete' if the work landed another way, or 'abort'.")
+
+
 def poll_pr(state: dict) -> None:
     """Repo mode's PR waits (WAIT_REVIEW / WAIT_MERGE): the inbox every WAIT_MERGE tick,
     the PR at most once per poll interval, as in workspace mode — its standing first,
-    then the Code Review wait or the PR's review threads."""
+    then the Code Review wait or the PR's review threads. A wait with no PR to follow (an
+    old state) goes back to publication, like a PR that was closed."""
     if state["state"] == "WAIT_MERGE":
         handle_wait(state)
         if state["state"] != "WAIT_MERGE":
             return
-    if not state.get("pr_url") or not lifecycle.due(persistence.repository_record(state)) or check_pr_status(state):
+    if not lifecycle.parse_pr_url(state.get("pr_url")):
+        log.warning("%s has no PR to follow (%r); publishing it again", state["state"], state.get("pr_url"))
+        state.pop("pr_url", None)
+        state["state"] = "OPEN_PR"
+        return
+    if not lifecycle.due(persistence.repository_record(state)) or check_pr_status(state):
         return
     (handle_review_wait if state["state"] == "WAIT_REVIEW" else handle_merge_wait)(state)
 
@@ -3208,6 +3229,9 @@ def do_merge_reply(state: dict, reply: str) -> None:
     target, records = _repo_target(state)
     try:  # the shared pre-merge read, without the workspace's CI-green and ready gates
         blocked = {verdict: pr for _, verdict, _, pr in lifecycle.precheck(target, records, ["."], gates=False)}
+    except errors.Fatal as error:
+        _pr_unfollowable(state, error)
+        return
     except (errors.CoderbotError, ValueError) as error:
         log.warning("could not check the PR before merging: %s", error)
         email(state, "merge blocked — could not check the PR",
